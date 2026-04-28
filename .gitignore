@@ -1,0 +1,33 @@
+node_modules
+.next
+.env
+.env*.local
+dist
+*.log
+.DS_Store
+/coverage
+/playwright-report
+/test-results
+
+# Operational data: driver/vehicle import staging, audit exports, GeoLite DB.
+# This whole directory contains PII (licence photos, driver CSVs) and licensed
+# data (MaxMind GeoLite2). It must never be checked in. Recreate locally as
+# needed via scripts/import-* and scripts/download-geolite.sh.
+/data/
+
+# Local scratch space (eToll exports, audit dumps, ad-hoc one-offs).
+/tmp/
+/.tmp/
+
+# User-uploaded blobs that mirror S3/MinIO in production. These contain PII
+# (licence photos, signatures, consent records, driver documents) and are
+# regenerated locally via seed/upload flows. NEVER commit these.
+/public/uploads/
+
+# Build artefacts
+/tsconfig.tsbuildinfo
+
+# Claude Code hook runtime artefacts
+/.claude/hooks/.typecheck.stamp
+/.claude/hooks/.log
+/.claude/transcripts/

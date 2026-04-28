@@ -1,0 +1,4239 @@
+// Scootering — Prisma schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum UserRole {
+  CUSTOMER
+  STAFF
+  MANAGER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum RiskRating {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum LoyaltyTier {
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+// Identity path declared by a customer during checkout. AU_LICENCE means
+// an Australian driver's licence suffices (licenceState is populated,
+// licenceCountry is null). INTERNATIONAL means the customer is presenting
+// an International Driver's Permit — licenceCountry is populated and a
+// passport is also mandatory.
+enum LicenceType {
+  AU_LICENCE
+  INTERNATIONAL
+}
+
+enum LoyaltyLedgerDirection {
+  EARN
+  BURN
+  EXPIRY
+  ADJUSTMENT
+}
+
+enum VehicleStatus {
+  AVAILABLE
+  PENDING
+  RENTED
+  RESERVED
+  IN_MAINTENANCE
+  ACCIDENT_REPAIRS
+  IN_TRANSIT
+  SOLD
+  END_OF_LIFE
+  STOLEN
+  WRITTEN_OFF
+}
+
+enum VehicleCondition {
+  EXCELLENT
+  GOOD
+  FAIR
+  POOR
+}
+
+enum VehicleDocumentType {
+  REGO_CERT
+  INSURANCE
+  CTP
+  WARRANTY
+  PURCHASE_RECEIPT
+  INFRINGEMENT
+  REPAIR_BILL
+  PARTS_PURCHASE
+  SERVICE_FEE
+  TYRE_REPLACEMENT
+  OTHER
+}
+
+enum CustomerDocumentType {
+  PASSPORT
+  PASSPORT_STYLE_DL
+  LICENCE_FRONT
+  LICENCE_BACK
+  VISA
+  INTL_DRIVING_PERMIT
+  PROOF_OF_ADDRESS
+  CONSENT_TERMS
+  CONSENT_PRIVACY
+  CONSENT_CANCELLATION
+  CONSENT_MARKETING
+  CUSTOMER_PHOTO
+  OTHER
+}
+
+enum PricingRuleType {
+  DAILY
+  WEEKLY
+  MONTHLY
+  HOURLY
+  CUSTOM
+}
+
+enum AddonType {
+  HELMET
+  LOCK
+  PHONE_MOUNT
+  GPS
+  PANNIERS
+  RAIN_GEAR
+  EXTRA_INSURANCE
+  ROADSIDE_ASSIST
+  DELIVERY
+  PICKUP
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+  FREE_ADDON
+  FREE_DAY
+}
+
+enum BookingStatus {
+  QUOTE
+  PENDING_PAYMENT
+  CONFIRMED
+  CHECKED_OUT
+  ACTIVE
+  OVERDUE
+  RETURNED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+  DISPUTED
+}
+
+enum BookingSource {
+  WEBSITE
+  WALK_IN
+  PHONE
+  AGENT
+  API
+}
+
+enum PaymentType {
+  BOOKING_PAYMENT
+  BOND_HOLD
+  BOND_CAPTURE
+  BOND_RELEASE
+  REFUND
+  DAMAGE_CHARGE
+  LATE_FEE
+  FUEL_CHARGE
+  ADDON_CHARGE
+  EXTENSION
+  INFRINGEMENT_RECOVERY
+  MANUAL_CHARGE
+  MANUAL_CREDIT
+  GIFT_CARD_PURCHASE
+  GIFT_CARD_REDEMPTION
+  SUBSCRIPTION_CHARGE
+  ZONE_SURCHARGE
+  FUEL_DELIVERY_FEE
+  CLEANING_FEE
+  PARTNER_COMMISSION_PAYOUT
+  SWAP_ADJUSTMENT
+}
+
+enum PaymentMethod {
+  CARD
+  CASH
+  BANK_TRANSFER
+  STRIPE
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  DISPUTED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  VOID
+  CREDITED
+}
+
+enum BondStatus {
+  HELD
+  PARTIALLY_CAPTURED
+  FULLY_CAPTURED
+  RELEASED
+}
+
+enum InspectionType {
+  PRE_HIRE
+  POST_HIRE
+  ROUTINE
+  INCIDENT
+}
+
+enum InspectionStatus {
+  DRAFT
+  COMPLETED
+  FLAGGED
+}
+
+/// Why this inspection was performed. Lets downstream queries distinguish a
+/// regular check-in/out from inspections captured during a mid-rental vehicle
+/// swap, which otherwise share type=POST_HIRE / PRE_HIRE semantics.
+enum InspectionPurpose {
+  CHECK_OUT
+  CHECK_IN
+  SWAP_OUT
+  SWAP_IN
+  ROUTINE
+  INCIDENT
+}
+
+/// Financial and operational reason for a mid-rental vehicle swap. Drives
+/// pricing (customer pays, is refunded, or no change) and whether a work
+/// order / incident must be lodged at commit time.
+enum SwapReason {
+  UPGRADE
+  DOWNGRADE
+  LATERAL
+  MECHANICAL_FAULT
+  ACCIDENT_DAMAGE
+  OPERATIONAL
+}
+
+/// Reporting channel through which the swap need was raised. Audit-only;
+/// does not affect pricing. A customer phoning tech support to report a
+/// fault produces (reason=MECHANICAL_FAULT, origin=CUSTOMER_PHONE_SUPPORT).
+enum SwapOrigin {
+  CUSTOMER_WALK_IN
+  CUSTOMER_PHONE_SUPPORT
+  CUSTOMER_SELF_SERVICE
+  ROADSIDE_ASSIST
+  STAFF_OBSERVED
+  TELEMATICS_ALERT
+}
+
+enum BookingSwapStatus {
+  DRAFT
+  COMMITTED
+  VOIDED
+}
+
+enum MaintenanceType {
+  ROUTINE_SERVICE
+  TYRE_REPLACEMENT
+  BRAKE_SERVICE
+  BATTERY
+  REGO_RENEWAL
+  CTP_RENEWAL
+  INSURANCE_RENEWAL
+  CUSTOM
+}
+
+enum WorkOrderPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum WorkOrderStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  AWAITING_PARTS
+  COMPLETED
+  CANCELLED
+}
+
+enum IncidentType {
+  ACCIDENT
+  THEFT
+  VANDALISM
+  BREAKDOWN
+  CUSTOMER_DAMAGE
+  WEATHER
+  INFRINGEMENT
+  OTHER
+}
+
+enum IncidentSeverity {
+  MINOR
+  MODERATE
+  MAJOR
+  TOTAL_LOSS
+}
+
+enum IncidentStatus {
+  REPORTED
+  UNDER_INVESTIGATION
+  ASSESSED
+  RESOLVED
+  CLOSED
+  INSURANCE_CLAIM
+}
+
+enum InfringementType {
+  SPEEDING
+  PARKING
+  TOLL
+  RED_LIGHT
+  OTHER
+}
+
+enum InfringementStatus {
+  RECEIVED
+  NOMINATED
+  CUSTOMER_CHARGED
+  PAID
+  DISPUTED
+  WRITTEN_OFF
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  IN_APP
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+  READ
+  SUPPRESSED
+}
+
+enum CommunicationDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMATION
+  BOOKING_MODIFIED
+  BOOKING_EXTENDED
+  BOOKING_CANCELLED
+  BOOKING_REMINDER
+  BOOKING_CHECKED_OUT
+  BOOKING_DUE_TODAY
+  BOOKING_OVERDUE
+  BOOKING_OVERDUE_ESCALATION
+  BOOKING_NO_SHOW_WARNING
+  BOOKING_COMPLETED
+  PAYMENT_RECEIVED
+  INVOICE_ISSUED
+  ADJUSTMENT_NOTE_ISSUED
+  BOND_HELD
+  BOND_RELEASED
+  BOND_CAPTURED
+  LEASE_AGREEMENT_COPY
+  RETURN_PAPERWORK_COPY
+  INSPECTION_REPORT_COPY
+  PROFILE_UPDATED_SELF
+  PROFILE_UPDATED_STAFF
+  LICENCE_EXPIRING
+  PASSPORT_EXPIRING
+  INCIDENT_REPORTED
+  INFRINGEMENT_NOMINATED
+  WORK_ORDER_ASSIGNED
+  VEHICLE_EXPIRY
+  REGO_EXPIRING
+  LOW_FLEET_AVAILABILITY
+  DAILY_OPS_SUMMARY
+  WEEKLY_REVENUE_SUMMARY
+  NEW_CUSTOMER_REGISTERED
+  CUSTOMER_WELCOME
+  MARKETING_PROMOTIONAL
+  MARKETING_NEWSLETTER
+  MARKETING_WINBACK
+  MARKETING_BIRTHDAY
+  MARKETING_ANNIVERSARY
+  SUPPORT_TICKET_ASSIGNED
+  SUPPORT_TICKET_URGENT
+  SUPPORT_TICKET_CUSTOMER_REPLY
+  SUPPORT_TICKET_RESOLVED
+  DEBT_REMINDER
+  CART_RECOVERY_HOLD
+  CART_RECOVERY_DISCOUNT
+  CART_RECOVERY_LAST_CHANCE
+  EXCESS_UPSELL_OFFER
+  GIFT_CARD_ISSUED
+  GIFT_CARD_RECEIVED
+  POST_TRIP_REVIEW_REQUEST
+  LOYALTY_TIER_UPGRADE
+  LOYALTY_POINTS_EARNED
+  REFERRAL_QUALIFIED
+  SUBSCRIPTION_RENEWED
+  SUBSCRIPTION_PAUSED
+  SUBSCRIPTION_CANCELLED
+  SUBSCRIPTION_OVERAGE
+  PARTNER_BOOKING_ATTRIBUTED
+  ZONE_BREACH_WARNING
+  FUEL_DELIVERY_DISPATCHED
+  CUSTOM
+}
+
+enum NotificationCategory {
+  TRANSACTIONAL
+  ACCOUNT
+  OPERATIONAL
+  MARKETING
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+  FAILED
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  SENT
+  DELIVERED
+  BOUNCED
+  FAILED
+  OPT_OUT
+  UNSUBSCRIBED
+}
+
+enum TransferStatus {
+  SCHEDULED
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+enum OwnerType {
+  INDIVIDUAL
+  COMPANY
+}
+
+enum AgreementStatus {
+  DRAFT
+  SIGNED
+  SUPERSEDED
+  VOIDED
+}
+
+enum ReturnStatus {
+  DRAFT
+  SIGNED
+  FINALISED
+  SUPERSEDED
+}
+
+enum ChargeResolution {
+  STANDARD
+  QUOTE_PENDING
+  WAIVED
+  WARRANTY
+}
+
+enum ChargeStatus {
+  PROVISIONAL
+  CONFIRMED
+  CAPTURED
+  WAIVED
+}
+
+enum TimestampStatus {
+  PENDING
+  OK
+  FAILED
+}
+
+// ============================================================================
+// CORE — ORGANISATION / DEPOTS
+// ============================================================================
+
+model Organisation {
+  id        String   @id @default(cuid())
+  name      String
+  abn       String
+  logoUrl   String?
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Depot {
+  id           String    @id @default(cuid())
+  name         String
+  // Soft-deleted depots are renamed (slug → `archived-<slug>-<ts>`) by the
+  // `archiveDepot` service so that the same slug can be re-used for a new
+  // depot without tripping the @unique constraint.
+  slug         String    @unique
+  addressLine1 String
+  addressLine2 String?
+  suburb       String
+  state        String
+  postcode     String
+  country      String    @default("Australia")
+  latitude     Float?
+  longitude    Float?
+  phone        String?
+  email        String?
+  timezone     String    @default("Australia/Brisbane")
+  maxCapacity  Int       @default(50)
+  isActive     Boolean   @default(true)
+  // When a BREAKDOWN/ABANDONED_VEHICLE support ticket is raised URGENT
+  // outside operating hours, the support-notify job SMS-pages this user.
+  // Falls back to the first MANAGER at the depot if unset.
+  onCallUserId String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  operatingHours       DepotOperatingHours[]
+  vehicles             Vehicle[]
+  bookingsPickup       Booking[]              @relation("PickupDepot")
+  bookingsReturn       Booking[]              @relation("ReturnDepot")
+  bookings             Booking[]
+  staff                User[]                 @relation("StaffDepot")
+  onCallUser           User?                  @relation("DepotOnCall", fields: [onCallUserId], references: [id])
+  inspections          Inspection[]
+  workOrders           MaintenanceWorkOrder[]
+  transfersFrom        VehicleTransfer[]      @relation("TransferFrom")
+  transfersTo          VehicleTransfer[]      @relation("TransferTo")
+  auditLogs            AuditLog[]
+  oneWayFeesFrom       OneWayFee[]            @relation("OneWayFeeFrom")
+  oneWayFeesTo         OneWayFee[]            @relation("OneWayFeeTo")
+  supportConversations SupportConversation[]
+  supportTickets       SupportTicket[]
+
+  @@index([isActive])
+  @@index([deletedAt])
+  @@index([slug])
+}
+
+model DepotOperatingHours {
+  id          String    @id @default(cuid())
+  depotId     String
+  dayOfWeek   Int // 0 = Sunday .. 6 = Saturday
+  openTime    String // "08:00" — HH:MM (enforced in code)
+  closeTime   String // "18:00" — HH:MM (enforced in code)
+  isClosed    Boolean   @default(false)
+  holidayDate DateTime? @db.Date
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  depot       Depot     @relation(fields: [depotId], references: [id], onDelete: Cascade)
+
+  @@index([depotId, dayOfWeek])
+  @@index([holidayDate])
+}
+
+// ============================================================================
+// USERS
+// ============================================================================
+
+model User {
+  id                String     @id @default(cuid())
+  email             String     @unique
+  emailVerified     DateTime?  @db.Timestamptz
+  phone             String?
+  phoneVerified     DateTime?  @db.Timestamptz
+  passwordHash      String?
+  firstName         String
+  lastName          String
+  dateOfBirth       DateTime?  @db.Date
+  avatarUrl         String?
+  role              UserRole   @default(CUSTOMER)
+  status            UserStatus @default(ACTIVE)
+  depotId           String?
+  lastLoginAt       DateTime?  @db.Timestamptz
+  // Brute-force lockout (identity-layer). Paired with the IP-layer
+  // rate-limit in src/lib/rate-limit.ts to cover rotating-proxy attacks.
+  failedLoginCount  Int        @default(0)
+  lockedUntil       DateTime?  @db.Timestamptz
+  lastFailedLoginAt DateTime?  @db.Timestamptz
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  deletedAt         DateTime?
+  // Legacy migration: preserves the old system's driver_id for idempotent
+  // re-runs and future cross-reference lookups. Nullable on users created
+  // natively after launch.
+  legacyDriverId    String?    @unique
+  legacyImportedAt  DateTime?  @db.Timestamptz
+
+  depot                    Depot?                 @relation("StaffDepot", fields: [depotId], references: [id])
+  customerProfile          CustomerProfile?
+  staffProfile             StaffProfile?
+  accounts                 Account[]
+  sessions                 Session[]
+  impersonatedSessions     Session[]              @relation("SessionImpersonator")
+  totp                     UserTotp?
+  bookings                 Booking[]              @relation("BookingCustomer")
+  createdBookings          Booking[]              @relation("BookingCreatedBy")
+  confirmedBookings        Booking[]              @relation("BookingConfirmedBy")
+  checkedOutBookings       Booking[]              @relation("BookingCheckedOutBy")
+  checkedInBookings        Booking[]              @relation("BookingCheckedInBy")
+  cancelledBookings        Booking[]              @relation("BookingCancelledBy")
+  notes                    BookingNote[]
+  payments                 Payment[]
+  inspections              Inspection[]
+  reportedIncidents        Incident[]             @relation("IncidentReportedBy")
+  assignedIncidents        Incident[]             @relation("IncidentAssignedTo")
+  incidentNotes            IncidentNote[]
+  reportedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderReportedBy")
+  assignedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderAssignedTo")
+  bookingSwaps             BookingSwap[]          @relation("BookingSwapSwappedBy")
+  uploadedVehicleDocuments VehicleDocument[]      @relation("UploadedVehicleDocuments")
+  notifications            Notification[]
+  analyticsSegments        AnalyticsSegment[]
+  analyticsFunnels         AnalyticsFunnel[]
+  analyticsAlerts          AnalyticsAlert[]
+  auditLogs                AuditLog[]
+  communications           CommunicationLog[]
+  pushSubscriptions        PushSubscription[]
+  rentalAgreements         RentalAgreement[]
+  customerDocuments        CustomerDocument[]
+  returnAssessments        ReturnAssessment[]
+  adjustmentNotes          AdjustmentNote[]       @relation("AdjustmentNoteCustomer")
+  issuedAdjustmentNotes    AdjustmentNote[]       @relation("AdjustmentNoteIssuedBy")
+  damageChargesCreated     DamageCharge[]         @relation("DamageChargeCreatedBy")
+  damageChargesResolved    DamageCharge[]         @relation("DamageChargeResolvedBy")
+  supportConversations     SupportConversation[]
+  supportTicketsAsCustomer SupportTicket[]        @relation("SupportTicketCustomer")
+  supportTicketsAsAssignee SupportTicket[]        @relation("SupportTicketAssignee")
+  supportTicketNotes       SupportTicketNote[]
+  onCallForDepots          Depot[]                @relation("DepotOnCall")
+  visitorSessions          VisitorSession[]
+  staffTaskActivities      StaffTaskActivity[]    @relation("StaffTaskActivityStaff")
+  // Revenue-lever back-relations
+  reviews                  Review[]
+  referralsMade            Referral[]             @relation("ReferralReferrer")
+  referralsReceived        Referral[]             @relation("ReferralReferee")
+  loyaltyLedger            LoyaltyLedger[]
+  subscriptions            Subscription[]         @relation("SubscriptionCustomer")
+
+  // To allow re-registration with the same email after soft-delete, the
+  // `anonymiseUser` service rewrites `email` to a unique placeholder (see
+  // src/server/services/anonymise-user.ts) freeing up the original address.
+  @@index([role])
+  @@index([depotId])
+  @@index([status])
+  @@index([deletedAt])
+  @@index([role, deletedAt])
+  @@index([legacyImportedAt])
+}
+
+model CustomerProfile {
+  id                           String       @id @default(cuid())
+  userId                       String       @unique
+  // Plaintext columns retained during the APP-11 encryption rollout so
+  // pre-migration reads still work. New writes land in the *Enc columns
+  // via src/lib/customer-pii.ts; legacy reads fall back here until the
+  // migration job (scripts/encrypt-licence-data.ts) has run everywhere.
+  // After migration: DROP these columns in a follow-up migration.
+  licenceNumber                String?
+  licenceNumberEnc             Json?
+  // Whether the licence row describes an AU driver's licence or an
+  // International Driver's Permit. Gate-chosen in Step 4 of the booking
+  // wizard; null for legacy rows until the customer re-answers the gate.
+  licenceType                  LicenceType?
+  licenceState                 String?
+  // Issuing country (ISO-3166 alpha-2) for International Driver's
+  // Permits. Null when licenceType = AU_LICENCE (use licenceState).
+  licenceCountry               String?
+  licenceExpiry                DateTime?    @db.Date
+  licenceClass                 String?
+  licenceImageFront            String?
+  licenceImageBack             String?
+  licenceVerifiedAt            DateTime?    @db.Timestamptz
+  licenceVerifiedById          String?
+  passportNumber               String?
+  passportNumberEnc            Json?
+  passportCountry              String?
+  passportExpiry               DateTime?    @db.Date
+  passportImage                String?
+  passportVerifiedAt           DateTime?    @db.Timestamptz
+  passportVerifiedById         String?
+  emergencyContactName         String?
+  emergencyContactPhone        String?
+  emergencyContactRelationship String?
+  termsAcceptedAt              DateTime?    @db.Timestamptz
+  termsVersion                 String?
+  privacyAcceptedAt            DateTime?    @db.Timestamptz
+  privacyVersion               String?
+  addressLine1                 String?
+  addressLine2                 String?
+  suburb                       String?
+  state                        String?
+  postcode                     String?
+  country                      String?      @default("Australia")
+  // B2B tax-invoice fields. ABN is captured (not verified against ABR);
+  // when present, the recipient block on tax invoices renders
+  // `companyName` and `ABN <abn>` so the document satisfies ATO §29-70
+  // requirements for invoices over $1,000 issued to a business.
+  companyName                  String?
+  abn                          String?
+  marketingOptIn               Boolean      @default(false)
+  marketingSmsOptIn            Boolean      @default(false)
+  marketingEmailUnsubscribedAt DateTime?    @db.Timestamptz
+  marketingSmsUnsubscribedAt   DateTime?    @db.Timestamptz
+  unsubscribeReason            String?
+  notes                        String?
+  customerSince                DateTime     @default(now())
+  totalBookings                Int          @default(0)
+  completedBookings            Int          @default(0)
+  totalSpend                   Decimal      @default(0) @db.Decimal(12, 2)
+  lastBookingAt                DateTime?    @db.Timestamptz
+  incidentCount                Int          @default(0)
+  loyaltyPoints                Int          @default(0)
+  // Lever 9: loyalty tier derived from lifetime points; recalculated by
+  // the loyalty service after each booking completion.
+  loyaltyTier                  LoyaltyTier  @default(SILVER)
+  lifetimePoints               Int          @default(0)
+  // Lever 5: unique referral code the customer can share. One-way
+  // generated at account creation; immutable.
+  referralCode                 String?      @unique
+  // Lever 5: applied referral credit balance (earned from referrals).
+  referralCreditBalance        Decimal      @default(0) @db.Decimal(10, 2)
+  blacklistReason              String?
+  riskRating                   RiskRating   @default(LOW)
+  // G6 (Phase 4 P0): Stripe Customer + stored payment method. Populated
+  // lazily by ensureStripeCustomer() on first booking; enables off-session
+  // capture for delayed recoveries (tolls, fines, damage excess). Only the
+  // opaque Stripe token is stored — PAN / CVV never touch our servers.
+  stripeCustomerId             String?      @unique
+  defaultStripePaymentMethodId String?
+  stripePaymentMethodBrand     String? // "visa" | "mastercard" | ... cached for display
+  stripePaymentMethodLast4     String? // last-4 cached for display (not PAN)
+  stripePaymentMethodExpMonth  Int?
+  stripePaymentMethodExpYear   Int?
+  // Legacy migration fields.
+  secondaryPhone               String?
+  legacyReferralSource         String?
+  // S3 key for a persisted signature image captured during registration or
+  // migrated from the legacy system. Distinct from per-booking signatures
+  // stored on Booking/Inspection models.
+  signatureImage               String?
+  // Timestamp the customer completed the self-service onboarding wizard
+  // (profile basics + identity docs + four signed consent PDFs). NULL
+  // forces them through /onboarding on next sign-in.
+  onboardedAt                  DateTime?    @db.Timestamptz
+  // Joint version key captured at completion:
+  // `${TERMS}|${PRIVACY}|${CANCELLATION}|${MARKETING}`. Drives per-doc
+  // re-consent when any one constant bumps without forcing a full
+  // re-onboard.
+  onboardingVersion            String?
+  createdAt                    DateTime     @default(now())
+  updatedAt                    DateTime     @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([riskRating])
+  @@index([loyaltyTier])
+  @@index([referralCode])
+  @@index([stripeCustomerId])
+  @@index([onboardedAt])
+}
+
+model StaffProfile {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  employeeId            String   @unique
+  position              String?
+  certifications        String[]
+  canPerformMaintenance Boolean  @default(false)
+  canPerformInspections Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// NextAuth tables
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id             String   @id @default(cuid())
+  sessionToken   String   @unique
+  userId         String
+  expires        DateTime
+  // Admin impersonation: when an admin "views as" another user, the
+  // resulting session carries the admin's real user id here. auth()
+  // surfaces this so the UI can show a persistent banner and the audit
+  // middleware can tag every mutation with it. Sessions where this is
+  // null are regular (non-impersonation) sessions.
+  impersonatorId String?
+  impersonator   User?    @relation("SessionImpersonator", fields: [impersonatorId], references: [id], onDelete: SetNull)
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([impersonatorId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ============================================================================
+// VEHICLES / FLEET
+// ============================================================================
+
+model VehicleCategory {
+  id              String   @id @default(cuid())
+  name            String
+  slug            String   @unique
+  description     String?
+  engineCapacity  Int // cc
+  licenceRequired String // e.g. "RE", "R", "Car"
+  minAge          Int      @default(18)
+  displayOrder    Int      @default(0)
+  baseDailyRate   Decimal  @db.Decimal(10, 2)
+  baseWeeklyRate  Decimal  @db.Decimal(10, 2)
+  baseMonthlyRate Decimal  @db.Decimal(10, 2)
+  bondAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  isActive        Boolean  @default(true)
+  images          String[]
+
+  // Phase A1 — per-category online-payment strategy. Controls how much the
+  // customer is charged during the booking wizard versus at pickup. The
+  // bond is always authorised online regardless of the strategy.
+  onlinePaymentStrategy OnlinePaymentStrategy @default(FULL)
+  // Used only when onlinePaymentStrategy = FLAT (booking fee in AUD,
+  // GST-inclusive to match the displayed total).
+  bookingFeeFlat        Decimal?              @db.Decimal(10, 2)
+  // Used only when onlinePaymentStrategy = PERCENT (0-100).
+  bookingFeePercent     Decimal?              @db.Decimal(5, 2)
+
+  // Phase A2 — progressive billing for long-term hires. A booking whose
+  // durationDays >= longTermMinDays (and longTermMinDays is not null) gets
+  // a BookingBillingPlan created alongside it; the first period + bond are
+  // charged online, then the recurring charges are driven by the
+  // booking-billing job.
+  longTermMinDays          Int?             @default(14)
+  longTermDefaultFrequency BillingFrequency @default(WEEKLY)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vehicles      Vehicle[]
+  vehicleModels VehicleModel[]
+  pricingRules  PricingRule[]
+  pricingTiers  PricingTier[]
+  packages      Package[]
+  bookings      Booking[]
+  reviews       Review[]
+
+  @@index([isActive])
+}
+
+model Vehicle {
+  id                    String           @id @default(cuid())
+  internalCode          String           @unique
+  rego                  String
+  regoState             String
+  regoExpiry            DateTime?        @db.Date
+  vin                   String?          @unique
+  engineNumber          String?
+  make                  String
+  model                 String
+  year                  Int
+  colour                String
+  categoryId            String
+  depotId               String
+  status                VehicleStatus    @default(AVAILABLE)
+  condition             VehicleCondition @default(GOOD)
+  currentOdometerKm     Int              @default(0)
+  fuelType              String           @default("Petrol")
+  purchaseDate          DateTime?        @db.Date
+  purchasePrice         Decimal?         @db.Decimal(12, 2)
+  depreciationMethod    String?
+  depreciationRate      Decimal?         @db.Decimal(5, 2)
+  currentBookValue      Decimal?         @db.Decimal(12, 2)
+  insurancePolicyNumber String?
+  insuranceExpiry       DateTime?        @db.Date
+  ctpExpiry             DateTime?        @db.Date
+  lastServiceDate       DateTime?        @db.Date
+  lastServiceKm         Int?
+  nextServiceDueKm      Int?
+  nextServiceDueDate    DateTime?        @db.Date
+  notes                 String?
+  gpsTrackerId          String?
+  ownerId               String?
+  warrantyExpiry        DateTime?        @db.Date
+  supplierName          String?
+  supplierContact       String?
+  financeType           String? // CASH | LOAN | LEASE | CHATTEL_MORTGAGE
+  financeProvider       String?
+  financeRef            String?
+  modelId               String?
+  isActive              Boolean          @default(true)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  deletedAt             DateTime?
+
+  category             VehicleCategory        @relation(fields: [categoryId], references: [id])
+  catalogueModel       VehicleModel?          @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  depot                Depot                  @relation(fields: [depotId], references: [id])
+  owner                VehicleOwner?          @relation(fields: [ownerId], references: [id])
+  images               VehicleImage[]
+  documents            VehicleDocument[]
+  statusLog            VehicleStatusLog[]
+  bookings             Booking[]
+  inspections          Inspection[]
+  workOrders           MaintenanceWorkOrder[]
+  maintenanceSchedules MaintenanceSchedule[]
+  incidents            Incident[]
+  telemetry            VehicleTelemetry[]
+  infringements        Infringement[]
+  transfers            VehicleTransfer[]
+  // Mid-rental swap history: times this vehicle was swapped off / onto a booking.
+  outgoingSwaps        BookingSwap[]          @relation("BookingSwapOutgoingVehicle")
+  incomingSwaps        BookingSwap[]          @relation("BookingSwapIncomingVehicle")
+  // Per-vehicle override of the category-level pricing tier ladder.
+  pricingTiers         PricingTier[]
+
+  @@unique([rego, regoState])
+  @@index([status])
+  @@index([depotId])
+  @@index([categoryId])
+  @@index([ownerId])
+  @@index([modelId])
+  @@index([depotId, status, categoryId])
+  @@index([status, nextServiceDueKm])
+  @@index([deletedAt])
+  @@index([status, deletedAt])
+  @@index([depotId, deletedAt])
+}
+
+/// Shared spec sheet keyed by make + model + year. Many Vehicle rows map to
+/// one VehicleModel row, so specs and authoritative PDFs are stored once per
+/// model rather than duplicated per VIN.
+model VehicleModel {
+  id         String  @id @default(cuid())
+  make       String
+  model      String
+  year       Int
+  slug       String  @unique
+  categoryId String?
+
+  // Specs populated by the enrichment pipeline. All nullable — a model row
+  // can exist without ever having been enriched yet.
+  engineCapacityCc      Int?
+  enginePowerKw         Decimal? @db.Decimal(5, 2)
+  engineTorqueNm        Decimal? @db.Decimal(5, 2)
+  dryWeightKg           Decimal? @db.Decimal(6, 2)
+  fuelTankLitres        Decimal? @db.Decimal(4, 2)
+  fuelType              String?
+  topSpeedKmh           Int?
+  seatHeightMm          Int?
+  tyreFront             String?
+  tyreRear              String?
+  serviceIntervalKm     Int?
+  serviceIntervalMonths Int?
+
+  // Provenance
+  specsSourceUrl      String?
+  specsSourceName     String?
+  specsFetchedAt      DateTime?
+  specsConfidence     SpecConfidence @default(UNVERIFIED)
+  lastEnrichmentError String?
+
+  // Public fleet browsing
+  useCases     FleetUseCase[] @default([])
+  tagline      String?
+  heroImageKey String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  category  VehicleCategory?       @relation(fields: [categoryId], references: [id])
+  vehicles  Vehicle[]
+  documents VehicleModelDocument[]
+
+  @@unique([make, model, year])
+  @@index([categoryId])
+  @@index([specsConfidence])
+}
+
+/// Manufacturer-sourced document (owner's manual, service schedule, parts
+/// catalogue) for a VehicleModel. Always sourced from an allowlisted domain
+/// so `sourceDomain` doubles as the "100% confident" proof.
+model VehicleModelDocument {
+  id           String                   @id @default(cuid())
+  modelId      String
+  type         VehicleModelDocumentType
+  title        String
+  fileUrl      String
+  storageKey   String?
+  sourceUrl    String
+  sourceDomain String
+  sizeBytes    Int?
+  pageCount    Int?
+  language     String                   @default("en-AU")
+  sha256       String?
+  fetchedAt    DateTime                 @default(now())
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+
+  model VehicleModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([modelId, type, sha256])
+  @@index([modelId])
+}
+
+enum SpecConfidence {
+  OFFICIAL_MANUFACTURER
+  REPUTABLE_SECONDARY
+  UNVERIFIED
+}
+
+enum VehicleModelDocumentType {
+  OWNERS_MANUAL
+  SERVICE_SCHEDULE
+  PARTS_CATALOGUE
+  WIRING_DIAGRAM
+  BROCHURE
+}
+
+enum FleetUseCase {
+  ADVENTURE
+  COMMUTING
+  PRACTICE
+  DELIVERY
+  SPORT_CRUISER
+  LEARNER_APPROVED
+}
+
+model VehicleImage {
+  id           String  @id @default(cuid())
+  vehicleId    String
+  url          String
+  caption      String?
+  isPrimary    Boolean @default(false)
+  displayOrder Int     @default(0)
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+}
+
+model VehicleDocument {
+  id                    String              @id @default(cuid())
+  vehicleId             String
+  type                  VehicleDocumentType
+  fileUrl               String
+  thumbnailUrl          String?
+  expiryDate            DateTime?           @db.Date
+  issueDate             DateTime?           @db.Date
+  cost                  Decimal?            @db.Decimal(10, 2)
+  referenceNumber       String?
+  uploadedById          String?
+  relatedWorkOrderId    String?
+  relatedInfringementId String?
+  notes                 String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  deletedAt             DateTime?
+
+  vehicle             Vehicle               @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  uploadedBy          User?                 @relation("UploadedVehicleDocuments", fields: [uploadedById], references: [id], onDelete: SetNull)
+  relatedWorkOrder    MaintenanceWorkOrder? @relation("WorkOrderDocuments", fields: [relatedWorkOrderId], references: [id], onDelete: SetNull)
+  relatedInfringement Infringement?         @relation("InfringementDocuments", fields: [relatedInfringementId], references: [id], onDelete: SetNull)
+
+  @@index([vehicleId])
+  @@index([expiryDate])
+  @@index([relatedWorkOrderId])
+  @@index([relatedInfringementId])
+  @@index([vehicleId, createdAt])
+  @@index([deletedAt])
+}
+
+model CustomerDocument {
+  id           String               @id @default(cuid())
+  customerId   String
+  type         CustomerDocumentType
+  fileUrl      String
+  label        String?
+  expiryDate   DateTime?            @db.Date
+  uploadedById String?
+  notes        String?
+  // Structured OCR / detection results. Written by
+  // staffCustomer.detectDocument after running Claude vision on the file.
+  // Shape is not enforced at the DB layer; see DetectedLicenceMetadata in
+  // src/server/services/document-extract.ts.
+  metadata     Json?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  customer User @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([type])
+  @@index([expiryDate])
+  // Powers applyLatestDocumentToProfile: "newest row per (customer, type)"
+  // lookup becomes a single B-tree range scan.
+  @@index([customerId, type, createdAt(sort: Desc)])
+}
+
+model VehicleStatusLog {
+  id             String         @id @default(cuid())
+  vehicleId      String
+  previousStatus VehicleStatus?
+  newStatus      VehicleStatus
+  changedById    String?
+  reason         String?
+  timestamp      DateTime       @default(now()) @db.Timestamptz
+  createdAt      DateTime       @default(now())
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+}
+
+model VehicleTransfer {
+  id          String         @id @default(cuid())
+  vehicleId   String
+  fromDepotId String
+  toDepotId   String
+  status      TransferStatus @default(SCHEDULED)
+  scheduledAt DateTime       @db.Timestamptz
+  completedAt DateTime?      @db.Timestamptz
+  driverName  String?
+  notes       String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  fromDepot Depot   @relation("TransferFrom", fields: [fromDepotId], references: [id])
+  toDepot   Depot   @relation("TransferTo", fields: [toDepotId], references: [id])
+
+  @@index([vehicleId])
+  @@index([fromDepotId])
+  @@index([toDepotId])
+  @@index([status])
+}
+
+model VehicleOwner {
+  id              String    @id @default(cuid())
+  ownerType       OwnerType @default(INDIVIDUAL)
+  firstName       String?
+  lastName        String?
+  companyName     String?
+  abn             String?
+  acn             String?
+  email           String?
+  phone           String?
+  addressLine1    String?
+  addressLine2    String?
+  suburb          String?
+  state           String?
+  postcode        String?
+  arrangementType String? // OWNED | LEASED | FINANCED | CONSIGNMENT
+  agreementRef    String?
+  agreementExpiry DateTime?
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  vehicles Vehicle[]
+}
+
+// ============================================================================
+// PRICING
+// ============================================================================
+
+model PricingRule {
+  id           String          @id @default(cuid())
+  categoryId   String
+  depotId      String?
+  name         String
+  ruleType     PricingRuleType
+  minDays      Int?
+  maxDays      Int?
+  pricePerUnit Decimal         @db.Decimal(10, 2)
+  seasonId     String?
+  dayOfWeek    Int[]
+  priority     Int             @default(0)
+  isActive     Boolean         @default(true)
+  createdAt    DateTime        @default(now())
+
+  category VehicleCategory @relation(fields: [categoryId], references: [id])
+  season   Season?         @relation(fields: [seasonId], references: [id])
+
+  @@index([categoryId])
+  @@index([seasonId])
+  @@index([isActive])
+}
+
+/// Progressive ("tax-bracket") pricing ladder for rentals. Exactly one of
+/// categoryId or vehicleId is set: category tiers apply as the default for
+/// every vehicle in the category; vehicle tiers override the category ladder
+/// for that specific unit. A booking's base total is the sum of tierTotal
+/// for fully-spanned tiers, plus pro-rata for the final partial tier.
+model PricingTier {
+  id         String   @id @default(cuid())
+  categoryId String?
+  vehicleId  String?
+  minDays    Int
+  maxDays    Int
+  tierTotal  Decimal  @db.Decimal(10, 2)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  category VehicleCategory? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  vehicle  Vehicle?         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId, minDays])
+  @@index([vehicleId, minDays])
+}
+
+model Season {
+  id         String   @id @default(cuid())
+  name       String
+  startDate  DateTime @db.Date
+  endDate    DateTime @db.Date
+  multiplier Decimal  @db.Decimal(5, 2)
+  depotId    String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  pricingRules PricingRule[]
+
+  @@index([isActive, startDate, endDate])
+  @@index([depotId])
+}
+
+// C5: one-way rental fees. Per (fromDepotId, toDepotId) pair, staff can
+// either charge a flat fee or disallow the pair entirely. Availability
+// and the pricing quote both consult this table when pickupDepotId !=
+// returnDepotId. Same-depot rentals don't touch this table.
+model OneWayFee {
+  id          String   @id @default(cuid())
+  fromDepotId String
+  toDepotId   String
+  feeAmount   Decimal  @default(0) @db.Decimal(10, 2)
+  allowed     Boolean  @default(true)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  fromDepot Depot @relation("OneWayFeeFrom", fields: [fromDepotId], references: [id])
+  toDepot   Depot @relation("OneWayFeeTo", fields: [toDepotId], references: [id])
+
+  @@unique([fromDepotId, toDepotId])
+}
+
+model Package {
+  id           String   @id @default(cuid())
+  name         String
+  description  String?
+  categoryId   String
+  durationDays Int
+  totalPrice   Decimal  @db.Decimal(10, 2)
+  inclusions   Json     @default("[]")
+  isActive     Boolean  @default(true)
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  category VehicleCategory @relation(fields: [categoryId], references: [id])
+
+  @@index([categoryId])
+  @@index([isActive])
+}
+
+model Addon {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  type        AddonType
+  dailyRate   Decimal?  @db.Decimal(10, 2)
+  flatRate    Decimal?  @db.Decimal(10, 2)
+  isPerDay    Boolean   @default(true)
+  isRequired  Boolean   @default(false)
+  maxQuantity Int       @default(1)
+  depotId     String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  bookingAddons BookingAddon[]
+
+  @@index([isActive])
+  @@index([depotId])
+}
+
+model Discount {
+  id                    String       @id @default(cuid())
+  code                  String       @unique
+  description           String?
+  type                  DiscountType
+  value                 Decimal      @db.Decimal(10, 2)
+  minBookingDays        Int?
+  minBookingValue       Decimal?     @db.Decimal(10, 2)
+  maxUses               Int?
+  usedCount             Int          @default(0)
+  validFrom             DateTime?    @db.Date
+  validTo               DateTime?    @db.Date
+  applicableCategoryIds String[]
+  applicableDepotIds    String[]
+  isActive              Boolean      @default(true)
+  isAutoApply           Boolean      @default(false)
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  @@index([isActive])
+}
+
+model InsuranceOption {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  dailyRate       Decimal  @db.Decimal(10, 2)
+  excessAmount    Decimal  @db.Decimal(10, 2)
+  coverageDetails Json     @default("{}")
+  isDefault       Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  bookingInsurance BookingInsurance[]
+
+  @@index([isActive])
+}
+
+// ============================================================================
+// BOOKINGS
+// ============================================================================
+
+/// Financial + audit record. MUST NOT be hard-deleted — use `deletedAt` only.
+/// Australian tax law requires 7-year retention. Use VOID/CANCELLED/DISPUTED
+/// status transitions for lifecycle; hard delete is blocked by the Prisma
+/// extension in src/lib/prisma.ts.
+// Phase A1 — see VehicleCategory.onlinePaymentStrategy.
+enum OnlinePaymentStrategy {
+  FULL
+  FLAT
+  PERCENT
+  ZERO
+}
+
+// Phase A2 — cadence for progressive billing on long-term hires.
+enum BillingFrequency {
+  WEEKLY
+  FORTNIGHTLY
+  MONTHLY
+}
+
+// Phase A2 — lifecycle of a BookingBillingPlan.
+enum BookingBillingStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model Booking {
+  id                   String        @id @default(cuid())
+  bookingReference     String        @unique
+  customerId           String
+  vehicleId            String?
+  categoryId           String
+  depotId              String
+  pickupDepotId        String
+  returnDepotId        String
+  status               BookingStatus @default(QUOTE)
+  source               BookingSource @default(WEBSITE)
+  pickupDateTime       DateTime      @db.Timestamptz
+  returnDateTime       DateTime      @db.Timestamptz
+  actualPickupDateTime DateTime?     @db.Timestamptz
+  actualReturnDateTime DateTime?     @db.Timestamptz
+  durationDays         Int
+  pickupOdometerKm     Int?
+  returnOdometerKm     Int?
+  subtotal             Decimal       @db.Decimal(10, 2)
+  discountAmount       Decimal       @default(0) @db.Decimal(10, 2)
+  addonTotal           Decimal       @default(0) @db.Decimal(10, 2)
+  insuranceTotal       Decimal       @default(0) @db.Decimal(10, 2)
+  bondAmount           Decimal       @default(0) @db.Decimal(10, 2)
+  gstAmount            Decimal       @default(0) @db.Decimal(10, 2)
+  totalAmount          Decimal       @db.Decimal(10, 2)
+  amountPaid           Decimal       @default(0) @db.Decimal(10, 2)
+  balanceDue           Decimal       @default(0) @db.Decimal(10, 2)
+  // Phase A1 — snapshot of how much the customer was asked to pay during
+  // the booking wizard (strategy-dependent: FULL = totalAmount, FLAT =
+  // bookingFeeFlat, PERCENT = totalAmount * bookingFeePercent/100, ZERO =
+  // 0). The remainder is carried on balanceDue. Progressive billing uses
+  // firstPeriodAmount; see pricingSnapshot for the full breakdown.
+  payOnlineAmount      Decimal       @default(0) @db.Decimal(10, 2)
+  pricingSnapshot      Json          @default("{}")
+  notes                String?
+  internalNotes        String?
+  staffNotes           String?
+  isDelivery           Boolean       @default(false)
+  deliveryAddress      String?
+  deliveryFee          Decimal       @default(0) @db.Decimal(10, 2)
+  agreedToTerms        Boolean       @default(false)
+  termsVersion         String?
+  signatureUrl         String?
+  customerIdVerified   Boolean       @default(false)
+  licenceVerified      Boolean       @default(false)
+  extensionOfId        String?
+  createdById          String?
+  confirmedById        String?
+  checkedOutById       String?
+  checkedInById        String?
+  cancelledById        String?
+  cancellationReason   String?
+  // B2: tracks which escalation stage the overdue job has reached for
+  // this booking (0 = none, 1 = initial OVERDUE notice at +1h, 2 = +12h,
+  // 3 = +24h manager escalation, 4 = +72h auto-incident created). Stored
+  // on the booking so the job stays idempotent.
+  overdueStage         Int           @default(0)
+  // Lever 6: abandoned-cart recovery stage (0 = none, 1 = 30-min hold
+  // nudge, 2 = 2h discount offer, 3 = 12h last-chance). Incremented by
+  // the cart-recovery job; prevents duplicate emails.
+  recoveryStage        Int           @default(0)
+  // Lever 4: partner / hotel-concierge attribution. Populated when the
+  // booking comes through a partner code or widget referral. Commission
+  // is calculated on completed bookings.
+  partnerId            String?
+  partnerCode          String?
+  // Lever 1: applied yield-pricing multiplier snapshot at booking time.
+  yieldMultiplier      Decimal       @default(1) @db.Decimal(5, 3)
+  // Lever 2: geofence/zone surcharges totalled at return.
+  zoneSurchargeTotal   Decimal       @default(0) @db.Decimal(10, 2)
+  // Lever 2: fuel-delivery dispatch fees totalled during rental.
+  fuelDeliveryTotal    Decimal       @default(0) @db.Decimal(10, 2)
+  // Lever honourable: cleaning fee charged at return when an inspection
+  // item flags excessive cleaning required.
+  cleaningFee          Decimal       @default(0) @db.Decimal(10, 2)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  deletedAt            DateTime?
+
+  customer     User            @relation("BookingCustomer", fields: [customerId], references: [id])
+  vehicle      Vehicle?        @relation(fields: [vehicleId], references: [id])
+  category     VehicleCategory @relation(fields: [categoryId], references: [id])
+  depot        Depot           @relation(fields: [depotId], references: [id])
+  pickupDepot  Depot           @relation("PickupDepot", fields: [pickupDepotId], references: [id])
+  returnDepot  Depot           @relation("ReturnDepot", fields: [returnDepotId], references: [id])
+  createdBy    User?           @relation("BookingCreatedBy", fields: [createdById], references: [id])
+  confirmedBy  User?           @relation("BookingConfirmedBy", fields: [confirmedById], references: [id])
+  checkedOutBy User?           @relation("BookingCheckedOutBy", fields: [checkedOutById], references: [id])
+  checkedInBy  User?           @relation("BookingCheckedInBy", fields: [checkedInById], references: [id])
+  cancelledBy  User?           @relation("BookingCancelledBy", fields: [cancelledById], references: [id])
+  extensionOf  Booking?        @relation("BookingExtension", fields: [extensionOfId], references: [id], onDelete: SetNull)
+  extensions   Booking[]       @relation("BookingExtension")
+
+  addons                         BookingAddon[]
+  insurance                      BookingInsurance[]
+  payments                       Payment[]
+  bookingNotes                   BookingNote[]
+  statusLog                      BookingStatusLog[]
+  inspections                    Inspection[]
+  invoices                       Invoice[]
+  incidents                      Incident[]
+  infringements                  Infringement[]
+  bondLedger                     BondLedger?
+  rentalAgreements               RentalAgreement[]
+  returnAssessments              ReturnAssessment[]
+  adjustmentNotes                AdjustmentNote[]
+  supportConversations           SupportConversation[]
+  supportConversationsAttributed SupportConversation[] @relation("SupportConvAttributedBooking")
+  visitorConversions             VisitorSession[]      @relation("VisitorSessionConvertedBooking")
+  supportTickets                 SupportTicket[]
+  // Lever 5: customer review captured after return.
+  review                         Review?
+  // Lever 4: partner who referred this booking (if any).
+  partner                        Partner?              @relation(fields: [partnerId], references: [id])
+  partnerTransactions            PartnerTransaction[]
+  // Lever 2: rental zone polygon attached at pickup; events during rental.
+  rentalZone                     RentalZone?
+  zoneEvents                     ZoneEvent[]
+  speedEvents                    SpeedEvent[]
+  serviceDispatches              ServiceDispatch[]
+  // Lever 9: loyalty points awarded when booking completes.
+  loyaltyLedger                  LoyaltyLedger[]
+  // Lever 3: when this booking was fulfilled via a subscription.
+  subscriptionId                 String?
+  subscription                   Subscription?         @relation(fields: [subscriptionId], references: [id])
+  // Phase A2 — optional progressive-billing plan attached to this booking.
+  billingPlan                    BookingBillingPlan?
+  Referral                       Referral[]
+  // Mid-rental vehicle swap events. DRAFT rows created when staff enters
+  // the swap wizard; COMMITTED on confirm; VOIDED on abandonment.
+  swaps                          BookingSwap[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([vehicleId])
+  @@index([categoryId])
+  @@index([source])
+  @@index([extensionOfId])
+  @@index([pickupDateTime])
+  @@index([returnDateTime])
+  @@index([depotId, status, pickupDateTime])
+  @@index([depotId, pickupDateTime, returnDateTime])
+  @@index([customerId, status, pickupDateTime(sort: Desc)])
+  @@index([status, returnDateTime])
+  @@index([vehicleId, status, pickupDateTime])
+  @@index([partnerId])
+  @@index([subscriptionId])
+  @@index([deletedAt])
+}
+
+// Phase A2 — progressive billing plan attached to a long-term hire.
+// The first period + bond are charged online at booking time; this plan
+// then drives recurring charges on the customer's stored card via the
+// booking-billing job. Status moves to COMPLETED when nextChargeAt passes
+// the booking's returnDateTime, or CANCELLED if the booking is cancelled.
+model BookingBillingPlan {
+  id                    String               @id @default(cuid())
+  bookingId             String               @unique
+  frequency             BillingFrequency
+  amountPerPeriod       Decimal              @db.Decimal(10, 2)
+  gstPerPeriod          Decimal              @default(0) @db.Decimal(10, 2)
+  periodsTotal          Int // total number of recurring charges expected
+  periodsCompleted      Int                  @default(0)
+  nextChargeAt          DateTime             @db.Timestamptz
+  lastChargedAt         DateTime?            @db.Timestamptz
+  chargesAttempted      Int                  @default(0)
+  chargesSucceeded      Int                  @default(0)
+  chargesFailed         Int                  @default(0)
+  status                BookingBillingStatus @default(ACTIVE)
+  stripePaymentMethodId String?
+  pauseReason           String?
+  cancelReason          String?
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextChargeAt])
+}
+
+model BookingAddon {
+  id         String   @id @default(cuid())
+  bookingId  String
+  addonId    String
+  quantity   Int      @default(1)
+  unitPrice  Decimal  @db.Decimal(10, 2)
+  totalPrice Decimal  @db.Decimal(10, 2)
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  addon   Addon   @relation(fields: [addonId], references: [id])
+
+  @@index([bookingId])
+  @@index([addonId])
+}
+
+model BookingInsurance {
+  id                String   @id @default(cuid())
+  bookingId         String
+  insuranceOptionId String
+  dailyRate         Decimal  @db.Decimal(10, 2)
+  totalPrice        Decimal  @db.Decimal(10, 2)
+  // Lever 7: tracks where an insurance attach came from. WIZARD for
+  // booking-flow selection; the others are mid-/pre-rental upsells.
+  addedAt           DateTime @default(now())
+  source            String   @default("WIZARD") // WIZARD | PRE_PICKUP_UPSELL | MID_RENTAL | WEATHER_TRIGGER | TELEMETRY_TRIGGER
+
+  booking         Booking         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  insuranceOption InsuranceOption @relation(fields: [insuranceOptionId], references: [id])
+
+  @@index([bookingId])
+  @@index([insuranceOptionId])
+  @@index([source])
+}
+
+model BookingNote {
+  id         String   @id @default(cuid())
+  bookingId  String
+  userId     String
+  note       String
+  isInternal Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@index([bookingId])
+  @@index([userId])
+}
+
+model BookingStatusLog {
+  id             String         @id @default(cuid())
+  bookingId      String
+  previousStatus BookingStatus?
+  newStatus      BookingStatus
+  changedById    String?
+  reason         String?
+  timestamp      DateTime       @default(now()) @db.Timestamptz
+  createdAt      DateTime       @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([timestamp])
+}
+
+// ============================================================================
+// PAYMENTS & FINANCE
+// ============================================================================
+
+/// Financial ledger — single source of truth for cash flows. MUST NOT be
+/// hard-deleted; use `deletedAt` only for archival. 7-year ATO retention.
+model Payment {
+  id                    String        @id @default(cuid())
+  reference             String        @unique
+  customerId            String?
+  bookingId             String?
+  type                  PaymentType
+  method                PaymentMethod
+  amount                Decimal       @db.Decimal(10, 2)
+  gstAmount             Decimal       @default(0) @db.Decimal(10, 2)
+  stripePaymentIntentId String?
+  stripeChargeId        String?
+  status                PaymentStatus @default(PENDING)
+  // Stripe-hosted receipt URL (returned by the charge object). Kept
+  // for audit; not the customer-facing branded receipt.
+  receiptUrl            String?
+  // Branded receipt PDF generated by the platform on payment success.
+  // Persisted to S3/MinIO via uploadFile(); referenced here so the
+  // booking + customer documents pages can link it without
+  // re-rendering. Distinct from receiptUrl (which is Stripe's).
+  receiptPdfUrl         String?
+  receiptPdfKey         String?
+  receiptNumber         String?       @unique
+  notes                 String?
+  processedById         String?
+  processedAt           DateTime?     @db.Timestamptz
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  deletedAt             DateTime?
+
+  customer       User?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  booking        Booking?        @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  events         PaymentEvent[]
+  swap           BookingSwap?
+  adjustmentNote AdjustmentNote?
+
+  @@index([bookingId])
+  @@index([customerId])
+  @@index([status])
+  @@index([type])
+  @@index([bookingId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([type, createdAt])
+  @@index([type, status, createdAt])
+  @@index([deletedAt])
+}
+
+/// GST/BAS tax record. ABN appears on invoice. MUST NOT be hard-deleted
+/// (ATO 7-year retention). Use status VOID for lifecycle voids; downstream
+/// changes to a SENT/PAID invoice are recorded as `AdjustmentNote` rows
+/// (positive or negative) referencing this invoice. The original
+/// subtotal/gstAmount/totalAmount on this row are IMMUTABLE once issued —
+/// the booking's running financial picture = this invoice + sum of its
+/// adjustment notes.
+model Invoice {
+  id            String        @id @default(cuid())
+  invoiceNumber String        @unique
+  customerId    String?
+  bookingId     String?
+  lineItems     Json          @default("[]")
+  subtotal      Decimal       @db.Decimal(10, 2)
+  gstAmount     Decimal       @db.Decimal(10, 2)
+  totalAmount   Decimal       @db.Decimal(10, 2)
+  status        InvoiceStatus @default(DRAFT)
+  dueDate       DateTime?     @db.Date
+  // Distinct from createdAt: the moment status moved to SENT and the
+  // document number was committed. Drives the FY counter scope and the
+  // displayed "Issue date" on the PDF.
+  issuedAt      DateTime?     @db.Timestamptz
+  sentAt        DateTime?     @db.Timestamptz
+  paidAt        DateTime?     @db.Timestamptz
+  pdfUrl        String?
+  pdfKey        String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+
+  booking         Booking?         @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  creditNotes     CreditNote[]
+  adjustmentNotes AdjustmentNote[]
+
+  @@index([customerId])
+  @@index([bookingId])
+  @@index([status])
+  @@index([issuedAt])
+  @@index([deletedAt])
+}
+
+/// Refund audit trail — MUST NOT be hard-deleted.
+///
+/// Legacy: existed before the `AdjustmentNote` lifecycle. Retained because
+/// `BookingSwap.creditNoteId` still references it for downgrades that
+/// settle via account credit (Stripe charge >180 days old). New issuance
+/// goes through AdjustmentNote; CreditNote is kept for back-compat and
+/// can be retired in a follow-up once swaps migrate.
+model CreditNote {
+  id         String    @id @default(cuid())
+  invoiceId  String
+  amount     Decimal   @db.Decimal(10, 2)
+  reason     String
+  issuedById String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  invoice     Invoice      @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  bookingSwap BookingSwap?
+
+  @@index([invoiceId])
+  @@index([deletedAt])
+}
+
+/// ATO §29-75 adjustment note. Issued whenever the consideration for a
+/// taxable supply changes after the original tax invoice was issued —
+/// extensions, vehicle swaps, damage charges, late/fuel/cleaning fees,
+/// infringement recovery, cancellation refunds, manual corrections.
+///
+/// `type = INCREASE` adds to the booking's running total (positive
+/// adjustment); `type = DECREASE` reduces it. The original Invoice row's
+/// subtotal/gstAmount/totalAmount are immutable; the booking's true
+/// financial position = invoice.totalAmount + Σ adjustmentNotes.totalAmount
+/// (with DECREASE values stored as positive numbers and subtracted).
+///
+/// MUST NOT be hard-deleted (7-year retention). Use `status = VOID` to
+/// mark issued-in-error; never delete.
+model AdjustmentNote {
+  id               String               @id @default(cuid())
+  adjustmentNumber String               @unique // e.g. ADJ-2026-000001
+  invoiceId        String
+  bookingId        String?
+  customerId       String?
+  type             AdjustmentType
+  reason           AdjustmentReason
+  // Customer-facing description rendered prominently on the PDF — eg
+  // "2-day rental extension", "Vehicle upgrade to 150cc", "Damage to
+  // front fairing", "Late return fee (3hr)".
+  description      String
+  // JSON-serialised line items (description, quantity, unitPrice,
+  // gstAmount, totalPrice). Validated by AdjustmentNoteLineItemSchema.
+  lineItems        Json                 @default("[]")
+  // Always stored as positive values; `type` indicates direction.
+  subtotal         Decimal              @db.Decimal(10, 2)
+  gstAmount        Decimal              @db.Decimal(10, 2)
+  totalAmount      Decimal              @db.Decimal(10, 2)
+  status           AdjustmentNoteStatus @default(ISSUED)
+  pdfUrl           String?
+  pdfKey           String?
+  issuedAt         DateTime             @default(now()) @db.Timestamptz
+  issuedById       String?
+  // The Payment row that captured (INCREASE) or refunded (DECREASE) the
+  // delta. Nullable because some adjustments — eg waived fees, manual
+  // correction credits — don't move money. 1:1 when present.
+  paymentId        String?              @unique
+  // Marketing / accounting void reason; populated when status = VOID.
+  voidReason       String?
+  voidedAt         DateTime?            @db.Timestamptz
+  voidedById       String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  deletedAt        DateTime?
+
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  booking  Booking? @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  customer User?    @relation("AdjustmentNoteCustomer", fields: [customerId], references: [id], onDelete: SetNull)
+  issuedBy User?    @relation("AdjustmentNoteIssuedBy", fields: [issuedById], references: [id], onDelete: SetNull)
+  payment  Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([bookingId])
+  @@index([customerId])
+  @@index([issuedAt])
+  @@index([reason])
+  @@index([deletedAt])
+}
+
+enum AdjustmentType {
+  INCREASE
+  DECREASE
+}
+
+enum AdjustmentReason {
+  EXTENSION
+  SWAP
+  DAMAGE
+  LATE_FEE
+  FUEL
+  CLEANING
+  ZONE_SURCHARGE
+  INFRINGEMENT
+  CANCELLATION
+  REFUND
+  MANUAL
+  OTHER
+}
+
+enum AdjustmentNoteStatus {
+  ISSUED
+  VOID
+}
+
+/// Per-(documentType, financialYear) sequence counter used by the
+/// document-numbering service to generate monotonic, FY-scoped numbers
+/// (INV-2026-000001, ADJ-2026-000001, RCT-2026-000001).
+///
+/// Reads use SELECT … FOR UPDATE inside the issuing transaction to
+/// guarantee no duplicate numbers under concurrency. Australian FY ends
+/// 30 June; FY 2026 = 1 Jul 2025 → 30 Jun 2026.
+model DocumentCounter {
+  documentType  TaxDocumentType
+  financialYear Int
+  nextValue     Int             @default(1)
+  updatedAt     DateTime        @updatedAt
+
+  @@id([documentType, financialYear])
+}
+
+enum TaxDocumentType {
+  INVOICE
+  ADJUSTMENT_NOTE
+  RECEIPT
+}
+
+/// Bond financial record (Stripe hold + capture history). MUST NOT be
+/// hard-deleted — breaks bond reconciliation.
+model BondLedger {
+  id                    String     @id @default(cuid())
+  bookingId             String     @unique
+  customerId            String
+  heldAmount            Decimal    @db.Decimal(10, 2)
+  capturedAmount        Decimal    @default(0) @db.Decimal(10, 2)
+  releasedAmount        Decimal    @default(0) @db.Decimal(10, 2)
+  status                BondStatus @default(HELD)
+  stripePaymentIntentId String?
+  deductions            Json       @default("[]")
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+  deletedAt             DateTime?
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([customerId])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+model DailyRevenue {
+  id              String   @id @default(cuid())
+  date            DateTime @db.Date
+  depotId         String
+  bookingRevenue  Decimal  @default(0) @db.Decimal(12, 2)
+  addonRevenue    Decimal  @default(0) @db.Decimal(12, 2)
+  damageRevenue   Decimal  @default(0) @db.Decimal(12, 2)
+  lateFeesRevenue Decimal  @default(0) @db.Decimal(12, 2)
+  totalRevenue    Decimal  @default(0) @db.Decimal(12, 2)
+  totalGst        Decimal  @default(0) @db.Decimal(12, 2)
+  totalRefunds    Decimal  @default(0) @db.Decimal(12, 2)
+  netRevenue      Decimal  @default(0) @db.Decimal(12, 2)
+
+  @@unique([date, depotId])
+}
+
+/// Mid-rental vehicle swap event. First-class record of the swap — links
+/// the outgoing and incoming vehicles, the paired POST_HIRE / PRE_HIRE
+/// inspections, any fault work order or accident incident, the price
+/// adjustment Payment (charge or refund), and the signed agreement PDF.
+///
+/// Pricing rule: `reason` drives cost impact. Spec changes (UPGRADE /
+/// DOWNGRADE / LATERAL) can settle a delta; fault and operational reasons
+/// force `priceAdjustment = 0` regardless of the incoming vehicle's rate.
+/// `origin` is audit-only and does not affect pricing.
+///
+/// MUST NOT be hard-deleted — referenced by Stripe refunds and work-order
+/// audit trails. Use `status = VOIDED` to mark abandoned DRAFT rows.
+model BookingSwap {
+  id                       String             @id @default(cuid())
+  bookingId                String
+  outgoingVehicleId        String
+  incomingVehicleId        String?
+  swappedAt                DateTime           @default(now()) @db.Timestamptz
+  swappedById              String
+  reason                   SwapReason
+  origin                   SwapOrigin
+  reasonNotes              String
+  // Free-form reference to where this was raised: support ticket #, call
+  // log ref, telematics event id. Shown verbatim to the repair shop on
+  // fault swaps so the technician sees the customer's wording.
+  originDetails            String?
+  priceAdjustmentAmount    Decimal            @default(0) @db.Decimal(10, 2)
+  priceAdjustmentGst       Decimal            @default(0) @db.Decimal(10, 2)
+  // Positive = customer pays, negative = customer refunded, zero = no change.
+  priceAdjustmentDirection SwapPriceDirection @default(NONE)
+  paymentId                String?            @unique
+  outgoingInspectionId     String?            @unique
+  incomingInspectionId     String?            @unique
+  workOrderId              String?            @unique
+  incidentId               String?            @unique
+  documentUrl              String?
+  customerSignatureUrl     String?
+  staffSignatureUrl        String?
+  // When the original Stripe charge is too old for refund (>180d), the
+  // downgrade settles via a CreditNote against the booking invoice instead.
+  creditNoteId             String?            @unique
+  // Set when the new category's bond amount differs from the old — we do
+  // NOT resize the Stripe hold; we surface the variance here for audit.
+  bondVarianceAmount       Decimal?           @db.Decimal(10, 2)
+  status                   BookingSwapStatus  @default(DRAFT)
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+  deletedAt                DateTime?
+
+  booking            Booking               @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  outgoingVehicle    Vehicle               @relation("BookingSwapOutgoingVehicle", fields: [outgoingVehicleId], references: [id], onDelete: Restrict)
+  incomingVehicle    Vehicle?              @relation("BookingSwapIncomingVehicle", fields: [incomingVehicleId], references: [id], onDelete: Restrict)
+  swappedBy          User                  @relation("BookingSwapSwappedBy", fields: [swappedById], references: [id])
+  payment            Payment?              @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  outgoingInspection Inspection?           @relation("BookingSwapOutgoingInspection", fields: [outgoingInspectionId], references: [id], onDelete: SetNull)
+  incomingInspection Inspection?           @relation("BookingSwapIncomingInspection", fields: [incomingInspectionId], references: [id], onDelete: SetNull)
+  workOrder          MaintenanceWorkOrder? @relation(fields: [workOrderId], references: [id], onDelete: SetNull)
+  incident           Incident?             @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  creditNote         CreditNote?           @relation(fields: [creditNoteId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([outgoingVehicleId])
+  @@index([incomingVehicleId])
+  @@index([status, createdAt])
+  @@index([reason])
+  @@index([deletedAt])
+}
+
+enum SwapPriceDirection {
+  NONE
+  CHARGE
+  REFUND
+}
+
+// ============================================================================
+// INSPECTIONS
+// ============================================================================
+
+model Inspection {
+  id                   String            @id @default(cuid())
+  vehicleId            String
+  bookingId            String?
+  type                 InspectionType
+  inspectorId          String
+  depotId              String
+  dateTime             DateTime          @default(now()) @db.Timestamptz
+  odometerKm           Int
+  fuelLevel            Int // 0-100
+  overallCondition     VehicleCondition
+  bodyDamageMap        Json              @default("{}")
+  tyreFrontDepth       Decimal?          @db.Decimal(4, 2)
+  tyreRearDepth        Decimal?          @db.Decimal(4, 2)
+  tyreFrontPressure    Int?
+  tyreRearPressure     Int?
+  brakeCondition       VehicleCondition?
+  lightsWorking        Boolean           @default(true)
+  hornWorking          Boolean           @default(true)
+  mirrorsCondition     VehicleCondition?
+  indicatorsWorking    Boolean           @default(true)
+  engineRunning        Boolean           @default(true)
+  batteryCondition     VehicleCondition?
+  helmetCondition      VehicleCondition?
+  lockProvided         Boolean           @default(false)
+  notes                String?
+  customerSignatureUrl String?
+  staffSignatureUrl    String?
+  customerAckedAt      DateTime?         @db.Timestamptz
+  status               InspectionStatus  @default(DRAFT)
+  purpose              InspectionPurpose @default(CHECK_OUT)
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  vehicle          Vehicle           @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  booking          Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  inspector        User              @relation(fields: [inspectorId], references: [id], onDelete: Restrict)
+  depot            Depot             @relation(fields: [depotId], references: [id])
+  photos           InspectionPhoto[]
+  items            InspectionItem[]
+  rentalAgreements RentalAgreement[]
+  returnAssessment ReturnAssessment?
+  damageCharges    DamageCharge[]
+  swapAsOutgoing   BookingSwap?      @relation("BookingSwapOutgoingInspection")
+  swapAsIncoming   BookingSwap?      @relation("BookingSwapIncomingInspection")
+
+  @@index([vehicleId, dateTime(sort: Desc)])
+  @@index([bookingId, type])
+  @@index([type])
+  @@index([status])
+  @@index([inspectorId])
+}
+
+model InspectionPhoto {
+  id           String   @id @default(cuid())
+  inspectionId String
+  url          String
+  caption      String?
+  damageZone   String?
+  createdAt    DateTime @default(now())
+
+  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  @@index([inspectionId])
+}
+
+model InspectionItem {
+  id           String           @id @default(cuid())
+  inspectionId String
+  component    String
+  condition    VehicleCondition
+  notes        String?
+  flagged      Boolean          @default(false)
+  createdAt    DateTime         @default(now())
+
+  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  @@index([inspectionId])
+}
+
+// ============================================================================
+// MAINTENANCE
+// ============================================================================
+
+model MaintenanceSchedule {
+  id                String          @id @default(cuid())
+  vehicleId         String
+  type              MaintenanceType
+  intervalKm        Int?
+  intervalDays      Int?
+  lastCompletedDate DateTime?       @db.Date
+  lastCompletedKm   Int?
+  nextDueDate       DateTime?       @db.Date
+  nextDueKm         Int?
+  isActive          Boolean         @default(true)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  @@index([vehicleId])
+  @@index([isActive, nextDueDate])
+}
+
+/// Asset-history record for depreciation + book-value calculations.
+/// MUST NOT be hard-deleted — skews vehicle profitability reports.
+model MaintenanceWorkOrder {
+  id                    String            @id @default(cuid())
+  workOrderNumber       String            @unique
+  vehicleId             String
+  depotId               String
+  type                  MaintenanceType
+  priority              WorkOrderPriority @default(MEDIUM)
+  status                WorkOrderStatus   @default(OPEN)
+  title                 String
+  description           String?
+  reportedById          String?
+  assignedToId          String?
+  estimatedHours        Decimal?          @db.Decimal(6, 2)
+  actualHours           Decimal?          @db.Decimal(6, 2)
+  estimatedCost         Decimal?          @db.Decimal(10, 2)
+  actualCost            Decimal?          @db.Decimal(10, 2)
+  startedAt             DateTime?         @db.Timestamptz
+  completedAt           DateTime?         @db.Timestamptz
+  // A5: when the service is *planned* for (may differ from startedAt).
+  // Availability treats any OPEN/ASSIGNED/IN_PROGRESS/AWAITING_PARTS work
+  // order whose scheduled window overlaps a booking request as a conflict.
+  scheduledStartAt      DateTime?         @db.Timestamptz
+  scheduledEndAt        DateTime?         @db.Timestamptz
+  labourCost            Decimal?          @db.Decimal(10, 2)
+  partsCost             Decimal?          @db.Decimal(10, 2)
+  externalSupplier      String?
+  externalInvoiceRef    String?
+  notes                 String?
+  attachments           String[]
+  odometerAtService     Int?
+  relatedIncidentId     String?
+  relatedInspectionId   String?
+  relatedDamageChargeId String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  deletedAt             DateTime?
+
+  vehicle       Vehicle           @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  depot         Depot             @relation(fields: [depotId], references: [id])
+  reportedBy    User?             @relation("WorkOrderReportedBy", fields: [reportedById], references: [id], onDelete: SetNull)
+  assignedTo    User?             @relation("WorkOrderAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  parts         MaintenancePart[]
+  logs          MaintenanceLog[]
+  damageCharges DamageCharge[]
+  documents     VehicleDocument[] @relation("WorkOrderDocuments")
+  bookingSwap   BookingSwap?
+
+  @@index([status])
+  @@index([vehicleId])
+  @@index([priority])
+  @@index([assignedToId])
+  @@index([depotId, status, scheduledStartAt])
+  @@index([deletedAt])
+}
+
+model MaintenancePart {
+  id          String   @id @default(cuid())
+  workOrderId String
+  partName    String
+  partNumber  String?
+  supplier    String?
+  quantity    Int      @default(1)
+  unitCost    Decimal  @db.Decimal(10, 2)
+  totalCost   Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  workOrder MaintenanceWorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+
+  @@index([workOrderId])
+}
+
+model MaintenanceLog {
+  id            String   @id @default(cuid())
+  workOrderId   String
+  action        String
+  performedById String?
+  notes         String?
+  timestamp     DateTime @default(now())
+
+  workOrder MaintenanceWorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+
+  @@index([workOrderId])
+}
+
+// ============================================================================
+// INCIDENTS
+// ============================================================================
+
+/// Insurance claim / damage evidence. MUST NOT be hard-deleted — claims
+/// may be revisited years later.
+model Incident {
+  id                   String           @id @default(cuid())
+  incidentNumber       String           @unique
+  vehicleId            String
+  bookingId            String?
+  customerId           String?
+  type                 IncidentType
+  severity             IncidentSeverity
+  status               IncidentStatus   @default(REPORTED)
+  dateTime             DateTime         @db.Timestamptz
+  location             String?
+  description          String
+  reportedById         String?
+  assignedToId         String?
+  customerNotifiedAt   DateTime?        @db.Timestamptz
+  policeReportNumber   String?
+  insuranceClaimNumber String?
+  estimatedDamageCost  Decimal?         @db.Decimal(10, 2)
+  actualDamageCost     Decimal?         @db.Decimal(10, 2)
+  customerLiable       Boolean          @default(false)
+  customerChargeAmount Decimal?         @db.Decimal(10, 2)
+  thirdPartyInvolved   Boolean          @default(false)
+  thirdPartyDetails    Json?
+  resolution           String?
+  resolvedAt           DateTime?        @db.Timestamptz
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  deletedAt            DateTime?
+
+  vehicle        Vehicle            @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  booking        Booking?           @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  reportedBy     User?              @relation("IncidentReportedBy", fields: [reportedById], references: [id], onDelete: SetNull)
+  assignedTo     User?              @relation("IncidentAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  photos         IncidentPhoto[]
+  documents      IncidentDocument[]
+  notes          IncidentNote[]
+  supportTickets SupportTicket[]
+  bookingSwap    BookingSwap?
+
+  @@index([vehicleId, createdAt(sort: Desc)])
+  @@index([bookingId, status])
+  @@index([status])
+  @@index([createdAt])
+  @@index([reportedById])
+  @@index([assignedToId])
+  @@index([customerId])
+  @@index([deletedAt])
+}
+
+model IncidentPhoto {
+  id         String   @id @default(cuid())
+  incidentId String
+  url        String
+  caption    String?
+  createdAt  DateTime @default(now())
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+}
+
+model IncidentDocument {
+  id          String  @id @default(cuid())
+  incidentId  String
+  type        String
+  fileUrl     String
+  description String?
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@index([incidentId])
+}
+
+model IncidentNote {
+  id         String   @id @default(cuid())
+  incidentId String
+  userId     String
+  note       String
+  isInternal Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  incident Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@index([incidentId])
+  @@index([userId])
+}
+
+/// Legal / compliance record (traffic / toll / parking). MUST NOT be
+/// hard-deleted; infringement lifecycle uses status transitions.
+model Infringement {
+  id                 String             @id @default(cuid())
+  vehicleId          String
+  bookingId          String?
+  customerId         String?
+  type               InfringementType
+  issuer             String
+  referenceNumber    String             @unique
+  offenceDate        DateTime           @db.Timestamptz
+  amount             Decimal            @db.Decimal(10, 2)
+  // Honourable: flat admin fee added on top of the issuer amount when
+  // we pass through to the customer. Configurable per org; default $55.
+  adminFee           Decimal            @default(0) @db.Decimal(10, 2)
+  status             InfringementStatus @default(RECEIVED)
+  nominatedAt        DateTime?          @db.Timestamptz
+  customerNotifiedAt DateTime?          @db.Timestamptz
+  dueDate            DateTime?          @db.Date
+  documentUrl        String?
+  notes              String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  deletedAt          DateTime?
+
+  vehicle   Vehicle           @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  booking   Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  documents VehicleDocument[] @relation("InfringementDocuments")
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([vehicleId])
+  @@index([customerId])
+  @@index([bookingId])
+  @@index([deletedAt])
+}
+
+// ============================================================================
+// E-TOLL INTEGRATION
+// ============================================================================
+
+model EtollAccount {
+  id             String           @id @default(cuid())
+  name           String
+  loginUrl       String           @default("https://account.myetoll.transport.nsw.gov.au/login")
+  username       String
+  passwordEnc    String
+  passwordIv     String
+  passwordTag    String
+  isActive       Boolean          @default(true)
+  adminFeeCents  Int              @default(2500)
+  lastSyncAt     DateTime?
+  lastSyncStatus EtollSyncStatus?
+  lastSyncError  String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  syncs         EtollSync[]
+  unmatchedRows EtollUnmatchedRow[]
+}
+
+model EtollSync {
+  id            String          @id @default(cuid())
+  accountId     String
+  status        EtollSyncStatus @default(RUNNING)
+  startedAt     DateTime        @default(now())
+  finishedAt    DateTime?
+  periodFrom    DateTime
+  periodTo      DateTime
+  rowsFetched   Int             @default(0)
+  rowsCreated   Int             @default(0)
+  rowsDuplicate Int             @default(0)
+  rowsUnmatched Int             @default(0)
+  rowsSkipped   Int             @default(0)
+  error         String?
+  rawFileUrl    String?
+  unmatched     Json?
+
+  account EtollAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, startedAt])
+}
+
+enum EtollSyncStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+model EtollUnmatchedRow {
+  id                     String    @id @default(cuid())
+  accountId              String
+  externalHash           String    @unique
+  eventAt                DateTime
+  rego                   String
+  concession             String
+  gantryCode             String?
+  rawDetails             String?
+  amountCents            Int
+  resolvedAt             DateTime?
+  resolvedById           String?
+  resolvedAction         String?
+  resolvedInfringementId String?
+  resolutionNotes        String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  account EtollAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, resolvedAt])
+  @@index([eventAt])
+}
+
+// ============================================================================
+// SUPPORT CHATBOT
+// ============================================================================
+
+enum SupportCategory {
+  ABANDONED_VEHICLE
+  BREAKDOWN
+  PAYMENT
+  GENERAL
+}
+
+enum SupportPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SupportTicketStatus {
+  OPEN
+  ASSIGNED
+  PENDING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum SupportSenderRole {
+  CUSTOMER
+  STAFF
+  AI
+  SYSTEM
+}
+
+enum SupportSource {
+  WIDGET
+  LIVE_VIEW
+}
+
+enum SupportFeedbackKind {
+  CSAT
+  AI_HELPFUL
+  AI_NOT_HELPFUL
+}
+
+// ============================================================================
+// NOTIFICATIONS & COMMS
+// ============================================================================
+
+model Notification {
+  id        String               @id @default(cuid())
+  userId    String
+  type      NotificationType
+  category  NotificationCategory @default(TRANSACTIONAL)
+  channel   NotificationChannel
+  title     String
+  body      String
+  data      Json                 @default("{}")
+  status    NotificationStatus   @default(PENDING)
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([type, createdAt])
+  @@index([status])
+}
+
+model CommunicationLog {
+  id                String                  @id @default(cuid())
+  customerId        String?
+  bookingId         String?
+  campaignId        String?
+  type              NotificationType        @default(CUSTOM)
+  category          NotificationCategory    @default(TRANSACTIONAL)
+  channel           NotificationChannel
+  direction         CommunicationDirection
+  subject           String?
+  body              String                  @db.Text
+  sentById          String?
+  templateUsed      String?
+  providerMessageId String?
+  providerStatus    String?
+  status            CampaignRecipientStatus @default(SENT)
+  errorMessage      String?
+  attachmentRefs    Json?
+  sentAt            DateTime                @default(now())
+  deliveredAt       DateTime?
+  openedAt          DateTime?
+
+  customer User?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  campaign Campaign? @relation(fields: [campaignId], references: [id])
+
+  @@index([customerId, sentAt(sort: Desc)])
+  @@index([campaignId, status])
+  @@index([type, sentAt(sort: Desc)])
+  @@index([channel, sentAt(sort: Desc)])
+  @@index([bookingId])
+  @@index([sentById])
+}
+
+enum TemplateFormat {
+  PLAIN_TEXT
+  HTML
+}
+
+model NotificationTemplate {
+  id                 String                @id @default(cuid())
+  key                String                @unique
+  type               NotificationType?     @unique
+  category           NotificationCategory  @default(TRANSACTIONAL)
+  name               String
+  description        String?
+  channels           NotificationChannel[]
+  subject            String?
+  bodyTemplate       String                @db.Text
+  // Optional HTML override used ONLY for the EMAIL channel. When set, this
+  // is the rich HTML body (mobile-responsive, with logo + policy footer).
+  // `bodyTemplate` remains the short plain-text body used for SMS / IN_APP
+  // / PUSH. Multi-channel templates set both; EMAIL-only templates may use
+  // either depending on `format`.
+  emailBodyHtml      String?               @db.Text
+  format             TemplateFormat        @default(PLAIN_TEXT)
+  variables          String[]
+  defaultAttachments Json?
+  isActive           Boolean               @default(true)
+  createdById        String?
+  updatedById        String?
+  archivedAt         DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  versions  NotificationTemplateVersion[]
+  campaigns Campaign[]
+}
+
+model NotificationTemplateVersion {
+  id            String                @id @default(cuid())
+  templateId    String
+  subject       String?
+  bodyTemplate  String                @db.Text
+  emailBodyHtml String?               @db.Text
+  format        TemplateFormat        @default(PLAIN_TEXT)
+  channels      NotificationChannel[]
+  variables     String[]
+  updatedById   String?
+  createdAt     DateTime              @default(now())
+
+  template NotificationTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@index([templateId, createdAt(sort: Desc)])
+  @@index([updatedById])
+}
+
+model NotificationAutomation {
+  id          String                @id @default(cuid())
+  type        NotificationType      @unique
+  enabled     Boolean               @default(true)
+  channels    NotificationChannel[]
+  leadTime    Json?
+  description String?
+  updatedById String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+}
+
+model Segment {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  filters     Json
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  archivedAt  DateTime?
+
+  campaigns Campaign[]
+
+  @@index([archivedAt])
+  @@index([createdById])
+}
+
+model Campaign {
+  id                 String                @id @default(cuid())
+  name               String
+  templateId         String?
+  segmentId          String?
+  manualRecipientIds String[]
+  channels           NotificationChannel[]
+  subject            String?
+  bodyOverride       String?               @db.Text
+  attachmentRefs     Json?
+  scheduledFor       DateTime?
+  sentAt             DateTime?
+  status             CampaignStatus        @default(DRAFT)
+  stats              Json                  @default("{}")
+  createdById        String?
+  approvedById       String?
+  notes              String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  template   NotificationTemplate? @relation(fields: [templateId], references: [id])
+  segment    Segment?              @relation(fields: [segmentId], references: [id])
+  recipients CampaignRecipient[]
+  logs       CommunicationLog[]
+
+  @@index([status, scheduledFor])
+  @@index([createdAt(sort: Desc)])
+  @@index([createdById])
+  @@index([approvedById])
+}
+
+model CampaignRecipient {
+  id                 String                  @id @default(cuid())
+  campaignId         String
+  customerId         String
+  status             CampaignRecipientStatus @default(PENDING)
+  channel            NotificationChannel
+  communicationLogId String?
+  errorMessage       String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, customerId, channel])
+  @@index([campaignId, status])
+  @@index([customerId])
+}
+
+// ============================================================================
+// AUDIT & SYSTEM
+// ============================================================================
+
+enum AuditCategory {
+  AUTH
+  PAGE_VIEW
+  MUTATION
+  QUERY
+  JOB
+  API
+  WEBHOOK
+}
+
+enum AuditStatus {
+  SUCCESS
+  FAILURE
+  DENIED
+}
+
+model AuditLog {
+  id             String        @id @default(cuid())
+  userId         String?
+  // When set, the row was created during an admin impersonation session.
+  // `userId` remains the user whose context the action ran under (so
+  // "viewing/mutating as them" is tagged to them); `impersonatorId` is
+  // the admin who initiated the session.
+  impersonatorId String?
+  category       AuditCategory @default(MUTATION)
+  action         String
+  entity         String
+  entityId       String?
+  method         String?
+  path           String?
+  status         AuditStatus   @default(SUCCESS)
+  durationMs     Int?
+  depotId        String?
+  reqId          String?
+  errorCode      String?
+  previousData   Json?
+  newData        Json?
+  ipAddress      String?
+  userAgent      String?
+  timestamp      DateTime      @default(now())
+
+  user  User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  depot Depot? @relation(fields: [depotId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([timestamp])
+  @@index([category, timestamp])
+  @@index([status, timestamp])
+  @@index([depotId, timestamp])
+  @@index([reqId])
+  @@index([impersonatorId])
+}
+
+model SystemSetting {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json
+  group       String?
+  description String?
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+model FeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  enabled     Boolean  @default(false)
+  description String?
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  name        String
+  keyHash     String    @unique
+  permissions String[]
+  createdById String?
+  lastUsedAt  DateTime? @db.Timestamptz
+  expiresAt   DateTime? @db.Timestamptz
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isActive])
+  @@index([createdById])
+  @@index([expiresAt])
+}
+
+model PushSubscription {
+  id              String    @id @default(cuid())
+  userId          String
+  endpoint        String    @unique
+  p256dh          String
+  auth            String
+  userAgent       String?
+  createdAt       DateTime  @default(now())
+  lastDeliveredAt DateTime?
+  lastFailedAt    DateTime?
+  failureCount    Int       @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VehicleTelemetry {
+  id         String   @id @default(cuid())
+  vehicleId  String?
+  deviceId   String
+  timestamp  DateTime
+  latitude   Float
+  longitude  Float
+  speedKph   Float?
+  headingDeg Float?
+  odometerKm Float?
+  batteryPct Float?
+  ignitionOn Boolean?
+  source     String?
+  raw        Json?
+  createdAt  DateTime @default(now())
+
+  vehicle Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  @@index([vehicleId, timestamp])
+  @@index([deviceId, timestamp])
+}
+
+// ============================================================================
+// RENTAL AGREEMENTS & RETURN ASSESSMENTS
+// ============================================================================
+
+model RentalAgreement {
+  id                   String          @id @default(cuid())
+  bookingId            String
+  inspectionId         String
+  agreementNumber      String          @unique
+  version              Int             @default(1)
+  termsVersion         String
+  status               AgreementStatus @default(DRAFT)
+  customerSignatureUrl String?
+  customerInitialsUrl  String?
+  staffSignatureUrl    String?
+  staffId              String?
+  pdfUrl               String?
+  pdfKey               String?
+  contentSnapshot      Json            @default("{}")
+  pagesInitialled      Json            @default("[]")
+  timestampTokenKey    String?
+  timestampTsaUrl      String?
+  timestampSerial      String?
+  timestampStatus      TimestampStatus @default(PENDING)
+  timestampedAt        DateTime?
+  signedAt             DateTime?
+  supersededAt         DateTime?
+  supersededReason     String?
+  ipAddress            String?
+  userAgent            String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  // Legal document — keep Restrict so Booking cannot be hard-deleted while
+  // an agreement exists. Booking should be soft-deleted (deletedAt) instead.
+  booking    Booking    @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
+  staff      User?      @relation(fields: [staffId], references: [id], onDelete: SetNull)
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([staffId])
+}
+
+model ReturnAssessment {
+  id                   String          @id @default(cuid())
+  bookingId            String          @unique
+  inspectionId         String          @unique
+  assessmentNumber     String          @unique
+  version              Int             @default(1)
+  status               ReturnStatus    @default(DRAFT)
+  contentSnapshot      Json            @default("{}")
+  pagesInitialled      Json            @default("[]")
+  lateFeeAmount        Decimal         @default(0) @db.Decimal(10, 2)
+  fuelChargeAmount     Decimal         @default(0) @db.Decimal(10, 2)
+  damageChargesTotal   Decimal         @default(0) @db.Decimal(10, 2)
+  pendingQuoteCap      Decimal         @default(0) @db.Decimal(10, 2)
+  customerTotalDueNow  Decimal         @default(0) @db.Decimal(10, 2)
+  customerSignatureUrl String?
+  customerInitialsUrl  String?
+  staffSignatureUrl    String?
+  staffId              String?
+  pdfUrl               String?
+  pdfKey               String?
+  timestampTokenKey    String?
+  timestampTsaUrl      String?
+  timestampSerial      String?
+  timestampStatus      TimestampStatus @default(PENDING)
+  timestampedAt        DateTime?
+  signedAt             DateTime?
+  finalisedAt          DateTime?
+  ipAddress            String?
+  userAgent            String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  // Damage/inspection evidence — Restrict so Booking cannot be hard-deleted
+  // while an assessment exists.
+  booking       Booking        @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  inspection    Inspection     @relation(fields: [inspectionId], references: [id], onDelete: Restrict)
+  staff         User?          @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  damageCharges DamageCharge[]
+
+  @@index([status])
+  @@index([staffId])
+}
+
+model DamageTariff {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  name          String
+  description   String?
+  defaultPrice  Decimal  @db.Decimal(10, 2)
+  categoryScope String[]
+  severityHint  String?
+  isActive      Boolean  @default(true)
+  displayOrder  Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  charges DamageCharge[]
+
+  @@index([isActive])
+}
+
+model DamageCharge {
+  id                 String           @id @default(cuid())
+  returnAssessmentId String
+  inspectionId       String
+  damageTariffId     String?
+  description        String
+  markerRef          String?
+  severity           String
+  resolution         ChargeResolution
+  amount             Decimal          @default(0) @db.Decimal(10, 2)
+  quoteCapAmount     Decimal?         @db.Decimal(10, 2)
+  status             ChargeStatus     @default(PROVISIONAL)
+  workOrderId        String?
+  photoUrls          String[]
+  staffNote          String?
+  createdById        String
+  resolvedById       String?
+  resolvedAt         DateTime?
+  capturedPaymentId  String?
+  bondDeductionCents Int?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  returnAssessment ReturnAssessment      @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
+  inspection       Inspection            @relation(fields: [inspectionId], references: [id])
+  damageTariff     DamageTariff?         @relation(fields: [damageTariffId], references: [id])
+  workOrder        MaintenanceWorkOrder? @relation(fields: [workOrderId], references: [id])
+  createdBy        User                  @relation("DamageChargeCreatedBy", fields: [createdById], references: [id])
+  resolvedBy       User?                 @relation("DamageChargeResolvedBy", fields: [resolvedById], references: [id])
+
+  @@index([returnAssessmentId])
+  @@index([status])
+  @@index([workOrderId])
+  @@index([inspectionId])
+  @@index([createdById])
+  @@index([resolvedById])
+}
+
+// ============================================================================
+// SUPPORT CHATBOT MODELS
+// ============================================================================
+
+// A conversation thread between a customer (or guest) and the support
+// system. Starts on widget open; persists whether the interaction
+// produced a ticket or was resolved entirely by the AI.
+model SupportConversation {
+  id                   String              @id @default(cuid())
+  source               SupportSource       @default(WIDGET)
+  customerId           String?
+  customer             User?               @relation(fields: [customerId], references: [id])
+  guestName            String?
+  guestEmail           String?
+  guestPhone           String?
+  depotId              String?
+  depot                Depot?              @relation(fields: [depotId], references: [id])
+  bookingId            String?
+  booking              Booking?            @relation(fields: [bookingId], references: [id])
+  aiEnabled            Boolean             @default(true)
+  lastMessageAt        DateTime            @default(now())
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  // Finalised by the visitor-session-finalise pass once the conversation
+  // has been quiet for ≥72h. Drives the Sales Performance leaderboard.
+  firstStaffResponseAt DateTime?
+  firstResponseSeconds Int?
+  interactionOutcome   InteractionOutcome?
+  attributedBookingId  String?
+  attributedBooking    Booking?            @relation("SupportConvAttributedBooking", fields: [attributedBookingId], references: [id], onDelete: SetNull)
+
+  messages SupportMessage[]
+  ticket   SupportTicket?
+  feedback SupportFeedback[]
+  costLogs SupportCostLog[]
+  visitor  VisitorSession?
+
+  @@index([customerId, lastMessageAt])
+  @@index([depotId, lastMessageAt])
+  @@index([source, lastMessageAt])
+  @@index([bookingId])
+  @@index([firstStaffResponseAt])
+  @@index([attributedBookingId])
+}
+
+model SupportMessage {
+  id             String              @id @default(cuid())
+  conversationId String
+  conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderRole     SupportSenderRole
+  senderUserId   String?
+  body           String              @db.Text
+  toolCalls      Json?
+  attachments    Json?
+  isInternalNote Boolean             @default(false)
+  createdAt      DateTime            @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+model SupportTicket {
+  id               String              @id @default(cuid())
+  ticketNumber     String              @unique
+  conversationId   String              @unique
+  conversation     SupportConversation @relation(fields: [conversationId], references: [id])
+  category         SupportCategory
+  priority         SupportPriority     @default(NORMAL)
+  status           SupportTicketStatus @default(OPEN)
+  depotId          String?
+  depot            Depot?              @relation(fields: [depotId], references: [id])
+  assigneeId       String?
+  assignee         User?               @relation("SupportTicketAssignee", fields: [assigneeId], references: [id])
+  customerId       String?
+  customer         User?               @relation("SupportTicketCustomer", fields: [customerId], references: [id])
+  linkedBookingId  String?
+  linkedBooking    Booking?            @relation(fields: [linkedBookingId], references: [id])
+  linkedIncidentId String?
+  linkedIncident   Incident?           @relation(fields: [linkedIncidentId], references: [id])
+  summary          String
+  description      String              @db.Text
+  firstResponseAt  DateTime?
+  resolvedAt       DateTime?
+  closedAt         DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  notes    SupportTicketNote[]
+  feedback SupportFeedback[]
+
+  @@index([status, priority, depotId])
+  @@index([assigneeId, status])
+  @@index([customerId, createdAt])
+  @@index([depotId])
+  @@index([linkedBookingId])
+  @@index([linkedIncidentId])
+}
+
+model SupportTicketNote {
+  id         String        @id @default(cuid())
+  ticketId   String
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User          @relation(fields: [userId], references: [id])
+  body       String        @db.Text
+  isInternal Boolean       @default(true)
+  createdAt  DateTime      @default(now())
+
+  @@index([ticketId])
+  @@index([userId])
+}
+
+model SupportFeedback {
+  id             String              @id @default(cuid())
+  conversationId String
+  conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  ticketId       String?
+  ticket         SupportTicket?      @relation(fields: [ticketId], references: [id])
+  rating         Int
+  kind           SupportFeedbackKind
+  comment        String?             @db.Text
+  createdAt      DateTime            @default(now())
+
+  @@unique([conversationId, kind])
+  @@index([ticketId])
+  @@index([createdAt, kind])
+}
+
+model SupportCostLog {
+  id                  String              @id @default(cuid())
+  conversationId      String
+  conversation        SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  provider            String
+  model               String
+  inputTokens         Int
+  outputTokens        Int
+  cachedInputTokens   Int                 @default(0)
+  cacheCreationTokens Int                 @default(0)
+  costAud             Decimal             @db.Decimal(10, 6)
+  createdAt           DateTime            @default(now())
+
+  @@index([createdAt])
+  @@index([conversationId])
+  @@index([provider, createdAt])
+}
+
+// ============================================================================
+// LIVE VISITOR PRESENCE
+// ============================================================================
+
+// Outcome assigned by the visitor-session-finalise pass of the cleanup job.
+// BOUNCED: single page view <15s. ABANDONED_WIZARD: reached wizardStep ≥1
+// with no booking in 72h. CONVERTED: booking within 72h of lastSeenAt and
+// wizardHighestStep ≥1. LEFT: multi-page but no wizard engagement.
+enum VisitorOutcome {
+  BOUNCED
+  ABANDONED_WIZARD
+  CONVERTED
+  LEFT
+}
+
+enum VisitorDeviceType {
+  MOBILE
+  TABLET
+  DESKTOP
+  BOT
+}
+
+// Outcome for a staff-to-visitor support interaction — assigned by the
+// finalise pass after 72h of inactivity on the conversation.
+enum InteractionOutcome {
+  CONVERTED
+  NO_RESPONSE
+  ABANDONED
+  IN_PROGRESS
+  RESOLVED
+}
+
+// Cookie-keyed presence row for public-site visitors. Populated by the
+// `live.heartbeat` tRPC mutation every ~20s. `conversationId` is set once
+// a live chat begins (staff-initiated via `startChatWithVisitor` or
+// visitor-initiated via `visitorOpenChat`). Orphan rows (no conversation)
+// are pruned by the `visitor-session-cleanup` BullMQ job.
+//
+// Analytics columns (geo / referrer / utm* / deviceType / outcome etc.) are
+// populated on first heartbeat and finalised by the cleanup job's finalise
+// pass. Raw IP is never persisted — only SHA-256(ip + IP_HASH_SALT).
+model VisitorSession {
+  id                 String               @id
+  userId             String?
+  user               User?                @relation(fields: [userId], references: [id], onDelete: SetNull)
+  currentPath        String
+  wizardStep         Int?
+  userAgentHash      String
+  startedAt          DateTime             @default(now())
+  lastSeenAt         DateTime             @default(now())
+  conversationId     String?              @unique
+  conversation       SupportConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  ipHash             String?
+  country            String?
+  region             String?
+  city               String?
+  referrer           String?
+  landingPath        String?
+  utmSource          String?
+  utmMedium          String?
+  utmCampaign        String?
+  deviceType         VisitorDeviceType?
+  endedAt            DateTime?
+  durationSeconds    Int?
+  totalPageViews     Int                  @default(0)
+  wizardHighestStep  Int?
+  outcome            VisitorOutcome?
+  convertedBookingId String?
+  convertedBooking   Booking?             @relation("VisitorSessionConvertedBooking", fields: [convertedBookingId], references: [id], onDelete: SetNull)
+  pageViews          VisitorPageView[]
+  events             VisitorEvent[]
+
+  // Booking-wizard snapshot captured by each heartbeat. The full shape
+  // lives in `wizardState` as JSON; the five scalar columns are
+  // denormalised copies kept in sync so we can run fast GROUP BY /
+  // filter queries for the abandoned-cart widgets without probing JSON
+  // on every row. PII (customer block, delivery address, signature) is
+  // never written here — the client strips before sending.
+  wizardState      Json?
+  quotedTotalCents Int?
+  pickupDepotId    String?
+  categoryId       String?
+  vehicleId        String?
+  discountCode     String?
+
+  // Retention identity — a stable cookie minted client-side on first
+  // hit and persisted in `sc_visitor` for 1 year. `sessionNumber` is 1
+  // on the visitor's first session, 2 on the second, etc., computed at
+  // session-create time. `isReturning` is `sessionNumber > 1`, a
+  // pre-computed shortcut for cohort queries. `trafficChannel`
+  // classifies acquisition at create time (see `classifyChannel` in
+  // src/lib/analytics/channel.ts) so queries don't need to rebuild the
+  // classification on every read.
+  visitorFingerprint String?
+  sessionNumber      Int             @default(1)
+  isReturning        Boolean         @default(false)
+  trafficChannel     TrafficChannel?
+
+  // Engagement rollup — written by the finalise pass from the session's
+  // VisitorEvent rows. `maxScrollDepth` is the deepest SCROLL_DEPTH %
+  // reported (0–100); `engagementScore` is a 0–100 heuristic combining
+  // duration, breadth, depth, wizard progress, and event volume (see
+  // `scoreEngagement` in src/lib/analytics/engagement.ts).
+  maxScrollDepth  Int?
+  engagementScore Int?
+
+  @@index([lastSeenAt])
+  @@index([userId])
+  @@index([country, startedAt])
+  @@index([outcome, startedAt])
+  @@index([convertedBookingId])
+  @@index([utmSource, startedAt])
+  @@index([ipHash, startedAt])
+  @@index([pickupDepotId, startedAt])
+  @@index([categoryId, startedAt])
+  @@index([vehicleId, startedAt])
+  @@index([discountCode, startedAt])
+  @@index([visitorFingerprint, startedAt])
+  @@index([trafficChannel, startedAt])
+  @@index([isReturning, startedAt])
+}
+
+enum TrafficChannel {
+  DIRECT
+  ORGANIC
+  PAID
+  SOCIAL
+  EMAIL
+  REFERRAL
+  OTHER
+}
+
+// Append-only log of each distinct path a visitor viewed within a session.
+// Written by `live.heartbeat` when the reported path changes; the previous
+// row is closed (leftAt + durationMs) at that moment. Retention: pruned
+// after 90 days by `runVisitorSessionCleanup`.
+model VisitorPageView {
+  id         String         @id @default(cuid())
+  sessionId  String
+  session    VisitorSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  path       String
+  enteredAt  DateTime       @default(now())
+  leftAt     DateTime?
+  durationMs Int?
+  referrer   String?
+
+  @@index([sessionId, enteredAt])
+  @@index([path, enteredAt])
+}
+
+// Append-only log of client-side tracked events (clicks, fleet views/
+// clicks, search submits, discount attempts, wizard step enters).
+// Written by the batched `live.events` mutation every 5s or on a
+// 20-event buffer. PII is stripped client-side before enqueue; the
+// `value` column never contains emails, phones, or names. Retention:
+// pruned after 60 days by `runVisitorSessionCleanup`.
+model VisitorEvent {
+  id         String           @id @default(cuid())
+  sessionId  String
+  session    VisitorSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind       VisitorEventKind
+  path       String
+  occurredAt DateTime         @default(now())
+
+  // Narrow payload: target is the `data-track` attribute / CSS selector
+  // / form-field name; value is the sanitised scalar (search query,
+  // discount code, etc); numericValue covers scroll %, duration ms,
+  // click count. `metadata` is the escape hatch for event-specific
+  // extras but we avoid probing it in aggregate queries.
+  target       String?
+  value        String?
+  numericValue Int?
+  metadata     Json?
+
+  // Denormalised so the Behaviour-tab queries can filter without a
+  // join back to VisitorSession on every row.
+  wizardStep Int?
+  deviceType VisitorDeviceType?
+
+  @@index([sessionId, occurredAt])
+  @@index([kind, occurredAt])
+  @@index([path, kind, occurredAt])
+}
+
+// Staff-defined saved segment — a named combination of analytics
+// filters. Loaded from the segment picker in the filter bar; applying
+// a segment writes its `filter` JSON onto the URL so all analytics
+// tabs see it. `filter` follows the shape of `AnalyticsFilterInput`
+// on the server — validated with Zod on the write path.
+model AnalyticsSegment {
+  id        String   @id @default(cuid())
+  name      String
+  createdBy String
+  creator   User     @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  filter    Json
+  isShared  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdBy])
+  @@index([isShared, createdAt])
+}
+
+// Staff-defined analytics funnel. `steps` is a typed JSON array of
+// conditions evaluated in order against VisitorSession + VisitorEvent
+// rows. Used by the Custom Funnels widget on the Conversion tab.
+model AnalyticsFunnel {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  createdBy   String
+  creator     User     @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  steps       Json
+  isShared    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([createdBy])
+  @@index([isShared, createdAt])
+}
+
+// Analytics alert rule. Evaluated every 5 minutes by the
+// `analytics-alert` BullMQ job; when `metric <OPERATOR> threshold` is
+// true and the cooldown has elapsed, the evaluator sends email to
+// `notifyEmails` and writes `lastFiredAt`. Managers+ can CRUD.
+model AnalyticsAlert {
+  id              String    @id @default(cuid())
+  name            String
+  metric          String // analytics metric key, e.g. "bounces_last_hour"
+  operator        String // ">" | "<" | ">=" | "<=" | "=="
+  threshold       Float
+  notifyEmails    Json // string[] — staff emails to notify
+  cooldownMinutes Int       @default(60) // dedup window before re-firing
+  isActive        Boolean   @default(true)
+  lastFiredAt     DateTime?
+  lastValue       Float? // most recent observed value, for the UI
+  lastCheckedAt   DateTime?
+  createdBy       String
+  creator         User      @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([isActive])
+  @@index([createdBy])
+}
+
+enum VisitorEventKind {
+  CLICK
+  CTA_CLICK
+  FLEET_VIEW
+  FLEET_CLICK
+  FORM_FIELD_FOCUS
+  FORM_FIELD_CHANGE
+  FORM_FIELD_BLUR
+  SEARCH
+  DISCOUNT_ATTEMPTED
+  DISCOUNT_APPLIED
+  DISCOUNT_REJECTED
+  SCROLL_DEPTH
+  EXIT_INTENT
+  RAGE_CLICK
+  DEAD_CLICK
+  COPY
+  CHAT_OPEN
+  CHAT_MESSAGE_SENT
+  WIZARD_STEP_ENTER
+  WIZARD_STEP_LEAVE
+  WIZARD_SNAPSHOT
+  PRICE_VIEWED
+  CUSTOM
+}
+
+// ============================================================================
+// STAFF PRIORITY TASKS
+// ============================================================================
+
+// A persistent record of a staff member claiming a piece of actionable work.
+// Virtual tasks (pickups, returns, work orders, etc.) are enumerated on-demand
+// from domain state; this table only tracks *attempts* — from click-Start
+// (startedAt) to either natural completion by the domain mutation
+// (status=COMPLETED), supersession by another user or terminal state
+// (status=SUPERSEDED), explicit abandon (status=ABANDONED), or heartbeat-based
+// auto-abandon. A Postgres partial unique index on (taskType, targetEntityId)
+// WHERE status='IN_PROGRESS' prevents two staff claiming the same task.
+
+enum StaffTaskType {
+  BOOKING_PICKUP
+  BOOKING_RETURN
+  BOOKING_OVERDUE_CHASE
+  INSPECTION_PRE_HIRE
+  INSPECTION_POST_HIRE
+  INSPECTION_FLAGGED_REVIEW
+  MAINTENANCE_WORK_ORDER
+  VEHICLE_REGO_ACTION
+  VEHICLE_CTP_ACTION
+  VEHICLE_INSURANCE_ACTION
+  VEHICLE_SERVICE_ACTION
+  VEHICLE_TYRE_ACTION
+  INCIDENT_TRIAGE
+  INCIDENT_INVESTIGATE
+  SUPPORT_TICKET_TRIAGE
+  SUPPORT_TICKET_RESPOND
+  CUSTOMER_LICENCE_VERIFY
+  RENTAL_AGREEMENT_SIGN
+  RETURN_ASSESSMENT_FINALISE
+  CALENDAR_ALLOCATION
+  DAMAGE_CHARGE_CONFIRM
+  INFRINGEMENT_NOMINATE
+  BOND_RELEASE_REVIEW
+}
+
+enum StaffTaskTier {
+  URGENT
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum StaffTaskActivityStatus {
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+  SUPERSEDED
+}
+
+model StaffTaskActivity {
+  id                      String                  @id @default(cuid())
+  taskType                StaffTaskType
+  targetEntityKind        String
+  targetEntityId          String
+  staffId                 String
+  depotId                 String?
+  tierSnapshot            StaffTaskTier
+  startedAt               DateTime                @default(now())
+  completedAt             DateTime?
+  lastHeartbeatAt         DateTime?
+  status                  StaffTaskActivityStatus @default(IN_PROGRESS)
+  outcome                 String?
+  outcomeNote             String?
+  metadata                Json?
+  // When the collector reports the task first became actionable — captured at
+  // claim time so we can compute queue-wait and end-to-end cycle durations
+  // in the staff history view. Nullable for pre-existing rows.
+  actionableSinceSnapshot DateTime?
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+
+  staff User @relation("StaffTaskActivityStaff", fields: [staffId], references: [id])
+
+  @@index([staffId, status])
+  @@index([taskType, targetEntityId, status])
+  @@index([startedAt])
+  @@index([completedAt])
+  @@index([status, lastHeartbeatAt])
+  @@index([depotId])
+}
+
+// ============================================================================
+// REVENUE LEVERS — added for the revenue-maximisation initiative
+// Grouped here to keep a single schema change easy to review.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Lever 5 — Reviews & Referrals
+// ----------------------------------------------------------------------------
+
+enum ReviewStatus {
+  PENDING
+  APPROVED
+  HIDDEN
+  REJECTED
+}
+
+enum ReferralStatus {
+  PENDING
+  QUALIFIED
+  PAID
+  FRAUD
+  EXPIRED
+}
+
+model Review {
+  id                String       @id @default(cuid())
+  bookingId         String       @unique
+  customerId        String
+  rating            Int
+  title             String?
+  body              String?      @db.Text
+  photos            String[]
+  status            ReviewStatus @default(PENDING)
+  syndicatedTo      String[] // e.g. ["trustpilot", "google"]
+  moderatedById     String?
+  moderatedAt       DateTime?
+  publishedAt       DateTime?
+  vehicleCategoryId String?
+  depotId           String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  booking  Booking          @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  customer User             @relation(fields: [customerId], references: [id])
+  category VehicleCategory? @relation(fields: [vehicleCategoryId], references: [id])
+
+  @@index([status, publishedAt])
+  @@index([customerId])
+  @@index([rating])
+  @@index([depotId])
+  @@index([vehicleCategoryId])
+}
+
+model Referral {
+  id                    String         @id @default(cuid())
+  referrerId            String
+  refereeId             String?
+  refereeEmail          String?
+  code                  String
+  status                ReferralStatus @default(PENDING)
+  rewardAmount          Decimal        @default(20) @db.Decimal(10, 2)
+  refereeDiscountAmount Decimal        @default(20) @db.Decimal(10, 2)
+  qualifyingBookingId   String?
+  qualifiedAt           DateTime?
+  paidAt                DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  referrer          User     @relation("ReferralReferrer", fields: [referrerId], references: [id])
+  referee           User?    @relation("ReferralReferee", fields: [refereeId], references: [id])
+  qualifyingBooking Booking? @relation(fields: [qualifyingBookingId], references: [id])
+
+  @@index([referrerId])
+  @@index([refereeId])
+  @@index([code])
+  @@index([status])
+  @@index([qualifyingBookingId])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 9 — Loyalty ledger
+// ----------------------------------------------------------------------------
+
+model LoyaltyLedger {
+  id        String                 @id @default(cuid())
+  userId    String
+  bookingId String?
+  direction LoyaltyLedgerDirection
+  points    Int
+  reason    String
+  expiresAt DateTime?
+  createdAt DateTime               @default(now())
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([bookingId])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 2 — Telematics-driven revenue (zones, speeding, dispatches)
+// ----------------------------------------------------------------------------
+
+enum ServiceDispatchType {
+  FUEL_DELIVERY
+  EXTRA_HELMET
+  PHONE_MOUNT
+  SCOOTER_SWAP
+  ROADSIDE
+  BATTERY_JUMP
+}
+
+enum ServiceDispatchStatus {
+  REQUESTED
+  ASSIGNED
+  EN_ROUTE
+  COMPLETED
+  CANCELLED
+}
+
+model RentalZone {
+  id                     String   @id @default(cuid())
+  bookingId              String   @unique
+  centerLat              Float
+  centerLng              Float
+  radiusKm               Float    @default(200)
+  polygon                Json?
+  allowStateCrossing     Boolean  @default(false)
+  perKmSurchargeCents    Int      @default(35)
+  borderCrossingFeeCents Int      @default(10000)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+model ZoneEvent {
+  id         String   @id @default(cuid())
+  bookingId  String
+  kind       String // OUT_OF_ZONE_ENTERED | OUT_OF_ZONE_EXITED | BORDER_CROSSED
+  eventAt    DateTime
+  latitude   Float
+  longitude  Float
+  odometerKm Float?
+  createdAt  DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, eventAt])
+  @@index([kind])
+}
+
+model SpeedEvent {
+  id           String   @id @default(cuid())
+  bookingId    String
+  speedKph     Float
+  thresholdKph Float
+  durationSec  Int
+  eventAt      DateTime
+  latitude     Float?
+  longitude    Float?
+  createdAt    DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, eventAt])
+}
+
+model ServiceDispatch {
+  id            String                @id @default(cuid())
+  bookingId     String
+  type          ServiceDispatchType
+  status        ServiceDispatchStatus @default(REQUESTED)
+  feeAmount     Decimal               @default(0) @db.Decimal(10, 2)
+  requestedAt   DateTime              @default(now())
+  assignedToId  String?
+  dispatchedAt  DateTime?
+  completedAt   DateTime?
+  deliveryLat   Float?
+  deliveryLng   Float?
+  deliveryNote  String?
+  proofPhotoUrl String?
+  paymentId     String?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([type])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 1 — Yield / demand pricing
+// ----------------------------------------------------------------------------
+
+enum DemandEventImpact {
+  BOOST
+  DIP
+}
+
+model PriceRecommendation {
+  id                 String    @id @default(cuid())
+  date               DateTime  @db.Date
+  depotId            String
+  categoryId         String
+  baseMultiplier     Decimal   @default(1) @db.Decimal(5, 3)
+  computedAt         DateTime  @default(now()) @db.Timestamptz
+  forwardBookingPct  Decimal   @default(0) @db.Decimal(5, 2)
+  demandScore        Decimal   @default(0) @db.Decimal(10, 4)
+  reasonCodes        String[]
+  isActive           Boolean   @default(true)
+  overrideMultiplier Decimal?  @db.Decimal(5, 3)
+  overriddenById     String?
+  overriddenAt       DateTime? @db.Timestamptz
+
+  @@unique([date, depotId, categoryId])
+  @@index([date])
+  @@index([depotId, date])
+}
+
+model DemandEvent {
+  id          String            @id @default(cuid())
+  name        String
+  description String?
+  startDate   DateTime          @db.Timestamptz
+  endDate     DateTime          @db.Timestamptz
+  multiplier  Decimal           @db.Decimal(5, 3)
+  impact      DemandEventImpact @default(BOOST)
+  depotIds    String[]
+  categoryIds String[]
+  isActive    Boolean           @default(true)
+  createdById String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([isActive, startDate, endDate])
+  @@index([isActive])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 3 — Subscriptions & B2B
+// ----------------------------------------------------------------------------
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAUSED
+  CANCELLED
+  PAST_DUE
+}
+
+model SubscriptionPlan {
+  id                String   @id @default(cuid())
+  code              String   @unique
+  name              String
+  description       String?
+  categoryIds       String[]
+  priceMonthlyAud   Decimal  @db.Decimal(10, 2)
+  includedDays      Int?
+  includedKm        Int?
+  overageDayRate    Decimal? @db.Decimal(10, 2)
+  overageKmRate     Decimal? @db.Decimal(10, 2)
+  includesInsurance Boolean  @default(false)
+  includesHelmet    Boolean  @default(true)
+  maxSwapsPerMonth  Int      @default(4)
+  isBusinessPlan    Boolean  @default(false)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([isActive])
+  @@index([isBusinessPlan])
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  customerId           String
+  businessAccountId    String?
+  planId               String
+  stripeSubscriptionId String?
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodStart   DateTime           @db.Timestamptz
+  currentPeriodEnd     DateTime           @db.Timestamptz
+  startedAt            DateTime           @default(now()) @db.Timestamptz
+  pausedAt             DateTime?          @db.Timestamptz
+  pauseReason          String?
+  cancelledAt          DateTime?          @db.Timestamptz
+  cancelReason         String?
+  usageSnapshot        Json               @default("{}")
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  customer        User                @relation("SubscriptionCustomer", fields: [customerId], references: [id])
+  businessAccount BusinessAccount?    @relation(fields: [businessAccountId], references: [id])
+  plan            SubscriptionPlan    @relation(fields: [planId], references: [id])
+  usages          SubscriptionUsage[]
+  bookings        Booking[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([businessAccountId])
+  @@index([currentPeriodEnd])
+  @@index([planId])
+}
+
+model SubscriptionUsage {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  periodStart    DateTime
+  periodEnd      DateTime
+  daysUsed       Int      @default(0)
+  kmUsed         Int      @default(0)
+  swapsUsed      Int      @default(0)
+  overageCharge  Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, periodStart])
+}
+
+model BusinessAccount {
+  id            String   @id @default(cuid())
+  name          String
+  abn           String?
+  contactUserId String?
+  billingEmail  String?
+  addressLine1  String?
+  suburb        String?
+  state         String?
+  postcode      String?
+  creditLimit   Decimal  @default(0) @db.Decimal(12, 2)
+  status        String   @default("ACTIVE") // ACTIVE | SUSPENDED | CLOSED
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([status])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 4 — Partner / hotel-concierge distribution & commissions
+// ----------------------------------------------------------------------------
+
+enum PartnerType {
+  HOTEL
+  HOSTEL
+  TOUR_OPERATOR
+  AGGREGATOR
+  CORPORATE
+  OTHER
+}
+
+enum PartnerTransactionStatus {
+  PENDING
+  PAYABLE
+  PAID
+  DISPUTED
+  VOIDED
+}
+
+model Partner {
+  id                     String      @id @default(cuid())
+  slug                   String      @unique
+  name                   String
+  type                   PartnerType
+  commissionPct          Decimal     @default(10) @db.Decimal(5, 2)
+  stripeConnectAccountId String?
+  contactEmail           String?
+  contactPhone           String?
+  trackingCode           String?     @unique
+  websiteUrl             String?
+  depotIds               String[]
+  widgetEnabled          Boolean     @default(true)
+  isActive               Boolean     @default(true)
+  notes                  String?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+
+  bookings     Booking[]
+  transactions PartnerTransaction[]
+  users        PartnerUser[]
+
+  @@index([isActive])
+  @@index([type])
+}
+
+model PartnerUser {
+  id          String   @id @default(cuid())
+  partnerId   String
+  userId      String
+  permissions String[]
+  createdAt   DateTime @default(now())
+
+  partner Partner @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+
+  @@unique([partnerId, userId])
+  @@index([userId])
+}
+
+model PartnerTransaction {
+  id               String                   @id @default(cuid())
+  partnerId        String
+  bookingId        String
+  attributedAt     DateTime                 @default(now())
+  bookingTotal     Decimal                  @db.Decimal(12, 2)
+  commissionPct    Decimal                  @db.Decimal(5, 2)
+  commissionAmount Decimal                  @db.Decimal(12, 2)
+  status           PartnerTransactionStatus @default(PENDING)
+  paidAt           DateTime?
+  stripeTransferId String?
+  notes            String?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+
+  partner Partner @relation(fields: [partnerId], references: [id])
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@unique([bookingId, partnerId])
+  @@index([partnerId, status])
+  @@index([status])
+}
+
+// ----------------------------------------------------------------------------
+// Lever 8 — Gift cards / vouchers
+// ----------------------------------------------------------------------------
+
+enum GiftCardStatus {
+  ACTIVE
+  REDEEMED
+  EXPIRED
+  VOIDED
+}
+
+model GiftCard {
+  id                  String         @id @default(cuid())
+  code                String         @unique
+  initialAmount       Decimal        @db.Decimal(10, 2)
+  balance             Decimal        @db.Decimal(10, 2)
+  purchasedById       String?
+  purchaserEmail      String
+  recipientEmail      String
+  recipientName       String?
+  personalMessage     String?        @db.Text
+  scheduledDeliveryAt DateTime?
+  deliveredAt         DateTime?
+  status              GiftCardStatus @default(ACTIVE)
+  issuedAt            DateTime       @default(now())
+  expiresAt           DateTime
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  transactions GiftCardTransaction[]
+
+  @@index([status])
+  @@index([recipientEmail])
+  @@index([purchasedById])
+  @@index([expiresAt])
+}
+
+model GiftCardTransaction {
+  id           String   @id @default(cuid())
+  giftCardId   String
+  bookingId    String?
+  paymentId    String?
+  direction    String // DEBIT | CREDIT
+  amount       Decimal  @db.Decimal(10, 2)
+  balanceAfter Decimal  @db.Decimal(10, 2)
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  giftCard GiftCard @relation(fields: [giftCardId], references: [id], onDelete: Cascade)
+
+  @@index([giftCardId])
+  @@index([bookingId])
+}
+
+// ============================================================================
+// STRIPE WEBHOOK EVENT LOG (G1 — Phase 4 P0)
+//
+// Insert-then-process dedup table for Stripe webhook events. The handler
+// inserts a row keyed on the Stripe event id before doing any side-effect
+// work; the @id unique constraint makes replays a no-op. Tracks attempts +
+// failure reason so missed / failed events can be resent via
+// `stripe events resend evt_...` — see docs/payments/runbook-webhook-replay.md
+// ============================================================================
+
+enum StripeWebhookEventStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+model StripeWebhookEvent {
+  id          String                   @id
+  type        String
+  apiVersion  String?
+  livemode    Boolean                  @default(false)
+  payload     Json
+  receivedAt  DateTime                 @default(now())
+  processedAt DateTime?
+  status      StripeWebhookEventStatus @default(RECEIVED)
+  errorReason String?
+  attempts    Int                      @default(0)
+
+  paymentEvents PaymentEvent[]
+
+  @@index([type, receivedAt])
+  @@index([status, receivedAt])
+}
+
+// ============================================================================
+// PAYMENT EVENT LOG (G9 — Phase 4 P1)
+//
+// Append-only history of every Payment.status mutation. Enables replay
+// tests, forensic audit, and reconciliation invariant checks.
+// ============================================================================
+
+enum PaymentEventType {
+  CREATED
+  STATUS_CHANGED
+  CAPTURED
+  REFUNDED
+  DISPUTED
+  VOIDED
+  RETRY_ATTEMPTED
+  RETRY_EXHAUSTED
+}
+
+model PaymentEvent {
+  id             String           @id @default(cuid())
+  paymentId      String
+  eventType      PaymentEventType
+  previousStatus PaymentStatus?
+  newStatus      PaymentStatus?
+  amountDelta    Decimal?         @db.Decimal(10, 2)
+  source         String
+  stripeEventId  String?
+  actorUserId    String?
+  data           Json             @default("{}")
+  createdAt      DateTime         @default(now())
+
+  payment            Payment             @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  stripeWebhookEvent StripeWebhookEvent? @relation(fields: [stripeEventId], references: [id])
+
+  @@index([paymentId, createdAt])
+  @@index([stripeEventId])
+  @@index([eventType, createdAt])
+  @@index([actorUserId])
+}
+
+// ============================================================================
+// STRIPE FEE LEDGER (G3 — Phase 4 P1)
+//
+// Per-charge Stripe fee record. Populated by the stripe-reconcile job from
+// /v1/balance_transactions. Feeds the net-revenue reports + month-end
+// close.
+// ============================================================================
+
+model StripeFeeLedger {
+  id                  String    @id @default(cuid())
+  stripeChargeId      String    @unique
+  stripePayoutId      String?
+  feeType             String
+  feeAmountCents      Int
+  netAmountCents      Int
+  currency            String    @default("aud")
+  balanceTxnCreatedAt DateTime
+  payoutArrivedAt     DateTime?
+  createdAt           DateTime  @default(now())
+
+  @@index([stripePayoutId])
+  @@index([balanceTxnCreatedAt])
+}
+
+// ============================================================================
+// UNMATCHED TRANSACTIONS (G3 — Phase 4 P1)
+//
+// Queue of reconciliation discrepancies. See
+// docs/payments/runbook-reconciliation-variance.md for the resolution
+// procedure.
+// ============================================================================
+
+enum UnmatchedTransactionSource {
+  STRIPE_CHARGE
+  STRIPE_PAYOUT
+  BANK_STATEMENT
+  SYSTEM_LEDGER
+}
+
+model UnmatchedTransaction {
+  id           String                     @id @default(cuid())
+  source       UnmatchedTransactionSource
+  externalId   String
+  amountCents  Int
+  occurredAt   DateTime
+  reason       String
+  resolvedAt   DateTime?
+  resolvedById String?
+  resolvedNote String?
+  payload      Json
+  createdAt    DateTime                   @default(now())
+
+  @@unique([source, externalId])
+  @@index([source, resolvedAt])
+  @@index([occurredAt])
+  @@index([resolvedById])
+}
+
+// ============================================================================
+// DATABASE BACKUPS
+//
+// Scheduled pg_dump history. The job inserts a row before + after each
+// dump so operators can see what's stored, when it ran, and whether the
+// retention sweep has cleared anything recently.
+// ============================================================================
+
+enum BackupStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+enum BackupTrigger {
+  SCHEDULED
+  MANUAL_ADMIN
+}
+
+model DatabaseBackup {
+  id             String        @id @default(cuid())
+  startedAt      DateTime      @default(now())
+  completedAt    DateTime?
+  sizeBytes      BigInt?
+  storageUrl     String?
+  status         BackupStatus  @default(RUNNING)
+  errorMessage   String?
+  triggeredBy    BackupTrigger
+  triggeredById  String?
+  retentionUntil DateTime?
+  schemaVersion  String?
+
+  @@index([startedAt])
+  @@index([status])
+  @@index([retentionUntil])
+}
+
+// ============================================================================
+// USER TOTP (2FA)
+//
+// Staff TOTP secret + one-shot recovery codes. The secret is encrypted at
+// rest via the AES-256-GCM helpers in src/lib/crypto.ts — the plaintext
+// secret is only decrypted in-memory during verification. Recovery codes
+// are hashed (bcrypt) and consumed on use.
+// ============================================================================
+
+model UserTotp {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  encryptedSecret Json
+  recoveryCodes   Json      @default("[]")
+  enabled         Boolean   @default(false)
+  enabledAt       DateTime?
+  lastUsedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ============================================================================
+// PLATFORM COST TRACKING
+//
+// One row per billable / observable event across each cost centre, written
+// at the capture site (model call, SMS/email send, S3 put/delete, HTTP
+// request, etc). Per-customer / per-booking attribution is carried through
+// so the Platform admin area can answer "what did customer X cost?".
+// ============================================================================
+
+/// Per-call record of document extraction (licence / passport OCR) via the
+/// Claude vision wrapper in `src/server/services/document-extract.ts`.
+/// Sibling to SupportCostLog for the tech-support chatbot.
+model OcrCostLog {
+  id                  String   @id @default(cuid())
+  kind                String
+  provider            String
+  model               String
+  inputTokens         Int      @default(0)
+  outputTokens        Int      @default(0)
+  cachedInputTokens   Int      @default(0)
+  cacheCreationTokens Int      @default(0)
+  costAud             Decimal  @db.Decimal(10, 6)
+  customerId          String?
+  bookingId           String?
+  triggeredById       String?
+  outcome             String?
+  createdAt           DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([kind, createdAt])
+  @@index([provider, createdAt])
+  @@index([customerId])
+  @@index([bookingId])
+}
+
+/// Per-message log of outbound SMS via Twilio. Populated immediately on
+/// send; `priceAud` / `numSegments` are filled in by the existing
+/// `/api/webhooks/twilio` status callback when Twilio settles the cost.
+model TwilioMessageLog {
+  id            String    @id @default(cuid())
+  sid           String    @unique
+  to            String
+  body          String    @db.Text
+  purpose       String?
+  numSegments   Int?
+  priceAud      Decimal?  @db.Decimal(10, 6)
+  priceCurrency String?
+  status        String    @default("queued")
+  errorCode     String?
+  errorMessage  String?
+  customerId    String?
+  bookingId     String?
+  createdAt     DateTime  @default(now())
+  deliveredAt   DateTime?
+  updatedAt     DateTime  @updatedAt
+
+  @@index([createdAt])
+  @@index([customerId])
+  @@index([bookingId])
+  @@index([status, createdAt])
+}
+
+/// Per-send log of outbound email via Resend. Each `sendEmail()` call
+/// writes one row immediately; the existing Resend webhook route enriches
+/// `deliveredAt` / `bouncedAt` / `openedAt` when events arrive.
+model EmailSendLog {
+  id                String    @id @default(cuid())
+  providerMessageId String?
+  provider          String    @default("resend")
+  toEmail           String
+  fromEmail         String
+  subject           String
+  purpose           String?
+  status            String    @default("queued")
+  errorMessage      String?
+  customerId        String?
+  bookingId         String?
+  createdAt         DateTime  @default(now())
+  deliveredAt       DateTime?
+  bouncedAt         DateTime?
+  openedAt          DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  @@index([createdAt])
+  @@index([customerId])
+  @@index([bookingId])
+  @@index([provider, createdAt])
+  @@index([providerMessageId])
+}
+
+enum StorageUsageAction {
+  UPLOAD
+  DELETE
+}
+
+/// Per-operation log of S3/MinIO puts and deletes. Byte deltas let the
+/// Platform > Storage tab compute a running usage total without a nightly
+/// full-bucket scan; a reconciling sweep can still be layered on later.
+model StorageUsageEvent {
+  id          String             @id @default(cuid())
+  action      StorageUsageAction
+  bucketKey   String
+  folder      String
+  contentType String?
+  sizeBytes   BigInt
+  customerId  String?
+  bookingId   String?
+  createdAt   DateTime           @default(now())
+
+  @@index([createdAt])
+  @@index([folder, createdAt])
+  @@index([action, createdAt])
+  @@index([customerId])
+  @@index([bookingId])
+}
+
+/// Coarse-grained HTTP request log for bandwidth / request-volume costing.
+/// Written by `src/middleware.ts` — one row per request is too noisy at
+/// scale, so the middleware samples (see PLATFORM_REQUEST_SAMPLE_RATE env)
+/// and the Platform > Server tab extrapolates from the sample.
+model ServerRequestLog {
+  id           String   @id @default(cuid())
+  method       String
+  path         String
+  status       Int
+  durationMs   Int?
+  bytesOut     Int?
+  userId       String?
+  ipAddress    String?
+  userAgent    String?
+  sampleWeight Int      @default(1)
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([path, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Daily roll-up pulled from Sentry's Organizations Stats v2 API (and any
+/// other observability provider later). One row per day per metric.
+model ObservabilityUsageSnapshot {
+  id        String   @id @default(cuid())
+  date      DateTime @db.Date
+  provider  String
+  metric    String
+  quantity  BigInt
+  costAud   Decimal? @db.Decimal(10, 4)
+  createdAt DateTime @default(now())
+
+  @@unique([provider, metric, date])
+  @@index([date])
+  @@index([provider, date])
+}

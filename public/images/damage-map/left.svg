@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" fill="none" stroke="#64748b" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+  <!-- LEFT side view of a generic scooter (left flank facing viewer) -->
+  <!-- Rear wheel -->
+  <circle cx="820" cy="470" r="85" />
+  <circle cx="820" cy="470" r="36" />
+  <!-- Front wheel -->
+  <circle cx="220" cy="470" r="85" />
+  <circle cx="220" cy="470" r="36" />
+  <!-- Front fender -->
+  <path d="M 135 440 Q 220 360 305 440" />
+  <!-- Rear fender / tail -->
+  <path d="M 735 440 Q 820 360 905 440 L 905 470" />
+  <!-- Body / footboard -->
+  <path d="M 305 470 L 395 470 L 425 440 L 640 440 L 670 470 L 735 470" />
+  <!-- Seat -->
+  <path d="M 460 380 Q 485 355 540 355 L 690 355 Q 730 355 740 390 L 740 440" />
+  <!-- Rear tail box / grab rail -->
+  <path d="M 690 355 Q 775 340 810 375 L 810 420" />
+  <!-- Front fairing -->
+  <path d="M 425 440 Q 405 390 385 320 Q 380 280 395 250 L 420 235" />
+  <!-- Windshield -->
+  <path d="M 420 235 Q 440 190 460 145 L 475 150 Q 460 200 445 250" />
+  <!-- Handlebar -->
+  <line x1="445" y1="250" x2="495" y2="215" />
+  <circle cx="500" cy="212" r="7" fill="#64748b" />
+  <!-- Mirror -->
+  <line x1="475" y1="150" x2="495" y2="110" />
+  <ellipse cx="500" cy="102" rx="18" ry="12" />
+  <!-- Headlight -->
+  <ellipse cx="390" cy="340" rx="22" ry="14" />
+  <!-- Exhaust (left side often shows muffler on right in AU; include faint hint) -->
+  <path d="M 700 490 L 790 490" stroke-dasharray="6 6" opacity="0.5" />
+  <!-- View label -->
+  <text x="40" y="55" font-family="system-ui, sans-serif" font-size="28" font-weight="700" fill="#64748b" stroke="none" letter-spacing="2">LEFT</text>
+  <text x="40" y="80" font-family="system-ui, sans-serif" font-size="14" fill="#94a3b8" stroke="none" letter-spacing="1">placeholder</text>
+</svg>

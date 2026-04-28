@@ -1,0 +1,12 @@
+driver_id,name,status,filter_found,email,mobile,secondary_number,address,dob,added_date,referral_source,outstanding_debt,credit,card_last4,license_no,license_state_issued,license_expiry,license_valid,last_ra,created_at,images
+100,Alice Smith,Active,,alice@example.com,+61400111222,,"123 Collins St, Melbourne, VIC 3000",15/06/1990,01/02/2023 10:30,Google,0,0,1234,12345678,VIC,15/06/2028,VALID,RA-001,01/02/2023 10:30,100_license_front.jpg;100_license_back.jpg
+200,Bob Jones,Active,,bob@example.com,+61400333444,(03) 9000 1234,"45 Smith Rd, Bondi, NSW 2026",01/01/1970,02/02/2023 11:30,Friend,15.50,0,5678,NA-9999,NSW,10/10/2026,VALID,RA-002,02/02/2023 11:30,200_passport.png
+250,Cara Nguyen,Archived,,cara@example.com,+61,,somewhere overseas,22/11/1985,03/02/2023 09:00,Walk-in,0,0,,OVER-12345,Overseas,31/12/2029,VALID,RA-003,03/02/2023 09:00,
+300,David Wong,Active,,dup@example.com,+61400555666,,"10 Queen St, Sydney, NSW 2000",02/04/1988,04/02/2023 14:15,Ads,0,0,4321,99887766,NSW,02/04/2028,VALID,RA-004,04/02/2023 14:15,300_license_front.jpg;300_dlpassport.jpg
+301,David Wong Newer,Active,,dup@example.com,+61400999000,,"10 Queen St, Sydney, NSW 2000",02/04/1988,05/02/2023 15:00,Ads,0,0,4321,99887766NEW,NSW,02/04/2029,VALID,RA-005,05/02/2023 15:00,301_license_front.jpg
+400,,Active,,nameless@example.com,+61400777888,,,,06/02/2023 12:00,,0,0,,,,,,,
+450,Missing Email,Active,,,+61400888999,,,15/03/1992,07/02/2023 13:00,,0,0,,12341234,QLD,15/03/2030,VALID,,,
+500,Madonna,Active,,madonna@example.com,+61400121212,,,10/11/1975,08/02/2023 08:00,,0,0,,87654321,WA,10/11/2027,VALID,,,500_signature.png
+600,Madonna,Active,,madonna@example.com,,,,,09/02/2023 09:00,,0,0,,,,,,,
+700,Eli Smith,Active,,eli@example.com,+61400222333,,"5 Park Rd, Brisbane, QLD 4000",05/05/1995,10/02/2023 10:00,Google,0,0,,22334455,QLD,05/05/2030,VALID,,,700_mystery.png;700_license_front.jpg
+700,Eli Smith Duplicate ID,Active,,eli-dup-id@example.com,+61400333444,,,,11/02/2023 11:00,,0,0,,,,,,,

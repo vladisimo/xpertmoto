@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" fill="none" stroke="#64748b" stroke-width="3" stroke-linejoin="round" stroke-linecap="round">
+  <!-- REAR view of a generic scooter (dead-on from behind) -->
+  <!-- Rear wheel (head-on = narrow ellipse) -->
+  <ellipse cx="500" cy="510" rx="58" ry="16" />
+  <path d="M 442 510 Q 442 425 500 425 Q 558 425 558 510" />
+  <!-- Rear swingarm / suspension hints -->
+  <line x1="420" y1="445" x2="420" y2="375" stroke-dasharray="4 6" opacity="0.5" />
+  <line x1="580" y1="445" x2="580" y2="375" stroke-dasharray="4 6" opacity="0.5" />
+  <!-- Exhaust outlet -->
+  <circle cx="620" cy="495" r="16" />
+  <circle cx="620" cy="495" r="8" opacity="0.5" />
+  <!-- Rear body / tail cowl -->
+  <path d="M 385 460 L 345 340 Q 340 270 380 220 L 400 195 L 600 195 L 620 220 Q 660 270 655 340 L 615 460 Z" />
+  <!-- Seat back -->
+  <path d="M 410 205 Q 500 175 590 205" />
+  <!-- Taillight cluster (horizontal) -->
+  <rect x="410" y="290" width="180" height="34" rx="12" />
+  <line x1="500" y1="290" x2="500" y2="324" opacity="0.4" />
+  <!-- Indicators -->
+  <circle cx="370" cy="310" r="10" />
+  <circle cx="630" cy="310" r="10" />
+  <!-- Number plate -->
+  <rect x="445" y="360" width="110" height="50" rx="4" />
+  <line x1="465" y1="385" x2="535" y2="385" opacity="0.4" />
+  <!-- Grab rail -->
+  <path d="M 400 215 Q 500 195 600 215" stroke-width="5" />
+  <!-- View label -->
+  <text x="40" y="55" font-family="system-ui, sans-serif" font-size="28" font-weight="700" fill="#64748b" stroke="none" letter-spacing="2">REAR</text>
+  <text x="40" y="80" font-family="system-ui, sans-serif" font-size="14" fill="#94a3b8" stroke="none" letter-spacing="1">placeholder</text>
+</svg>

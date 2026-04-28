@@ -1,0 +1,410 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 0%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 0%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 0%;
+    --primary: 0 0% 0%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 48 100% 50%;
+    --secondary-foreground: 0 0% 0%;
+    --muted: 0 0% 96%;
+    --muted-foreground: 0 0% 40%;
+    --accent: 0 0% 96%;
+    --accent-foreground: 0 0% 0%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 90%;
+    --input: 0 0% 90%;
+    --ring: 0 0% 0%;
+    --radius: 0.5rem;
+
+    /* Role-shell accents (used only by back-office chrome, never content). */
+    --staff-accent: 152 59% 40%;
+    --staff-accent-foreground: 0 0% 100%;
+    --admin-accent: 224 71% 55%;
+    --admin-accent-foreground: 0 0% 100%;
+    /* AI Insights surface accent — violet, kept distinct from staff (green)
+       and admin (indigo) so the insights panel reads as its own product. */
+    --insights-accent: 270 75% 58%;
+    --insights-accent-foreground: 0 0% 100%;
+    --insights-accent-soft: 280 90% 72%;
+  }
+
+  .dark {
+    --background: 0 0% 6%;
+    --foreground: 0 0% 96%;
+    --card: 0 0% 10%;
+    --card-foreground: 0 0% 96%;
+    --popover: 0 0% 10%;
+    --popover-foreground: 0 0% 96%;
+    --primary: 0 0% 96%;
+    --primary-foreground: 0 0% 6%;
+    --secondary: 48 100% 50%;
+    --secondary-foreground: 0 0% 0%;
+    --muted: 0 0% 14%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 18%;
+    --accent-foreground: 0 0% 96%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 0 0% 96%;
+
+    --staff-accent: 152 59% 45%;
+    --staff-accent-foreground: 0 0% 100%;
+    --admin-accent: 224 71% 65%;
+    --admin-accent-foreground: 0 0% 100%;
+    --insights-accent: 270 80% 68%;
+    --insights-accent-foreground: 0 0% 100%;
+    --insights-accent-soft: 285 85% 78%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  /* Typography scale — use these instead of raw text-* for H1/H2/etc.
+     Keeps page hierarchy consistent across persona. */
+  .h-display {
+    @apply font-display text-display text-foreground;
+  }
+  .h1 {
+    @apply font-display text-h1 text-foreground;
+  }
+  .h2 {
+    @apply font-display text-h2 text-foreground;
+  }
+  .h3 {
+    @apply font-display text-h3 text-foreground;
+  }
+  .body-text {
+    @apply text-body text-foreground;
+  }
+  .caption {
+    @apply text-caption text-muted-foreground;
+  }
+  .eyebrow {
+    @apply text-caption font-semibold uppercase tracking-[0.12em] text-muted-foreground;
+  }
+}
+
+@layer utilities {
+  .shadow-card {
+    box-shadow: 0 0 2px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.24);
+  }
+  .shadow-card-lg {
+    box-shadow: 0 0 2px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  /* Expiry attention flashes. Used for dated compliance fields (rego, CTP,
+     insurance, etc.) to signal overdue or imminent renewal at a glance. */
+  @keyframes flash-destructive {
+    0%, 100% { color: hsl(var(--destructive)); opacity: 1; }
+    50% { color: hsl(var(--destructive)); opacity: 0.35; }
+  }
+  @keyframes flash-warning {
+    0%, 100% { color: hsl(var(--secondary)); opacity: 1; }
+    50% { color: hsl(var(--secondary)); opacity: 0.4; }
+  }
+  .animate-flash-destructive {
+    animation: flash-destructive 1.2s ease-in-out infinite;
+    font-weight: 600;
+  }
+  .animate-flash-warning {
+    animation: flash-warning 1.6s ease-in-out infinite;
+    font-weight: 600;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-flash-destructive,
+    .animate-flash-warning {
+      animation: none;
+    }
+    .animate-flash-destructive {
+      color: hsl(var(--destructive));
+    }
+    .animate-flash-warning {
+      color: hsl(var(--secondary));
+    }
+  }
+
+  /* Horizontal marquee — used by the public reviews showcase. Track renders
+     its children twice (`[...items, ...items]`) so translating from 0 to
+     -50% (or reverse) produces a seamless loop. */
+  @keyframes marquee-left {
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
+  }
+  @keyframes marquee-right {
+    from { transform: translateX(-50%); }
+    to { transform: translateX(0); }
+  }
+  .animate-marquee-left {
+    animation: marquee-left var(--marquee-duration, 60s) linear infinite;
+  }
+  .animate-marquee-right {
+    animation: marquee-right var(--marquee-duration, 60s) linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-marquee-left,
+    .animate-marquee-right {
+      animation: none;
+    }
+  }
+
+  /* Sequential highlight sweep across a row of logos. Each element stays
+     dim most of the cycle and briefly brightens + scales — combined with
+     per-element `animation-delay`, the effect is a wave passing across. */
+  @keyframes brand-sweep {
+    0%   { opacity: 0.55; transform: scale(1); }
+    6%   { opacity: 1;    transform: scale(1.08); }
+    14%  { opacity: 0.55; transform: scale(1); }
+    100% { opacity: 0.55; transform: scale(1); }
+  }
+  .animate-brand-sweep {
+    animation: brand-sweep 4s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-brand-sweep {
+      animation: none;
+      opacity: 1;
+    }
+  }
+
+  /* Periodic shimmer sweep — used on the header booking CTA when a wizard
+     resume is available. ~1.8s sweep followed by ~28s pause, so the effect
+     pulls attention without reading as continuously noisy. */
+  @keyframes cta-shimmer {
+    0%   { transform: translateX(-150%) skewX(-20deg); }
+    6%   { transform: translateX(350%)  skewX(-20deg); }
+    100% { transform: translateX(350%)  skewX(-20deg); }
+  }
+  .cta-shimmer {
+    position: relative;
+    overflow: hidden;
+  }
+  .cta-shimmer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 100%;
+    background: linear-gradient(
+      100deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.55) 50%,
+      transparent 100%
+    );
+    transform: translateX(-150%) skewX(-20deg);
+    animation: cta-shimmer 30s linear infinite;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cta-shimmer::after {
+      animation: none;
+      opacity: 0;
+    }
+  }
+}
+
+/* FullCalendar — Scootering brand overrides */
+.fc-scootering {
+  --fc-border-color: hsl(var(--border));
+  --fc-page-bg-color: hsl(var(--background));
+  --fc-neutral-bg-color: hsl(var(--muted));
+  --fc-today-bg-color: hsl(var(--primary) / 0.06);
+  --fc-now-indicator-color: hsl(var(--destructive));
+  --fc-event-border-color: transparent;
+  font-family: inherit;
+}
+
+.fc-scootering .fc-toolbar-title {
+  font-size: 1.25rem !important;
+  font-weight: 700;
+}
+
+.fc-scootering .fc-button {
+  @apply rounded-md text-sm font-medium shadow-sm;
+  background-color: hsl(var(--background)) !important;
+  border-color: hsl(var(--border)) !important;
+  color: hsl(var(--foreground)) !important;
+  padding: 0.375rem 0.75rem !important;
+}
+
+.fc-scootering .fc-button:hover {
+  background-color: hsl(var(--muted)) !important;
+}
+
+.fc-scootering .fc-button-active,
+.fc-scootering .fc-button.fc-button-active {
+  background-color: hsl(var(--primary)) !important;
+  border-color: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+}
+
+.fc-scootering .fc-today-button {
+  text-transform: capitalize !important;
+}
+
+.fc-scootering .fc-today-button:disabled {
+  opacity: 0.4 !important;
+}
+
+.fc-scootering .fc-col-header-cell {
+  @apply text-xs font-semibold uppercase tracking-wider;
+  color: hsl(var(--muted-foreground));
+  padding: 0.5rem 0;
+}
+
+.fc-scootering .fc-daygrid-day-number {
+  @apply text-sm font-medium p-1.5;
+  color: hsl(var(--foreground));
+}
+
+.fc-scootering .fc-day-other .fc-daygrid-day-number {
+  color: hsl(var(--muted-foreground));
+}
+
+.fc-scootering .fc-daygrid-event {
+  @apply rounded-sm text-xs;
+  margin: 1px 2px;
+  border: none;
+}
+
+.fc-scootering .fc-timegrid-event {
+  @apply rounded-sm;
+  border-left-width: 3px;
+}
+
+.fc-scootering .fc-popover {
+  @apply rounded-lg shadow-lg border;
+  background: hsl(var(--background));
+  border-color: hsl(var(--border));
+  z-index: 50;
+}
+
+.fc-scootering .fc-popover-header {
+  @apply text-sm font-semibold px-3 py-2;
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  border-radius: 0.5rem 0.5rem 0 0;
+}
+
+.fc-scootering .fc-popover-body {
+  @apply px-2 py-1;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+
+.fc-scootering .fc-more-link {
+  @apply text-xs font-semibold;
+  color: hsl(var(--primary));
+}
+
+.fc-scootering .fc-more-link:hover {
+  text-decoration: underline;
+}
+
+.fc-scootering .fc-list-event:hover td {
+  background-color: hsl(var(--muted)) !important;
+  cursor: pointer;
+}
+
+.fc-scootering .fc-list-day-cushion {
+  @apply font-semibold text-sm;
+  background: hsl(var(--muted));
+}
+
+.fc-scootering .fc-event {
+  cursor: pointer;
+}
+
+.fc-scootering .fc-daygrid-day {
+  background-color: hsl(var(--background));
+}
+
+.fc-scootering .fc-daygrid-day.fc-day-sat,
+.fc-scootering .fc-daygrid-day.fc-day-sun {
+  background-color: hsl(var(--muted));
+}
+
+.fc-scootering .fc-col-header-cell.fc-day-sat,
+.fc-scootering .fc-col-header-cell.fc-day-sun {
+  background-color: hsl(var(--muted));
+}
+
+.fc-scootering .fc-daygrid-day.fc-day-today {
+  background-color: hsl(var(--primary) / 0.06);
+}
+
+.fc-scootering .fc-timegrid-slot {
+  height: auto;
+  min-height: 1.5rem;
+}
+
+/* Prevent internal scrolling in timegrid views — slots compress to fit. */
+.fc-scootering .fc-timegrid .fc-scroller {
+  overflow: hidden !important;
+}
+
+.fc-scootering .fc-scrollgrid {
+  border: 1px solid hsl(var(--foreground) / 0.2) !important;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.fc-scootering .fc-list {
+  border: 1px solid hsl(var(--foreground) / 0.2) !important;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+/* Keeps the FullCalendar toolbar chunk from overlapping the depot-filter
+   widget on desktop. Using --depot-filter-width lets the depot-filter set
+   its own width instead of hardcoding a pixel value. */
+.fc-scootering--with-depot-filter .fc-toolbar.fc-header-toolbar .fc-toolbar-chunk:last-child {
+  margin-right: var(--depot-filter-width, 392px);
+}
+
+/* Print-to-PDF for /staff/live analytics tabs. Triggered by the
+ * `.printing-analytics` class on <body> set by the filter-bar Print
+ * button. Hides chrome (nav, tabs, filter actions) and keeps only the
+ * active tab content so the browser's Save-as-PDF dialog produces a
+ * clean single-column export. */
+@media print {
+  body.printing-analytics [data-analytics-print-hide],
+  body.printing-analytics header,
+  body.printing-analytics nav,
+  body.printing-analytics [role="tablist"] {
+    display: none !important;
+  }
+  body.printing-analytics [data-state="inactive"] {
+    display: none !important;
+  }
+  body.printing-analytics {
+    background: white !important;
+    color: black !important;
+  }
+  body.printing-analytics * {
+    box-shadow: none !important;
+    border-color: #e5e7eb !important;
+  }
+  body.printing-analytics a {
+    text-decoration: none !important;
+    color: inherit !important;
+  }
+}

@@ -1,0 +1,11 @@
+-- No-op.
+--
+-- Original contents were an out-of-order Prisma drift snapshot that
+-- attempted to ALTER COLUMN ... DROP DEFAULT on createdAt / updatedAt
+-- columns that don't yet exist at this point in the migration order —
+-- they're added by 20260418230000_lifecycle_hardening_phase2 afterwards,
+-- and the DROP INDEX "User_email_idx" here was already performed by
+-- 20260418110442_user_lockout_counters. The migration never successfully
+-- applied anywhere, so replacing the body with a no-op is strictly safer
+-- than leaving the broken SQL in place.
+SELECT 1;

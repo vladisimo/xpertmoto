@@ -1,0 +1,332 @@
+"use client";
+
+import { use, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { trpc } from "@/lib/trpc/client";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/layout/page-header";
+import { PageShell } from "@/components/layout/page-section";
+import { LoadingBlock } from "@/components/ui/spinner";
+import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
+import { formatCurrency } from "@/lib/utils";
+
+type Resolution = "STANDARD" | "QUOTE_PENDING" | "WAIVED" | "WARRANTY";
+
+export default function CheckInAssessPage(props: { params: Promise<{ id: string }> }) {
+  const { id } = use(props.params);
+  const router = useRouter();
+  const utils = trpc.useUtils();
+  const { data: b } = trpc.staffBooking.detail.useQuery({ id });
+  const { data: assessment } = trpc.return.byBooking.useQuery({ bookingId: id });
+  const { data: tariffs } = trpc.damageTariff.list.useQuery(
+    { categoryId: b?.categoryId, activeOnly: true },
+    { enabled: !!b },
+  );
+  const fees = trpc.return.computeFees.useQuery(
+    { assessmentId: assessment?.id ?? "" },
+    { enabled: !!assessment },
+  );
+
+  const upsertCharge = trpc.return.upsertDamageCharge.useMutation();
+  const removeCharge = trpc.return.removeDamageCharge.useMutation();
+
+  const [draft, setDraft] = useState<{
+    description: string;
+    severity: "MINOR" | "MODERATE" | "MAJOR";
+    resolution: Resolution;
+    tariffId: string | null;
+    amount: string;
+    quoteCap: string;
+    note: string;
+  }>({
+    description: "",
+    severity: "MINOR",
+    resolution: "STANDARD",
+    tariffId: null,
+    amount: "",
+    quoteCap: "",
+    note: "",
+  });
+  const [err, setErr] = useState<string | null>(null);
+
+  const selectedTariff = useMemo(() => tariffs?.find((t) => t.id === draft.tariffId) ?? null, [tariffs, draft.tariffId]);
+
+  if (!b || !assessment) {
+    return (
+      <PageShell>
+        <LoadingBlock padded="lg" />
+      </PageShell>
+    );
+  }
+
+  async function addCharge() {
+    if (!assessment || !draft.description) {
+      setErr("Add a description for the damage.");
+      return;
+    }
+    setErr(null);
+    const amountNum = Number(draft.amount || 0);
+    const capNum = Number(draft.quoteCap || 0);
+    try {
+      await upsertCharge.mutateAsync({
+        assessmentId: assessment.id,
+        description: draft.description,
+        severity: draft.severity,
+        resolution: draft.resolution,
+        damageTariffId: draft.resolution === "STANDARD" ? draft.tariffId ?? undefined : undefined,
+        amount: draft.resolution === "STANDARD" ? amountNum : undefined,
+        quoteCapAmount: draft.resolution === "QUOTE_PENDING" ? capNum : undefined,
+        staffNote: draft.note || undefined,
+      });
+      await utils.return.byBooking.invalidate({ bookingId: id });
+      setDraft({
+        description: "",
+        severity: "MINOR",
+        resolution: "STANDARD",
+        tariffId: null,
+        amount: "",
+        quoteCap: "",
+        note: "",
+      });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to add charge");
+    }
+  }
+
+  async function remove(chargeId: string) {
+    await removeCharge.mutateAsync({ chargeId });
+    await utils.return.byBooking.invalidate({ bookingId: id });
+  }
+
+  const standardTotal = (assessment.damageCharges ?? [])
+    .filter((c) => c.resolution === "STANDARD")
+    .reduce((acc, c) => acc + Number(c.amount), 0);
+  const pendingCapTotal = (assessment.damageCharges ?? [])
+    .filter((c) => c.resolution === "QUOTE_PENDING")
+    .reduce((acc, c) => acc + Number(c.quoteCapAmount ?? 0), 0);
+  const totalDueNow = Math.round((standardTotal + (fees.data?.lateFee ?? 0) + (fees.data?.fuelCharge ?? 0)) * 100) / 100;
+
+  return (
+    <PageShell>
+      <PageHeader
+        eyebrow="Operations"
+        breadcrumbs={[
+          { label: "Bookings", href: "/staff/calendar" },
+          { label: b.bookingReference, href: `/staff/bookings/${id}` },
+          { label: "Check in", href: `/staff/bookings/${id}/check-in` },
+          { label: "2. Assess" },
+        ]}
+        title="Damage assessment"
+        description="Add one line per damage item. Standard tariff bills on the spot; quote-pending opens a work order."
+      />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="h3">Add a damage line</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <Label>Description</Label>
+            <Input
+              value={draft.description}
+              onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
+              placeholder="e.g. Scratch on left-side panel"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Severity</Label>
+              <div className="mt-2 flex gap-2">
+                {(["MINOR", "MODERATE", "MAJOR"] as const).map((s) => (
+                  <Button
+                    key={s}
+                    type="button"
+                    variant={draft.severity === s ? "default" : "secondary"}
+                    size="sm"
+                    onClick={() => setDraft((d) => ({ ...d, severity: s }))}
+                  >
+                    {s.slice(0, 1) + s.slice(1).toLowerCase()}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label>Resolution</Label>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(["STANDARD", "QUOTE_PENDING", "WAIVED", "WARRANTY"] as const).map((r) => (
+                  <Button
+                    key={r}
+                    type="button"
+                    variant={draft.resolution === r ? "default" : "secondary"}
+                    size="sm"
+                    onClick={() => setDraft((d) => ({ ...d, resolution: r }))}
+                  >
+                    {r === "QUOTE_PENDING" ? "Needs quote" : r.slice(0, 1) + r.slice(1).toLowerCase()}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {draft.resolution === "STANDARD" && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Tariff item (optional)</Label>
+                <select
+                  className="mt-1 h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  value={draft.tariffId ?? ""}
+                  onChange={(e) => {
+                    const tariffId = e.target.value || null;
+                    const t = tariffs?.find((x) => x.id === tariffId);
+                    setDraft((d) => ({
+                      ...d,
+                      tariffId,
+                      amount: t ? t.defaultPrice.toString() : d.amount,
+                      description: d.description || t?.name || "",
+                    }));
+                  }}
+                >
+                  <option value="">— none —</option>
+                  {tariffs?.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name} — {formatCurrency(Number(t.defaultPrice))}
+                    </option>
+                  ))}
+                </select>
+                {selectedTariff?.description && <p className="caption mt-1">{selectedTariff.description}</p>}
+              </div>
+              <div>
+                <Label>Amount (A$)</Label>
+                <Input
+                  type="number"
+                  inputMode="decimal"
+                  value={draft.amount}
+                  onChange={(e) => setDraft((d) => ({ ...d, amount: e.target.value }))}
+                />
+              </div>
+            </div>
+          )}
+
+          {draft.resolution === "QUOTE_PENDING" && (
+            <div>
+              <Label>Acknowledged cap (A$)</Label>
+              <Input
+                type="number"
+                inputMode="decimal"
+                value={draft.quoteCap}
+                onChange={(e) => setDraft((d) => ({ ...d, quoteCap: e.target.value }))}
+              />
+              <p className="caption mt-1">
+                The customer authorises a charge up to this amount once the mechanic quote is finalised.
+              </p>
+            </div>
+          )}
+
+          <div>
+            <Label>Staff note (optional)</Label>
+            <Input
+              value={draft.note}
+              onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))}
+              placeholder="Internal notes for this line"
+            />
+          </div>
+
+          {err && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              {err}
+            </div>
+          )}
+
+          <Button onClick={addCharge} disabled={upsertCharge.isPending}>
+            {upsertCharge.isPending ? "Adding…" : "Add to assessment"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="h3">Damage lines</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {(!assessment.damageCharges || assessment.damageCharges.length === 0) ? (
+            <p className="caption">No damage charges yet.</p>
+          ) : (
+            <div className="divide-y">
+              {assessment.damageCharges.map((c) => (
+                <div key={c.id} className="flex items-center justify-between gap-4 py-3 text-sm">
+                  <div className="flex-1">
+                    <div className="font-medium">{c.description}</div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <StatusBadge status={c.severity as StatusKey} />
+                      <span>· {c.resolution.replace("_", " ")}</span>
+                      {c.damageTariff ? <span>· {c.damageTariff.name}</span> : null}
+                    </div>
+                    {c.staffNote && <div className="caption mt-1">{c.staffNote}</div>}
+                  </div>
+                  <div className="text-right text-sm font-medium">
+                    {c.resolution === "QUOTE_PENDING"
+                      ? `up to ${formatCurrency(Number(c.quoteCapAmount ?? 0))}`
+                      : formatCurrency(Number(c.amount))}
+                  </div>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => remove(c.id)}>
+                    Remove
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="h3">Fees</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1 text-sm">
+          <Row label="Late return fee" value={formatCurrency(fees.data?.lateFee ?? 0)} />
+          <Row label="Fuel shortfall" value={formatCurrency(fees.data?.fuelCharge ?? 0)} />
+          {fees.data && (
+            <p className="caption mt-2">
+              Pickup fuel: {fees.data.pickupFuel}% · Return fuel: {fees.data.returnFuel}%
+              {fees.data.lateHours > 0 ? ` · Late ${Math.floor(fees.data.lateHours)}h` : ""}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="h3">Totals</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-1 text-sm">
+          <Row label="Standard damage charges" value={formatCurrency(standardTotal)} />
+          <Row label="Late + fuel" value={formatCurrency((fees.data?.lateFee ?? 0) + (fees.data?.fuelCharge ?? 0))} />
+          <Row label="Total due now" value={formatCurrency(totalDueNow)} bold />
+          <Row label="Pending quote cap (not yet charged)" value={formatCurrency(pendingCapTotal)} />
+        </CardContent>
+      </Card>
+
+      <div className="flex gap-3">
+        <Button asChild>
+          <Link href={`/staff/bookings/${id}/check-in/sign`}>Proceed to sign →</Link>
+        </Button>
+        <Button variant="ghost" onClick={() => router.push(`/staff/bookings/${id}/check-in`)}>
+          Back to overview
+        </Button>
+      </div>
+    </PageShell>
+  );
+}
+
+function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+  return (
+    <div className={`flex justify-between ${bold ? "border-t pt-1 font-semibold" : ""}`}>
+      <span className="text-muted-foreground">{label}</span>
+      <span>{value}</span>
+    </div>
+  );
+}

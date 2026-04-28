@@ -1,0 +1,50 @@
+[
+  {
+    "make": "Yamaha",
+    "model": "XMAX300",
+    "year": 2022,
+    "type": "OWNERS_MANUAL",
+    "title": "Yamaha X-MAX 300 (CZD300-AN) — Owner's Manual (Yamaha AU)",
+    "url": "https://www.yamahacity.com.au/pub/4a02c700/editor-uploaded-file/B5X-F8199-21%20(1).pdf"
+  },
+  {
+    "make": "Yamaha",
+    "model": "R7",
+    "year": 2023,
+    "type": "OWNERS_MANUAL",
+    "title": "Yamaha YZF-R7 — Owner's Manual (Yamaha AU)",
+    "url": "https://www.yamahacity.com.au/pub/4a02c700/editor-uploaded-file/BEB-28199-20.pdf"
+  },
+  {
+    "make": "CFMOTO",
+    "model": "800MT",
+    "year": 2023,
+    "type": "OWNERS_MANUAL",
+    "title": "CFMOTO 800MT — Owner's Manual (CFMOTO Malaysia)",
+    "url": "https://www.cfmotomalaysia.com.my/Source/owner_manual/800MT%20Owners%20Manual.pdf"
+  },
+  {
+    "make": "CFMOTO",
+    "model": "700CL-X Sport",
+    "year": 2022,
+    "type": "OWNERS_MANUAL",
+    "title": "CFMOTO 700CL-X / 700CL-X Sport — Owner's Manual",
+    "url": "https://www.cfmotousa.com/assets/cfmoto/images/customer_care/owners_manuals/cfmoto-700clx-700clxsport-om-usa-20230707-small.pdf"
+  },
+  {
+    "make": "CFMOTO",
+    "model": "300CL-X",
+    "year": 2023,
+    "type": "OWNERS_MANUAL",
+    "title": "CFMOTO 300NK — Owner's Manual (covers same powertrain)",
+    "url": "https://www.cfmotousa.com/assets/cfmoto/images/customer_care/owners_manuals/cfmoto_300nk_motorcycle_owners_manual.pdf"
+  },
+  {
+    "make": "CFMOTO",
+    "model": "450NK",
+    "year": 2024,
+    "type": "OWNERS_MANUAL",
+    "title": "CFMOTO 450NK — Owner's Manual",
+    "url": "https://www.cfmotousa.com/assets/cfmoto/images/customer_care/owners_manuals/450nk-om-usa-20230714.pdf"
+  }
+]
