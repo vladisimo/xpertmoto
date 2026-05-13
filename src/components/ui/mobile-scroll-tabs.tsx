@@ -10,14 +10,15 @@ import { cn } from "@/lib/utils";
  * a tabs page has more than ~3 triggers, so phone users can swipe between
  * them rather than being stuck on the first few.
  *
- * Bleeds outside its parent's horizontal padding (`-mx-4 px-4`) so the
- * scroll surface starts at the screen edge — restored to flush at `sm`.
+ * Bleeds outside its parent's horizontal padding (`-mx-3 px-3` — matching
+ * PageShell's mobile `p-3`) so the scroll surface starts at the screen
+ * edge — restored to flush at `sm`.
  */
 export const MobileScrollTabs = React.forwardRef<
   React.ComponentRef<typeof TabsPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
 >(({ className, ...props }, ref) => (
-  <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:overflow-visible sm:px-0">
+  <div className="-mx-3 overflow-x-auto px-3 sm:mx-0 sm:overflow-visible sm:px-0">
     <TabsPrimitive.List
       ref={ref}
       className={cn(

@@ -43,15 +43,15 @@ export default function FinanceTransactionsPage() {
   });
 
   const columns: DataTableColumn<Row>[] = [
-    { id: "reference", header: "Reference", cell: (r) => <span className="font-mono text-xs">{r.reference}</span> },
-    { id: "createdAt", header: "Date", cell: (r) => formatDateTime(r.createdAt), accessor: (r) => r.createdAt, sortable: true },
+    { id: "reference", header: "Reference", cell: (r) => <span className="font-mono text-xs">{r.reference}</span>, primary: true },
+    { id: "createdAt", header: "Date", cell: (r) => formatDateTime(r.createdAt), accessor: (r) => r.createdAt, sortable: true, secondary: true },
     { id: "type", header: "Type", cell: (r) => r.type.replace(/_/g, " ") },
-    { id: "method", header: "Method", cell: (r) => r.method },
+    { id: "method", header: "Method", cell: (r) => r.method, mobileHidden: true },
     { id: "status", header: "Status", cell: (r) => <StatusBadge status={r.status as StatusKey} /> },
     { id: "amount", header: "Amount", cell: (r) => <span className="tabular-nums">{formatCurrency(r.amount)}</span>, align: "right" },
-    { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gst)}</span>, align: "right" },
+    { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gst)}</span>, align: "right", mobileHidden: true },
     { id: "booking", header: "Booking", cell: (r) => r.bookingReference ?? "—" },
-    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—" },
+    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—", mobileHidden: true },
   ];
 
   return (
@@ -85,7 +85,7 @@ export default function FinanceTransactionsPage() {
       </div>
 
       {data && (
-        <div className="flex flex-wrap gap-4 rounded-lg border bg-card p-4 shadow-sm">
+        <div className="grid grid-cols-3 gap-4 rounded-lg border bg-card p-4 shadow-sm sm:flex sm:flex-wrap">
           <Totals label="Count" value={data.totals.count.toLocaleString("en-AU")} />
           <Totals label="Gross" value={formatCurrency(data.totals.amount)} />
           <Totals label="GST" value={formatCurrency(data.totals.gst)} />
@@ -98,6 +98,7 @@ export default function FinanceTransactionsPage() {
         isLoading={isLoading}
         getRowId={(r) => r.id}
         empty="No transactions in this window."
+        mobileMode="cards"
       />
     </PageShell>
   );

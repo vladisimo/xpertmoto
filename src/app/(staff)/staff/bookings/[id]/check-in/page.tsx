@@ -73,6 +73,7 @@ export default function CheckInLandingPage(props: { params: Promise<{ id: string
         ]}
         title={`Check in — ${b.bookingReference}`}
         description={`${b.customer.firstName} ${b.customer.lastName} · scheduled return ${formatDateTime(b.returnDateTime)}`}
+        back={`/staff/bookings/${id}`}
       />
       {steps.map((s) => (
         <Card key={s.number} className={s.disabled ? "opacity-60" : undefined}>

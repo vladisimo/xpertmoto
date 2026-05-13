@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { LoadingBlock } from "@/components/ui/spinner";
 import { DamageMapCanvas, normalizeMarkers, type DamageMarker } from "@/components/agreement/damage-map-canvas";
 import { PhotoCaptureGrid } from "@/components/agreement/photo-capture-grid";
@@ -138,7 +139,7 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Operations"
+        eyebrow="Operations · Step 1 of 3"
         breadcrumbs={[
           { label: "Bookings", href: "/staff/calendar" },
           { label: b.bookingReference, href: `/staff/bookings/${id}` },
@@ -147,6 +148,8 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
         ]}
         title="Post-hire inspection"
         description="Do this alongside the customer. Compare against the pre-hire map — new damage lands here."
+        back={`/staff/bookings/${id}/check-in`}
+        mobileCompact
       />
 
       <Card>
@@ -252,7 +255,7 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="hidden gap-3 md:flex">
         {!inspectionId ? (
           <Button onClick={createDraft} disabled={saving}>
             {saving ? "Starting…" : "Start post-hire inspection"}
@@ -271,6 +274,23 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
           <Link href={`/staff/bookings/${id}/check-in`}>Back to overview</Link>
         </Button>
       </div>
+
+      <MobileBottomBar>
+        {!inspectionId ? (
+          <Button onClick={createDraft} disabled={saving} className="flex-1">
+            {saving ? "Starting…" : "Start inspection"}
+          </Button>
+        ) : (
+          <>
+            <Button variant="secondary" size="sm" onClick={saveProgress} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+            <Button onClick={proceed} disabled={saving} className="flex-1">
+              Continue
+            </Button>
+          </>
+        )}
+      </MobileBottomBar>
     </PageShell>
   );
 }

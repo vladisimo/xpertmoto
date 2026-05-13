@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Suspense } from "react";
 import { DM_Sans } from "next/font/google";
 import "./globals.css";
@@ -9,6 +9,7 @@ import { getPostHogPublic } from "@/lib/analytics";
 import { SupportWidgetGate } from "@/components/support/support-widget-gate";
 import { ImpersonationBannerGate } from "@/components/layout/impersonation-banner-gate";
 import { BrandingProvider } from "@/components/shared/branding-provider";
+import { MobileDebug } from "@/components/shared/mobile-debug";
 import { getBranding } from "@/lib/branding";
 
 const dmSansBody = DM_Sans({
@@ -37,6 +38,19 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
+/**
+ * `viewport-fit=cover` lets `env(safe-area-inset-*)` resolve to non-zero
+ * on devices with a notch / system UI overlap — required for the
+ * `MobileBottomBar` and any other sticky-bottom UI that uses
+ * `pb-[env(safe-area-inset-bottom)]`. `initialScale: 1` keeps the
+ * back-office at 1× zoom on first paint.
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+};
+
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
   const [posthog, branding] = await Promise.all([
     getPostHogPublic(),
@@ -50,6 +64,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     >
       <body className="min-h-screen bg-background font-sans antialiased">
         <SilenceExtensionHydrationWarning />
+        <MobileDebug />
         <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
         <TRPCProvider>
           <BrandingProvider value={branding}>

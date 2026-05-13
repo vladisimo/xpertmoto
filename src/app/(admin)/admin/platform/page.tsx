@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { DesktopRecommendedNotice } from "@/components/layout/desktop-recommended-notice";
 import {
   PlatformTabsBar,
   type PlatformTabValue,
@@ -66,6 +67,11 @@ export default async function AdminPlatformPage({
         breadcrumbs={[{ label: "Admin", href: "/admin/dashboard" }, { label: "Platform" }]}
       />
       <PlatformTabsBar activeTab={activeTab} />
+
+      <DesktopRecommendedNotice
+        className="md:hidden"
+        description="Cost-centre charts and timeseries are dense — open this page on a laptop for the full read. Aggregate KPIs at the top of each tab still render below."
+      />
 
       <Suspense fallback={<TabPlaceholder />}>
         {activeTab === "database" && <DatabaseTab />}

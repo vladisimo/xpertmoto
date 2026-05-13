@@ -18,6 +18,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import {
+  DataTable,
+  type DataTableColumn,
+} from "@/components/ui/data-table";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -25,6 +29,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatDateTime } from "@/lib/utils";
+
+type WebhookRow = {
+  id: string;
+  receivedAt: Date;
+  livemode: boolean;
+  type: string;
+  status: string;
+  attempts: number;
+  errorReason: string | null;
+};
 
 export default function AdminWebhookHealthPage() {
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
@@ -50,6 +64,57 @@ export default function AdminWebhookHealthPage() {
     },
   });
 
+  const columns: DataTableColumn<WebhookRow>[] = [
+    {
+      id: "type",
+      header: "Type",
+      primary: true,
+      cell: (r) => <span className="font-medium">{r.type}</span>,
+    },
+    {
+      id: "received",
+      header: "Received",
+      secondary: true,
+      cell: (r) => (
+        <span className="whitespace-nowrap">
+          {formatDateTime(r.receivedAt)}
+          {r.livemode ? (
+            <span className="ml-1 text-xs text-destructive">LIVE</span>
+          ) : (
+            <span className="ml-1 text-xs text-muted-foreground">test</span>
+          )}
+        </span>
+      ),
+    },
+    {
+      id: "eventId",
+      header: "Event ID",
+      mobileHidden: true,
+      cell: (r) => <span className="font-mono text-xs">{r.id.slice(-14)}</span>,
+    },
+    {
+      id: "status",
+      header: "Status",
+      cell: (r) => <StatusBadge status={r.status as StatusKey} />,
+    },
+    {
+      id: "attempts",
+      header: "Attempts",
+      align: "right",
+      mobileHidden: true,
+      cell: (r) => <span className="tabular-nums">{r.attempts}</span>,
+    },
+    {
+      id: "error",
+      header: "Error",
+      cell: (r) => (
+        <span className="block max-w-sm truncate text-xs text-destructive">
+          {r.errorReason ?? ""}
+        </span>
+      ),
+    },
+  ];
+
   return (
     <PageShell>
       <PageHeader
@@ -61,7 +126,7 @@ export default function AdminWebhookHealthPage() {
       <FinanceTabsBar />
 
       <PageSection flush>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             label="Received in last 24h"
             value={summary.data?.received24h ?? "—"}
@@ -107,82 +172,47 @@ export default function AdminWebhookHealthPage() {
           </Select>
         </div>
 
-        {recent.isLoading ? (
-          <div className="text-sm text-muted-foreground">Loading…</div>
-        ) : !recent.data || recent.data.length === 0 ? (
-          <Card>
-            <CardContent className="py-6 text-center text-sm text-muted-foreground">
-              No events matching the filter.
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left text-xs uppercase text-muted-foreground">
-                  <th className="py-2 pr-4">Received</th>
-                  <th className="py-2 pr-4">Event ID</th>
-                  <th className="py-2 pr-4">Type</th>
-                  <th className="py-2 pr-4">Status</th>
-                  <th className="py-2 pr-4">Attempts</th>
-                  <th className="py-2 pr-4">Error</th>
-                  <th className="py-2 pr-4">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent.data.map((row) => (
-                  <tr key={row.id} className="border-b last:border-0">
-                    <td className="py-2 pr-4 whitespace-nowrap">
-                      {formatDateTime(row.receivedAt)}
-                      {row.livemode ? (
-                        <span className="ml-1 text-xs text-destructive">LIVE</span>
-                      ) : (
-                        <span className="ml-1 text-xs text-muted-foreground">test</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-4 font-mono text-xs">{row.id.slice(-14)}</td>
-                    <td className="py-2 pr-4">{row.type}</td>
-                    <td className="py-2 pr-4">
-                      <StatusBadge status={row.status as StatusKey} />
-                    </td>
-                    <td className="py-2 pr-4 tabular-nums">{row.attempts}</td>
-                    <td className="py-2 pr-4 text-xs text-destructive max-w-sm truncate">
-                      {row.errorReason ?? ""}
-                    </td>
-                    <td className="py-2 pr-4">
-                      <div className="flex items-center gap-1">
-                        {(row.status === "FAILED" || row.status === "PROCESSING") && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={reset.isPending}
-                            onClick={() => reset.mutate({ eventId: row.id })}
-                            title="Reset to RECEIVED — then click 'Resend' in Stripe dashboard"
-                          >
-                            {reset.isPending ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                            ) : (
-                              <RefreshCcw className="h-3.5 w-3.5" aria-hidden />
-                            )}
-                          </Button>
-                        )}
-                        <a
-                          href={`https://dashboard.stripe.com/${row.livemode ? "" : "test/"}events/${row.id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-accent hover:underline"
-                        >
-                          Stripe
-                          <ExternalLink className="h-3 w-3" aria-hidden />
-                        </a>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <DataTable<WebhookRow>
+          columns={columns}
+          data={recent.data as WebhookRow[] | undefined}
+          isLoading={recent.isLoading}
+          getRowId={(r) => r.id}
+          empty="No events matching the filter."
+          mobileMode="cards"
+          rowActions={(row) => (
+            <div className="flex items-center gap-1">
+              {(row.status === "FAILED" || row.status === "PROCESSING") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={reset.isPending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    reset.mutate({ eventId: row.id });
+                  }}
+                  title="Reset to RECEIVED — then click 'Resend' in Stripe dashboard"
+                  aria-label="Reset webhook"
+                >
+                  {reset.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <RefreshCcw className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                </Button>
+              )}
+              <a
+                href={`https://dashboard.stripe.com/${row.livemode ? "" : "test/"}events/${row.id}`}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex items-center gap-1 text-xs text-accent hover:underline"
+              >
+                Stripe
+                <ExternalLink className="h-3 w-3" aria-hidden />
+              </a>
+            </div>
+          )}
+        />
       </PageSection>
     </PageShell>
   );

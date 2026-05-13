@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/layout/page-header";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { PageShell } from "@/components/layout/page-section";
 import { LoadingBlock } from "@/components/ui/spinner";
 
@@ -84,13 +85,15 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Operations"
+        eyebrow="Operations · Step 4 of 4"
         breadcrumbs={[
           { label: "Bookings", href: "/staff/calendar" },
           { label: b.bookingReference, href: `/staff/bookings/${id}` },
           { label: "Check out", href: `/staff/bookings/${id}/check-out` },
           { label: "4. Confirm" },
         ]}
+        back={`/staff/bookings/${id}/check-out`}
+        mobileCompact
         title="Confirm handover"
         description="Final review before the keys go over."
       />
@@ -170,7 +173,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="hidden gap-3 md:flex">
         <Button onClick={submit} disabled={!canSubmit || checkOut.isPending}>
           {checkOut.isPending ? "Completing…" : "Complete check-out"}
         </Button>
@@ -178,6 +181,16 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
           <Link href={`/staff/bookings/${id}/check-out`}>Back to overview</Link>
         </Button>
       </div>
+
+      <MobileBottomBar>
+        <Button
+          onClick={submit}
+          disabled={!canSubmit || checkOut.isPending}
+          className="flex-1"
+        >
+          {checkOut.isPending ? "Completing…" : "Complete check-out"}
+        </Button>
+      </MobileBottomBar>
     </PageShell>
   );
 }

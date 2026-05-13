@@ -123,7 +123,7 @@ function SidebarNav({
   const pathname = usePathname();
 
   return (
-    <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
+    <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-3 lg:py-4 lg:space-y-6">
       {SECTIONS_ORDER.map((section) => {
         const items = BACK_OFFICE_NAV.filter(
           (i) => i.section === section && canAccess(i, role),
@@ -133,14 +133,14 @@ function SidebarNav({
         return (
           <div key={section}>
             {!collapsed && (
-              <h3 className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+              <h3 className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-widest text-slate-400 lg:mb-2">
                 {SECTION_META[section].label}
               </h3>
             )}
             {collapsed && (
               <Separator className="mb-3 mx-auto w-6 bg-slate-700" />
             )}
-            <ul className="space-y-1">
+            <ul className="space-y-0.5 lg:space-y-1">
               {items.map((item) => {
                 const active =
                   pathname === item.href ||
@@ -157,7 +157,7 @@ function SidebarNav({
                   <Link
                     href={item.href}
                     className={cn(
-                      "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all duration-150",
+                      "group flex items-center gap-3 rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-150 lg:py-2.5",
                       active
                         ? "bg-white/10 text-white shadow-sm"
                         : "text-slate-300 hover:bg-white/5 hover:text-white",
@@ -279,8 +279,8 @@ function SidebarContent({
         accent={accent}
       />
 
-      {/* User footer */}
-      <div className="border-t border-white/5 p-3">
+      {/* User footer (desktop only — mobile uses top-bar avatar menu) */}
+      <div className="hidden border-t border-white/5 p-3 lg:block">
         {collapsed ? (
           <Tooltip delayDuration={0}>
             <TooltipTrigger asChild>
@@ -380,6 +380,12 @@ export function BackOfficeShell({
   const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
 
+  // Close the mobile drawer on route change so tapping a nav item
+  // doesn't leave the sheet open over the destination page.
+  React.useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
   const handleSignOut = useCallback(() => {
     signOutAction();
   }, [signOutAction]);
@@ -421,7 +427,7 @@ export function BackOfficeShell({
 
         {/* Mobile sidebar sheet */}
         <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-          <SheetContent side="left" className="w-64 p-0">
+          <SheetContent side="left" className="w-64 border-r-0 p-0 bg-black">
             <SheetTitle className="sr-only">Navigation</SheetTitle>
             <SidebarContent
               user={user}
@@ -435,7 +441,9 @@ export function BackOfficeShell({
 
         {/* Main area */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Mobile-only top bar */}
+          {/* Mobile-only top bar. PWA / standalone-mode safe-area top is
+              handled by the body — we keep the bar a fixed 56px so the
+              page content always starts at the same y. */}
           <div className="flex lg:hidden h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black px-4 text-white">
             <Button
               variant="ghost"

@@ -39,13 +39,13 @@ export default function FinanceBondsPage() {
   });
 
   const columns: DataTableColumn<Row>[] = [
-    { id: "booking", header: "Booking", cell: (r) => <span className="font-mono text-xs">{r.bookingReference ?? "—"}</span> },
-    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—" },
+    { id: "booking", header: "Booking", cell: (r) => <span className="font-mono text-xs">{r.bookingReference ?? "—"}</span>, primary: true },
+    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—", secondary: true },
     { id: "status", header: "Status", cell: (r) => <StatusBadge status={r.status as StatusKey} /> },
     { id: "held", header: "Held", cell: (r) => <span className="tabular-nums">{formatCurrency(r.heldAmount)}</span>, align: "right" },
     { id: "captured", header: "Captured", cell: (r) => <span className="tabular-nums text-destructive">{formatCurrency(r.capturedAmount)}</span>, align: "right" },
-    { id: "released", header: "Released", cell: (r) => <span className="tabular-nums">{formatCurrency(r.releasedAmount)}</span>, align: "right" },
-    { id: "created", header: "Created", cell: (r) => formatDateTime(r.createdAt), accessor: (r) => r.createdAt, sortable: true },
+    { id: "released", header: "Released", cell: (r) => <span className="tabular-nums">{formatCurrency(r.releasedAmount)}</span>, align: "right", mobileHidden: true },
+    { id: "created", header: "Created", cell: (r) => formatDateTime(r.createdAt), accessor: (r) => r.createdAt, sortable: true, mobileHidden: true },
   ];
 
   return (
@@ -75,7 +75,7 @@ export default function FinanceBondsPage() {
       </div>
 
       {data && (
-        <div className="flex flex-wrap gap-4 rounded-lg border bg-card p-4 shadow-sm">
+        <div className="grid grid-cols-2 gap-4 rounded-lg border bg-card p-4 shadow-sm sm:flex sm:flex-wrap">
           <T label="Count" value={data.totals.count.toLocaleString("en-AU")} />
           <T label="Held" value={formatCurrency(data.totals.held)} />
           <T label="Captured" value={formatCurrency(data.totals.captured)} />
@@ -89,6 +89,7 @@ export default function FinanceBondsPage() {
         isLoading={isLoading}
         getRowId={(r) => r.id}
         empty="No bonds in this window."
+        mobileMode="cards"
       />
     </PageShell>
   );

@@ -7,6 +7,7 @@ import { BodyEditor, type TemplateFormat } from "@/components/communications/bod
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import {
   Select,
   SelectContent,
@@ -276,7 +277,7 @@ export function TemplateEditor({ template }: Props) {
         </div>
       </div>
 
-      <div className="flex gap-2">
+      <div className="hidden gap-2 md:flex">
         <Button
           disabled={!canSave || save.isPending}
           onClick={() =>
@@ -297,12 +298,38 @@ export function TemplateEditor({ template }: Props) {
             })
           }
         >
-          {template ? "Save changes" : "Create template"}
+          {save.isPending ? "Saving…" : template ? "Save changes" : "Create template"}
         </Button>
         <Button variant="secondary" onClick={() => router.back()}>
           Cancel
         </Button>
       </div>
+
+      <MobileBottomBar>
+        <Button
+          className="flex-1"
+          disabled={!canSave || save.isPending}
+          onClick={() =>
+            save.mutate({
+              id: template?.id,
+              key,
+              type: (type || undefined) as Parameters<typeof save.mutate>[0]["type"],
+              category: category as (typeof CATEGORIES)[number],
+              name,
+              description: description || undefined,
+              channels: channels as Parameters<typeof save.mutate>[0]["channels"],
+              subject: subject || undefined,
+              bodyTemplate: body,
+              emailBodyHtml: emailBodyHtml.trim() ? emailBodyHtml : null,
+              format,
+              variables,
+              isActive: true,
+            })
+          }
+        >
+          {save.isPending ? "Saving…" : template ? "Save changes" : "Create template"}
+        </Button>
+      </MobileBottomBar>
     </div>
   );
 }

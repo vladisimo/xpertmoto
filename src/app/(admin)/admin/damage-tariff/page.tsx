@@ -8,9 +8,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { DataTable } from "@/components/ui/data-table";
+import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { formatCurrency } from "@/lib/utils";
 
 type Severity = "MINOR" | "MODERATE" | "MAJOR";
+
+type TariffRow = {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  defaultPrice: number | string;
+  severityHint: string | null;
+  isActive: boolean;
+  displayOrder: number;
+};
 
 export default function DamageTariffPage() {
   const utils = trpc.useUtils();
@@ -171,74 +184,106 @@ export default function DamageTariffPage() {
           <CardTitle className="h3">Catalogue</CardTitle>
         </CardHeader>
         <CardContent>
-          {!tariffs || tariffs.length === 0 ? (
-            <p className="caption">No tariff items yet. Add one above.</p>
-          ) : (
-            <div className="overflow-hidden rounded-md border border-border">
-              <table className="w-full text-sm">
-                <thead className="bg-muted/40">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Code</th>
-                    <th className="px-3 py-2 text-left">Name</th>
-                    <th className="px-3 py-2 text-left">Severity</th>
-                    <th className="px-3 py-2 text-right">Price</th>
-                    <th className="px-3 py-2 text-left">Active</th>
-                    <th className="px-3 py-2 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {tariffs.map((t) => (
-                    <tr key={t.id}>
-                      <td className="px-3 py-2 font-mono text-xs">{t.code}</td>
-                      <td className="px-3 py-2">
-                        <div>{t.name}</div>
-                        {t.description && <div className="caption">{t.description}</div>}
-                      </td>
-                      <td className="px-3 py-2">{t.severityHint ?? "—"}</td>
-                      <td className="px-3 py-2 text-right">{formatCurrency(Number(t.defaultPrice))}</td>
-                      <td className="px-3 py-2">{t.isActive ? "✅" : "—"}</td>
-                      <td className="px-3 py-2 text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() =>
-                            setDraft({
-                              id: t.id,
-                              code: t.code,
-                              name: t.name,
-                              description: t.description ?? "",
-                              defaultPrice: t.defaultPrice.toString(),
-                              severityHint: (t.severityHint as Severity) ?? "MINOR",
-                              displayOrder: t.displayOrder,
-                            })
-                          }
-                        >
-                          Edit
-                        </Button>
-                        {t.isActive ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => disable.mutate({ id: t.id })}
-                          >
-                            Disable
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => enable.mutate({ id: t.id })}
-                          >
-                            Enable
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <DataTable<TariffRow>
+            columns={[
+              {
+                id: "code",
+                header: "Code",
+                primary: true,
+                cell: (t) => <span className="font-mono text-xs">{t.code}</span>,
+              },
+              {
+                id: "name",
+                header: "Name",
+                secondary: true,
+                cell: (t) => (
+                  <div>
+                    <div>{t.name}</div>
+                    {t.description && <div className="caption">{t.description}</div>}
+                  </div>
+                ),
+              },
+              {
+                id: "severity",
+                header: "Severity",
+                cell: (t) =>
+                  t.severityHint ? (
+                    <StatusBadge status={t.severityHint as StatusKey} />
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  ),
+              },
+              {
+                id: "price",
+                header: "Price",
+                align: "right",
+                cell: (t) => (
+                  <span className="tabular-nums">
+                    {formatCurrency(Number(t.defaultPrice))}
+                  </span>
+                ),
+              },
+              {
+                id: "active",
+                header: "Active",
+                cell: (t) =>
+                  t.isActive ? (
+                    <StatusBadge status="ACTIVE" />
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  ),
+              },
+            ]}
+            data={tariffs as TariffRow[] | undefined}
+            getRowId={(t) => t.id}
+            empty="No tariff items yet. Add one above."
+            mobileMode="cards"
+            rowActions={(t) => (
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setDraft({
+                      id: t.id,
+                      code: t.code,
+                      name: t.name,
+                      description: t.description ?? "",
+                      defaultPrice: t.defaultPrice.toString(),
+                      severityHint: (t.severityHint as Severity) ?? "MINOR",
+                      displayOrder: t.displayOrder,
+                    });
+                  }}
+                >
+                  Edit
+                </Button>
+                {t.isActive ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      disable.mutate({ id: t.id });
+                    }}
+                  >
+                    Disable
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      enable.mutate({ id: t.id });
+                    }}
+                  >
+                    Enable
+                  </Button>
+                )}
+              </div>
+            )}
+          />
         </CardContent>
       </Card>
     </PageShell>

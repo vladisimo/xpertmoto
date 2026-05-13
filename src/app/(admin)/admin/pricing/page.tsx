@@ -50,6 +50,7 @@ export default function PricingPage() {
     {
       id: "name",
       header: "Category",
+      primary: true,
       cell: (c) => {
         const tierCount = tierCountByCategory[c.id] ?? 0;
         return (
@@ -121,6 +122,7 @@ export default function PricingPage() {
     {
       id: "name",
       header: "Name",
+      primary: true,
       cell: (a) => (
         <div className="min-w-0">
           <div className="font-medium">{a.name}</div>
@@ -176,6 +178,7 @@ export default function PricingPage() {
     {
       id: "name",
       header: "Tier",
+      primary: true,
       cell: (i) => (
         <div className="min-w-0">
           <div className="font-medium">{i.name}</div>
@@ -239,11 +242,13 @@ export default function PricingPage() {
     {
       id: "code",
       header: "Code",
+      primary: true,
       cell: (d) => <span className="font-mono font-medium">{d.code}</span>,
     },
     {
       id: "type",
       header: "Type",
+      secondary: true,
       cell: (d) => (
         <span className="text-muted-foreground">
           {d.type.charAt(0) + d.type.slice(1).toLowerCase()}
@@ -284,6 +289,7 @@ export default function PricingPage() {
     {
       id: "name",
       header: "Name",
+      primary: true,
       cell: (s) => <span className="font-medium">{s.name}</span>,
     },
     {
@@ -320,7 +326,7 @@ export default function PricingPage() {
 
       <FinanceTabsBar />
 
-      <div className="-mx-4 flex gap-2 overflow-x-auto border-b px-4 sm:mx-0 sm:overflow-visible sm:px-0">
+      <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0">
         {(["rates", "addons", "insurance", "discounts", "seasons"] as Tab[]).map((t) => (
           <button
             key={t}
@@ -369,6 +375,7 @@ export default function PricingPage() {
               data={data?.categories}
               getRowId={(c) => c.id}
               empty="No vehicle categories configured."
+              mobileMode="cards"
             />
           )}
 
@@ -402,6 +409,7 @@ export default function PricingPage() {
             </Button>
           )}
           empty="No add-ons configured."
+          mobileMode="cards"
         />
       )}
 
@@ -429,6 +437,7 @@ export default function PricingPage() {
             </Button>
           )}
           empty="No insurance tiers configured."
+          mobileMode="cards"
         />
       )}
 
@@ -488,6 +497,7 @@ export default function PricingPage() {
               </Button>
             )}
             empty="No discount codes yet."
+            mobileMode="cards"
           />
         </>
       )}
@@ -557,6 +567,7 @@ export default function PricingPage() {
               </Button>
             )}
             empty="No seasons configured."
+            mobileMode="cards"
           />
         </>
       )}

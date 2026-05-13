@@ -38,6 +38,22 @@ This contract exists because the app's UI was drifting — same feature rendered
 - **Spacing (vertical rhythm)**: `space-y-8` at `<PageShell>` root, `space-y-6` inside a `<PageSection>`, `space-y-4` inside a card body, `space-y-2` for label+control pairs. Do not mix scales as direct siblings under the same parent.
 - **Typography**: use the semantic classes — `.h-display` (marketing hero), `.h1` (page title, applied by `PageHeader`), `.h2`, `.h3` (section), `.body-text`, `.caption`, `.eyebrow`. Headings automatically use `font-display` (Space Grotesk); body uses `font-sans` (Rubik). Don't apply raw `text-3xl font-bold` to page titles — use `PageHeader` or `.h1`.
 
+## Mobile rules
+
+- **Single source of truth, no parallel shells.** Never introduce a `MobilePageShell`, `MobileTopBar`, or any other shell that duplicates `<PageShell>` / `<PageHeader>`. Both work on mobile — `<PageShell>` tightens its own padding, `<PageHeader>` accepts `back`, `mobileCompact`, and `mobileActionsOverflow` for phone use.
+- **Branch render at the page body, not the route.** When the desktop and mobile UIs genuinely diverge (e.g. wide table → list of rows), fork inside the page on `useIsMobile()` from [src/hooks/use-is-mobile.ts](../../hooks/use-is-mobile.ts). This is the **only** sanctioned breakpoint hook — no `window.innerWidth`, no other `useMediaQuery`, no UA strings.
+- **Lists of records on mobile** use `<DataTable mobileMode="cards">` with `primary` / `secondary` / `mobileHidden` column metadata. Adopt this on every `<DataTable>` whose row has more than ~5 columns of meaningful data — never let a desktop table just horizontally scroll on phones. Use `onMobileRowOpen` to open a `<MobileDetailSheet>` instead of pushing a route when the row's full detail fits in a sheet.
+- **Mobile primitives** (use these — do not hand-roll equivalents):
+  - `<MobileBottomBar>` from [layout/mobile-bottom-bar.tsx](../layout/mobile-bottom-bar.tsx) — sticky CTA bar with `safe-area-inset-bottom`.
+  - `<MobileListRow>` from [ui/mobile-list-row.tsx](mobile-list-row.tsx) — standalone list row outside `DataTable` (agenda, tasks, etc).
+  - `<MobileDetailSheet>` from [ui/mobile-detail-sheet.tsx](mobile-detail-sheet.tsx) — full-height bottom Sheet replacing dialogs on phones.
+  - `<MobileFilterSheet>` from [ui/mobile-filter-sheet.tsx](mobile-filter-sheet.tsx) — collapses an inline filter bar into one tap target.
+  - `<MobileStatCard>` from [ui/mobile-stat-card.tsx](mobile-stat-card.tsx) — replaces 4-col KPI grids with a vertical stack on phones.
+  - `<MobileEmptyState>` from [ui/mobile-empty-state.tsx](mobile-empty-state.tsx) — the consistent empty placeholder.
+  - `<MobileScrollTabs>` from [ui/mobile-scroll-tabs.tsx](mobile-scroll-tabs.tsx) — horizontal-scroll TabsList. Required wherever a tab strip has more than ~4 tabs or any single tab label is long.
+- **Heavy widgets** (`FullCalendar`, MapLibre, recharts panels) wrap in `next/dynamic({ ssr: false })` so the unused tree never ships in the mobile branch.
+- **Tablet (768–1023px)** intentionally renders the desktop tree. Do not add a third tablet variant — the shell accommodates landing-bay iPads as documented in `useIsMobile`.
+
 ## Buttons
 
 - `variant="default"` — the single primary action on a view.

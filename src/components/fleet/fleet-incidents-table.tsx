@@ -23,12 +23,14 @@ export function FleetIncidentsTable({ data }: { data: FleetIncidentRow[] }) {
       id: "number",
       header: "Incident",
       sortable: true,
+      primary: true,
       accessor: (i) => i.incidentNumber,
       cell: (i) => <span className="font-medium">{i.incidentNumber}</span>,
     },
     {
       id: "type",
       header: "Type",
+      secondary: true,
       cell: (i) => <span className="text-muted-foreground">{i.type.replace(/_/g, " ")}</span>,
     },
     {
@@ -44,6 +46,7 @@ export function FleetIncidentsTable({ data }: { data: FleetIncidentRow[] }) {
     {
       id: "customer",
       header: "Customer",
+      mobileHidden: true,
       cell: (i) => (
         <span className="text-muted-foreground">
           {i.customerName ?? "—"}
@@ -84,6 +87,7 @@ export function FleetIncidentsTable({ data }: { data: FleetIncidentRow[] }) {
       getRowId={(i) => i.id}
       getRowHref={(i) => `/staff/incidents/${i.id}`}
       empty="No incidents recorded."
+      mobileMode="cards"
     />
   );
 }

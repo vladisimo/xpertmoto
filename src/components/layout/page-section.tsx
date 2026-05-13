@@ -105,14 +105,21 @@ export interface PageShellProps extends React.HTMLAttributes<HTMLDivElement> {
  * Standard page shell — wraps a PageHeader + N PageSections with the
  * canonical outer padding and vertical rhythm (`space-y-8` at root).
  * Use in every authenticated page as the top-level wrapper.
+ *
+ * Mobile note: padding tightens to `p-3` and rhythm to `space-y-5` below
+ * the `sm` breakpoint to reclaim viewport on phones; tablet/desktop are
+ * unchanged. Branched-render mobile bodies should still use this shell —
+ * do not introduce a parallel `MobilePageShell`.
  */
 export const PageShell = React.forwardRef<HTMLDivElement, PageShellProps>(
   ({ full, className, ...props }, ref) => (
     <div
       ref={ref}
       className={cn(
-        "mx-auto w-full max-w-screen-2xl p-4 sm:p-6 lg:p-8",
-        full ? "flex h-full flex-col gap-4 sm:gap-6 overflow-hidden" : "space-y-6 sm:space-y-8",
+        "mx-auto w-full max-w-screen-2xl p-3 sm:p-6 lg:p-8",
+        full
+          ? "flex h-full flex-col gap-4 sm:gap-6 overflow-hidden"
+          : "space-y-5 sm:space-y-6 lg:space-y-8",
         className,
       )}
       {...props}

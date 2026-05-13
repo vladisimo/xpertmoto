@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsTrigger } from "@/components/ui/tabs";
+import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { StatusActions } from "@/components/staff/booking-status-actions";
 import { BookingNotes } from "@/components/staff/booking-notes";
@@ -148,7 +149,7 @@ export default async function StaffBookingDetail({ params }: { params: Promise<{
       </div>
 
       <Tabs defaultValue="overview">
-        <TabsList className="w-full justify-start overflow-x-auto">
+        <MobileScrollTabs>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="payments" className="gap-1.5">
             Payments & charges
@@ -166,7 +167,7 @@ export default async function StaffBookingDetail({ params }: { params: Promise<{
             Notes & audit
             {b.bookingNotes.length > 0 && <Badge variant="outline">{b.bookingNotes.length}</Badge>}
           </TabsTrigger>
-        </TabsList>
+        </MobileScrollTabs>
 
         <TabsContent value="overview" className="space-y-6">
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">

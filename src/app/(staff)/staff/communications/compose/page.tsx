@@ -7,6 +7,7 @@ import { BodyEditor, type TemplateFormat } from "@/components/communications/bod
 import { CommsTabs } from "@/components/communications/comms-tabs";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -296,6 +297,7 @@ export default function ComposePage() {
             </div>
 
             <Button
+              className="hidden md:inline-flex"
               disabled={!canSend}
               onClick={() =>
                 send.mutate({
@@ -315,6 +317,27 @@ export default function ComposePage() {
           </div>
         </div>
       </PageSection>
+
+      <MobileBottomBar>
+        <Button
+          className="flex-1"
+          disabled={!canSend}
+          onClick={() =>
+            send.mutate({
+              customerIds: recipientIds,
+              type: type as Parameters<typeof send.mutate>[0]["type"],
+              channels,
+              subject: subject || undefined,
+              body,
+              format,
+              templateId: templateId || undefined,
+            })
+          }
+        >
+          <Send className="h-4 w-4" />
+          {send.isPending ? "Sending…" : `Send to ${recipientIds.length}`}
+        </Button>
+      </MobileBottomBar>
     </PageShell>
   );
 }

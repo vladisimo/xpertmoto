@@ -76,6 +76,16 @@ export interface DataTableProps<T> {
    *  - `"cards"`: stack one card per row, using `primary`/`secondary`/
    *    `mobileHidden` column metadata for layout. */
   mobileMode?: "scroll" | "cards";
+  /** Mobile only: tap handler that fires INSTEAD of `getRowHref` /
+   *  `onRowClick` when `mobileMode="cards"`. Use to open a
+   *  `<MobileDetailSheet>` in-place instead of pushing a route. Has no
+   *  effect on desktop or when `mobileMode !== "cards"`. */
+  onMobileRowOpen?: (row: T) => void;
+  /** Mobile only escape hatch — render a fully custom card body for
+   *  each row when the column-driven layout doesn't fit (e.g. media
+   *  rows, multi-line aggregates). Skips `primary`/`secondary` /
+   *  `mobileHidden` and `rowActions` — caller owns the layout. */
+  mobileRender?: (row: T) => React.ReactNode;
 }
 
 const ALIGN_CLASSES = {
@@ -98,6 +108,8 @@ export function DataTable<T>({
   className,
   stickyHeader,
   mobileMode = "scroll",
+  onMobileRowOpen,
+  mobileRender,
 }: DataTableProps<T>) {
   const [uncontrolledSort, setUncontrolledSort] = React.useState<DataTableSortState | null>(null);
   const sort = controlledSort !== undefined ? controlledSort : uncontrolledSort;
@@ -249,9 +261,10 @@ export function DataTable<T>({
         isLoading={isLoading}
         empty={empty}
         getRowId={getRowId}
-        getRowHref={getRowHref}
-        onRowClick={onRowClick}
+        getRowHref={onMobileRowOpen ? undefined : getRowHref}
+        onRowClick={onMobileRowOpen ?? onRowClick}
         rowActions={rowActions}
+        mobileRender={mobileRender}
         className={cn("md:hidden", className)}
       />
     </>
@@ -283,6 +296,7 @@ interface MobileCardListProps<T> {
   getRowHref?: (row: T) => string | undefined;
   onRowClick?: (row: T) => void;
   rowActions?: (row: T) => React.ReactNode;
+  mobileRender?: (row: T) => React.ReactNode;
   className?: string;
 }
 
@@ -295,6 +309,7 @@ function MobileCardList<T>({
   getRowHref,
   onRowClick,
   rowActions,
+  mobileRender,
   className,
 }: MobileCardListProps<T>) {
   const primary = columns.find((c) => c.primary);
@@ -333,49 +348,54 @@ function MobileCardList<T>({
     <ul className={cn("space-y-3", className)}>
       {data.map((row) => {
         const href = getRowHref?.(row);
-        const titleNode = primary ? primary.cell(row) : null;
-        const subtitleNode = secondary ? secondary.cell(row) : null;
         const actions = rowActions?.(row);
+        const customBody = mobileRender?.(row);
 
-        const cardBody = (
-          <div className="space-y-3 p-4">
-            <div className={cn("min-w-0 space-y-1", actions && "pr-12")}>
-              {titleNode ? (
-                <div className="text-body font-semibold text-foreground break-words">
-                  {titleNode}
-                </div>
-              ) : null}
-              {subtitleNode ? (
-                <div className="text-caption text-muted-foreground break-words">
-                  {subtitleNode}
-                </div>
+        const cardBody = customBody ? (
+          <div className="p-4">{customBody}</div>
+        ) : (() => {
+          const titleNode = primary ? primary.cell(row) : null;
+          const subtitleNode = secondary ? secondary.cell(row) : null;
+          return (
+            <div className="space-y-3 p-4">
+              <div className={cn("min-w-0 space-y-1", actions && "pr-12")}>
+                {titleNode ? (
+                  <div className="text-body font-semibold text-foreground break-words">
+                    {titleNode}
+                  </div>
+                ) : null}
+                {subtitleNode ? (
+                  <div className="text-caption text-muted-foreground break-words">
+                    {subtitleNode}
+                  </div>
+                ) : null}
+              </div>
+              {detailColumns.length > 0 ? (
+                <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-caption sm:grid-cols-2">
+                  {detailColumns.map((col) => {
+                    const value = col.cell(row);
+                    if (value === null || value === undefined || value === false) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={col.id}
+                        className="flex flex-col gap-0.5 min-w-0"
+                      >
+                        <dt className="text-xs uppercase tracking-wide text-muted-foreground">
+                          {col.header}
+                        </dt>
+                        <dd className="text-body text-foreground break-words">
+                          {value}
+                        </dd>
+                      </div>
+                    );
+                  })}
+                </dl>
               ) : null}
             </div>
-            {detailColumns.length > 0 ? (
-              <dl className="grid grid-cols-1 gap-x-4 gap-y-2 text-caption sm:grid-cols-2">
-                {detailColumns.map((col) => {
-                  const value = col.cell(row);
-                  if (value === null || value === undefined || value === false) {
-                    return null;
-                  }
-                  return (
-                    <div
-                      key={col.id}
-                      className="flex flex-col gap-0.5 min-w-0"
-                    >
-                      <dt className="text-xs uppercase tracking-wide text-muted-foreground">
-                        {col.header}
-                      </dt>
-                      <dd className="text-body text-foreground break-words">
-                        {value}
-                      </dd>
-                    </div>
-                  );
-                })}
-              </dl>
-            ) : null}
-          </div>
-        );
+          );
+        })();
 
         const interactive = Boolean(href || onRowClick);
 
@@ -405,7 +425,7 @@ function MobileCardList<T>({
             ) : (
               cardBody
             )}
-            {actions ? (
+            {actions && !customBody ? (
               <div
                 className="absolute right-4 top-4 z-10"
                 onClick={(e) => e.stopPropagation()}

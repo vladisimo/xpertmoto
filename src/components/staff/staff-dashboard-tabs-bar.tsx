@@ -9,7 +9,8 @@ import {
   Disc,
   LifeBuoy,
 } from "lucide-react";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsTrigger } from "@/components/ui/tabs";
+import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 
 export const STAFF_DASHBOARD_TABS = [
   { value: "today", label: "Today", icon: CalendarClock },
@@ -40,7 +41,7 @@ export function StaffDashboardTabsBar({
 
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange}>
-      <TabsList className="w-full justify-start overflow-x-auto">
+      <MobileScrollTabs>
         {STAFF_DASHBOARD_TABS.map((tab) => {
           const Icon = tab.icon;
           const badge = badges?.[tab.value];
@@ -56,7 +57,7 @@ export function StaffDashboardTabsBar({
             </TabsTrigger>
           );
         })}
-      </TabsList>
+      </MobileScrollTabs>
     </Tabs>
   );
 }

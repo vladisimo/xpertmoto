@@ -34,7 +34,7 @@ export function FinanceTabsBar() {
   return (
     <nav
       aria-label="Finance sections"
-      className="-mx-4 inline-flex h-10 w-full items-center justify-start gap-1 overflow-x-auto border-b bg-transparent px-4 sm:mx-0 sm:px-0"
+      className="-mx-3 inline-flex h-10 w-full items-center justify-start gap-1 overflow-x-auto border-b bg-transparent px-3 sm:mx-0 sm:px-0"
     >
       {TABS.map((t) => {
         const active =

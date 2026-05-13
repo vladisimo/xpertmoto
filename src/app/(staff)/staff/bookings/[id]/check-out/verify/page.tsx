@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { LoadingBlock } from "@/components/ui/spinner";
 import { formatDate } from "@/lib/utils";
 import { formatLicenceClasses } from "@/lib/licence-class";
@@ -98,7 +99,7 @@ export default function CheckOutVerifyPage(props: { params: Promise<{ id: string
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Operations"
+        eyebrow="Operations · Step 2 of 4"
         breadcrumbs={[
           { label: "Bookings", href: "/staff/calendar" },
           { label: b.bookingReference, href: `/staff/bookings/${id}` },
@@ -107,6 +108,8 @@ export default function CheckOutVerifyPage(props: { params: Promise<{ id: string
         ]}
         title="Identity & licence verification"
         description="Confirm the customer is who they say they are and hold a valid licence or passport."
+        back={`/staff/bookings/${id}/check-out`}
+        mobileCompact
       />
 
       <Card>
@@ -225,7 +228,7 @@ export default function CheckOutVerifyPage(props: { params: Promise<{ id: string
         </div>
       )}
 
-      <div className="flex gap-3">
+      <div className="hidden gap-3 md:flex">
         <Button onClick={proceed} disabled={setVerification.isPending}>
           {setVerification.isPending ? "Saving…" : "Save & proceed to signing →"}
         </Button>
@@ -233,6 +236,16 @@ export default function CheckOutVerifyPage(props: { params: Promise<{ id: string
           <Link href={`/staff/bookings/${id}/check-out`}>Back to overview</Link>
         </Button>
       </div>
+
+      <MobileBottomBar>
+        <Button
+          onClick={proceed}
+          disabled={setVerification.isPending}
+          className="flex-1"
+        >
+          {setVerification.isPending ? "Saving…" : "Save & continue"}
+        </Button>
+      </MobileBottomBar>
     </PageShell>
   );
 }

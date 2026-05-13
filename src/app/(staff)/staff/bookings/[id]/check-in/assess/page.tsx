@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { LoadingBlock } from "@/components/ui/spinner";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { formatCurrency } from "@/lib/utils";
@@ -113,7 +114,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Operations"
+        eyebrow="Operations · Step 2 of 3"
         breadcrumbs={[
           { label: "Bookings", href: "/staff/calendar" },
           { label: b.bookingReference, href: `/staff/bookings/${id}` },
@@ -122,6 +123,8 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
         ]}
         title="Damage assessment"
         description="Add one line per damage item. Standard tariff bills on the spot; quote-pending opens a work order."
+        back={`/staff/bookings/${id}/check-in`}
+        mobileCompact
       />
 
       <Card>
@@ -310,7 +313,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
         </CardContent>
       </Card>
 
-      <div className="flex gap-3">
+      <div className="hidden gap-3 md:flex">
         <Button asChild>
           <Link href={`/staff/bookings/${id}/check-in/sign`}>Proceed to sign →</Link>
         </Button>
@@ -318,6 +321,12 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
           Back to overview
         </Button>
       </div>
+
+      <MobileBottomBar>
+        <Button asChild className="flex-1">
+          <Link href={`/staff/bookings/${id}/check-in/sign`}>Proceed to sign</Link>
+        </Button>
+      </MobileBottomBar>
     </PageShell>
   );
 }

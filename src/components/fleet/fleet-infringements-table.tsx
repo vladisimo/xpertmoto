@@ -23,17 +23,20 @@ export function FleetInfringementsTable({ data }: { data: FleetInfringementRow[]
       id: "reference",
       header: "Reference",
       sortable: true,
+      primary: true,
       accessor: (i) => i.referenceNumber,
       cell: (i) => <span className="font-medium">{i.referenceNumber}</span>,
     },
     {
       id: "type",
       header: "Type",
+      secondary: true,
       cell: (i) => <span className="text-muted-foreground">{i.type.replace(/_/g, " ")}</span>,
     },
     {
       id: "issuer",
       header: "Issuer",
+      mobileHidden: true,
       cell: (i) => <span className="text-muted-foreground">{i.issuer}</span>,
     },
     {
@@ -86,6 +89,7 @@ export function FleetInfringementsTable({ data }: { data: FleetInfringementRow[]
       data={data}
       getRowId={(i) => i.id}
       empty="No infringements recorded."
+      mobileMode="cards"
     />
   );
 }

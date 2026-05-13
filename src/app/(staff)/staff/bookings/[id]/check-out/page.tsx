@@ -80,6 +80,7 @@ export default function CheckOutLandingPage(props: { params: Promise<{ id: strin
         ]}
         title={`Check out — ${b.bookingReference}`}
         description={`${b.customer.firstName} ${b.customer.lastName} · pickup ${formatDateTime(b.pickupDateTime)}`}
+        back={`/staff/bookings/${id}`}
       />
 
       {steps.map((s) => (

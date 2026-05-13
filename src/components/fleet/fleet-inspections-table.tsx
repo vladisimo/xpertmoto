@@ -21,17 +21,20 @@ export function FleetInspectionsTable({ data }: { data: FleetInspectionRow[] }) 
       id: "vehicle",
       header: "Vehicle",
       sortable: true,
+      primary: true,
       accessor: (i) => i.vehicleCode,
       cell: (i) => <span className="font-medium">{i.vehicleCode}</span>,
     },
     {
       id: "type",
       header: "Type",
+      secondary: true,
       cell: (i) => <span className="text-muted-foreground">{i.type.replace(/_/g, " ")}</span>,
     },
     {
       id: "inspector",
       header: "Inspector",
+      mobileHidden: true,
       cell: (i) => <span className="text-muted-foreground">{i.inspectorName}</span>,
     },
     {
@@ -68,6 +71,7 @@ export function FleetInspectionsTable({ data }: { data: FleetInspectionRow[] }) 
       data={data}
       getRowId={(i) => i.id}
       empty="No inspections yet."
+      mobileMode="cards"
     />
   );
 }

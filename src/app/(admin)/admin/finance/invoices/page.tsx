@@ -75,48 +75,44 @@ export default function FinanceInvoicesPage() {
   }
 
   const columns: DataTableColumn<Row>[] = [
-    { id: "invoiceNumber", header: "Number", cell: (r) => <span className="font-mono text-xs">{r.invoiceNumber}</span> },
-    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—" },
+    { id: "invoiceNumber", header: "Number", cell: (r) => <span className="font-mono text-xs">{r.invoiceNumber}</span>, primary: true },
+    { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—", secondary: true },
     { id: "booking", header: "Booking", cell: (r) => r.bookingReference ?? "—" },
-    { id: "subtotal", header: "Subtotal", cell: (r) => <span className="tabular-nums">{formatCurrency(r.subtotal)}</span>, align: "right" },
-    { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gstAmount)}</span>, align: "right" },
+    { id: "subtotal", header: "Subtotal", cell: (r) => <span className="tabular-nums">{formatCurrency(r.subtotal)}</span>, align: "right", mobileHidden: true },
+    { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gstAmount)}</span>, align: "right", mobileHidden: true },
     { id: "total", header: "Total", cell: (r) => <span className="tabular-nums font-semibold">{formatCurrency(r.totalAmount)}</span>, align: "right" },
     { id: "status", header: "Status", cell: (r) => <StatusBadge status={r.status as StatusKey} /> },
     { id: "due", header: "Due", cell: (r) => (r.dueDate ? formatDate(r.dueDate) : "—") },
-    { id: "paid", header: "Paid", cell: (r) => (r.paidAt ? formatDateTime(r.paidAt) : "—") },
-    { id: "credit", header: "Credited", cell: (r) => r.creditNoteTotal > 0 ? <span className="text-destructive">-{formatCurrency(r.creditNoteTotal)}</span> : "—", align: "right" },
-    {
-      id: "actions",
-      header: "",
-      align: "right",
-      cell: (r) => (
-        <div className="flex justify-end gap-1">
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={r.status === "VOID" || r.status === "CREDITED" || issueCredit.isPending}
-            onClick={(e) => {
-              e.stopPropagation();
-              handleCredit(r);
-            }}
-          >
-            Credit
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={r.status === "VOID" || voidInvoice.isPending}
-            onClick={(e) => {
-              e.stopPropagation();
-              handleVoid(r);
-            }}
-          >
-            Void
-          </Button>
-        </div>
-      ),
-    },
+    { id: "paid", header: "Paid", cell: (r) => (r.paidAt ? formatDateTime(r.paidAt) : "—"), mobileHidden: true },
+    { id: "credit", header: "Credited", cell: (r) => r.creditNoteTotal > 0 ? <span className="text-destructive">-{formatCurrency(r.creditNoteTotal)}</span> : "—", align: "right", mobileHidden: true },
   ];
+
+  const renderRowActions = (r: Row) => (
+    <div className="flex items-center gap-1">
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={r.status === "VOID" || r.status === "CREDITED" || issueCredit.isPending}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleCredit(r);
+        }}
+      >
+        Credit
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={r.status === "VOID" || voidInvoice.isPending}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleVoid(r);
+        }}
+      >
+        Void
+      </Button>
+    </div>
+  );
 
   return (
     <PageShell>
@@ -149,7 +145,7 @@ export default function FinanceInvoicesPage() {
       </div>
 
       {data && (
-        <div className="flex flex-wrap gap-4 rounded-lg border bg-card p-4 shadow-sm">
+        <div className="grid grid-cols-2 gap-4 rounded-lg border bg-card p-4 shadow-sm sm:flex sm:flex-wrap">
           <T label="Count" value={data.totals.count.toLocaleString("en-AU")} />
           <T label="Subtotal" value={formatCurrency(data.totals.subtotal)} />
           <T label="GST" value={formatCurrency(data.totals.gst)} />
@@ -163,6 +159,8 @@ export default function FinanceInvoicesPage() {
         isLoading={isLoading}
         getRowId={(r) => r.id}
         empty="No invoices in this window."
+        mobileMode="cards"
+        rowActions={renderRowActions}
       />
     </PageShell>
   );

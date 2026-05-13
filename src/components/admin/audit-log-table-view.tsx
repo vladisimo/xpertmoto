@@ -206,6 +206,7 @@ export function AuditLogTableView({
     {
       id: "timestamp",
       header: "Timestamp",
+      secondary: true,
       cell: (r) => <span className="whitespace-nowrap text-xs">{formatDateTime(r.timestamp)}</span>,
       width: "12rem",
     },
@@ -218,6 +219,7 @@ export function AuditLogTableView({
     {
       id: "action",
       header: "Action",
+      primary: true,
       cell: (r) => (
         <div className="min-w-0">
           <div className="truncate font-mono text-xs">{r.action}</div>
@@ -245,6 +247,7 @@ export function AuditLogTableView({
     {
       id: "entity",
       header: "Entity",
+      mobileHidden: true,
       cell: (r) => (
         <div className="min-w-0">
           <div className="truncate text-sm">{r.entity}</div>
@@ -265,6 +268,7 @@ export function AuditLogTableView({
     {
       id: "ip",
       header: "IP",
+      mobileHidden: true,
       cell: (r) => (
         <span className="font-mono text-xs text-muted-foreground">{r.ipAddress ?? "—"}</span>
       ),
@@ -273,6 +277,7 @@ export function AuditLogTableView({
     {
       id: "duration",
       header: "ms",
+      mobileHidden: true,
       cell: (r) => (
         <span className="font-mono text-xs text-muted-foreground">
           {r.durationMs == null ? "—" : r.durationMs}
@@ -353,9 +358,11 @@ export function AuditLogTableView({
             data={rows}
             getRowId={(r) => r.id}
             onRowClick={(r) => setSelected(r)}
+            onMobileRowOpen={(r) => setSelected(r)}
             empty="No audit entries match your filters."
             className="rounded-none border-0 shadow-none"
             stickyHeader
+            mobileMode="cards"
           />
         </div>
         <div className="flex shrink-0 items-center justify-between gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
