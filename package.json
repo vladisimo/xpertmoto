@@ -1,5 +1,5 @@
 {
-  "name": "scootering",
+  "name": "xpertmoto",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -40,6 +40,9 @@
     "load:booking-surge": "k6 run scripts/load/booking-surge.js",
     "load:toll-ingest": "k6 run scripts/load/toll-ingest.js",
     "import:fleet": "tsx scripts/import-fleet-from-csv.ts",
+    "scrape:xpertmoto": "tsx scripts/scrape-xpertmoto.ts",
+    "import:xpertmoto-rates": "tsx scripts/import-xpertmoto-rates.ts",
+    "merge:xpertmoto-models": "tsx scripts/merge-xpertmoto-models.ts",
     "import:drivers": "tsx scripts/import-drivers-from-csv.ts"
   },
   "prisma": {
@@ -148,6 +151,7 @@
     "eslint": "^9.0.0",
     "eslint-config-next": "^16.2.4",
     "eslint-plugin-react-hooks": "^7.0.0",
+    "exceljs": "^4.4.0",
     "jsdom": "^29.0.2",
     "msw": "^2.13.4",
     "papaparse": "^5.4.1",

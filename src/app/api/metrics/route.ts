@@ -13,11 +13,11 @@ import { logger } from "@/lib/logger";
  * Scrape pattern (Prometheus config):
  *
  *   scrape_configs:
- *     - job_name: 'scootering'
+ *     - job_name: 'xpertmoto'
  *       metrics_path: '/api/metrics'
- *       bearer_token_file: /etc/prometheus/scootering-token
+ *       bearer_token_file: /etc/prometheus/xpertmoto-token
  *       static_configs:
- *         - targets: ['scootering.com.au']
+ *         - targets: ['xpertmoto.com.au']
  *
  * Returns 503 when no token is configured so we fail closed, not open.
  *

@@ -5,7 +5,7 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
-const DISMISS_KEY = "scootering.setPasswordBanner.dismissedAt";
+const DISMISS_KEY = "xpertmoto.setPasswordBanner.dismissedAt";
 /** Re-show the banner after this many days even if dismissed. */
 const DISMISS_TTL_DAYS = 30;
 

@@ -7,7 +7,7 @@
  *
  * Requires env:
  *   SENTRY_AUTH_TOKEN    — an auth token with `org:read` scope
- *   SENTRY_ORG_SLUG      — e.g. "scootering"
+ *   SENTRY_ORG_SLUG      — e.g. "xpertmoto"
  *   SENTRY_API_BASE_URL  — optional; defaults to https://sentry.io
  *
  * Schedule the queue `platform-sentry-stats` daily (03:45 Brisbane is a

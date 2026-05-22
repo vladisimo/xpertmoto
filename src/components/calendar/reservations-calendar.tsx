@@ -103,7 +103,7 @@ export function ReservationsCalendar() {
         <CalendarStats data={stats} loading={statsLoading} />
       </div>
 
-      <div className="fc-scootering fc-scootering--with-depot-filter rounded-lg overflow-hidden flex-1 min-h-0 relative">
+      <div className="fc-calendar fc-calendar--with-depot-filter rounded-lg overflow-hidden flex-1 min-h-0 relative">
         <div className="fc-depot-filter absolute top-[4px] right-0 z-10 flex items-center gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger className="inline-flex h-[34px] items-center justify-between gap-2 rounded-md border bg-background px-3 text-sm min-w-[180px]">

@@ -14,26 +14,41 @@ import {
 } from "@/components/ui/select";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
 import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
 import { TieredPricingPanel } from "@/components/admin/pricing/tiered-pricing-panel";
+import { TierEditor } from "@/components/admin/pricing/tier-editor";
 
-type Tab = "rates" | "addons" | "insurance" | "discounts" | "seasons";
+type Tab = "rates" | "models" | "addons" | "insurance" | "discounts" | "seasons";
 type RatesView = "base" | "tiered";
 
 type PricingSummary = inferRouterOutputs<AppRouter>["admin"]["pricingSummary"];
+type ModelRatesSummary = inferRouterOutputs<AppRouter>["admin"]["modelRates"];
 type CategoryRow = PricingSummary["categories"][number];
 type AddonRow = PricingSummary["addons"][number];
 type InsuranceRow = PricingSummary["insurance"][number];
 type DiscountRow = PricingSummary["discounts"][number];
 type SeasonRow = PricingSummary["seasons"][number];
+type ModelRow = ModelRatesSummary["models"][number];
 
 export default function PricingPage() {
   const util = trpc.useUtils();
   const { data } = trpc.admin.pricingSummary.useQuery();
+  const { data: modelData } = trpc.admin.modelRates.useQuery();
   const invalidate = () => util.admin.pricingSummary.invalidate();
+  const invalidateModels = () => util.admin.modelRates.invalidate();
   const updateRates = trpc.admin.updateCategoryRates.useMutation({ onSuccess: invalidate });
+  const updateModelRates = trpc.admin.updateModelRates.useMutation({
+    onSuccess: invalidateModels,
+  });
   const upsertAddon = trpc.admin.upsertAddon.useMutation({ onSuccess: invalidate });
   const upsertInsurance = trpc.admin.upsertInsurance.useMutation({ onSuccess: invalidate });
   const upsertDiscount = trpc.admin.upsertDiscount.useMutation({ onSuccess: invalidate });
@@ -45,6 +60,121 @@ export default function PricingPage() {
   const [newSeason, setNewSeason] = useState({ name: "", startDate: "", endDate: "", multiplier: 1.2, isActive: true });
 
   const tierCountByCategory = data?.tierCountByCategory ?? {};
+  const tierCountByModel = modelData?.tierCountByModel ?? {};
+  const tiersByModel = modelData?.tiersByModel ?? {};
+
+  // Models tab UX state — filters + which model is being edited.
+  const [modelSearch, setModelSearch] = useState("");
+  const [modelCategory, setModelCategory] = useState<string>("__all");
+  const [modelFleetFilter, setModelFleetFilter] = useState<
+    "all" | "with-fleet" | "without-fleet"
+  >("all");
+  const [editingModel, setEditingModel] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
+
+  const filteredModels = (modelData?.models ?? []).filter((m) => {
+    if (modelCategory !== "__all" && m.category?.id !== modelCategory) return false;
+    if (modelFleetFilter === "with-fleet" && m._count.vehicles === 0) return false;
+    if (modelFleetFilter === "without-fleet" && m._count.vehicles > 0) return false;
+    if (modelSearch.trim().length > 0) {
+      const q = modelSearch.trim().toLowerCase();
+      if (
+        !m.make.toLowerCase().includes(q) &&
+        !m.model.toLowerCase().includes(q) &&
+        !`${m.make} ${m.model}`.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  const modelColumns: DataTableColumn<ModelRow>[] = [
+    {
+      id: "name",
+      header: "Make · Model",
+      primary: true,
+      cell: (m) => {
+        const tiers = tiersByModel[m.id] ?? [];
+        const tierCount = tierCountByModel[m.id] ?? 0;
+        return (
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">
+                {m.make} {m.model}
+              </span>
+              {m.year ? (
+                <span className="text-xs text-muted-foreground">{m.year}</span>
+              ) : null}
+              {tierCount > 0 && (
+                <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                  {tierCount} tier{tierCount === 1 ? "" : "s"}
+                </span>
+              )}
+              {m._count.vehicles === 0 && (
+                <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                  No fleet
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {m.category?.name ?? "Uncategorised"}
+            </div>
+            {tiers.length > 0 && (
+              <div className="text-xs text-muted-foreground">
+                {renderTierPreview(tiers)}
+              </div>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      id: "baseRate",
+      header: "Base rate",
+      align: "right",
+      width: "10rem",
+      cell: (m) => (
+        <NumberCell
+          value={m.baseRate ? Number(m.baseRate) : 0}
+          onSave={(v) =>
+            updateModelRates.mutate({ id: m.id, baseRate: v > 0 ? v : null })
+          }
+        />
+      ),
+    },
+    {
+      id: "basePeriodHours",
+      header: "Period",
+      width: "8rem",
+      cell: (m) => (
+        <Select
+          value={m.basePeriodHours ?? "H24"}
+          onValueChange={(v) =>
+            updateModelRates.mutate({ id: m.id, basePeriodHours: v as "H24" | "H48" })
+          }
+        >
+          <SelectTrigger className="h-9 w-[6.5rem]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="H24">24 h</SelectItem>
+            <SelectItem value="H48">48 h</SelectItem>
+          </SelectContent>
+        </Select>
+      ),
+    },
+    {
+      id: "fleetCount",
+      header: "Fleet",
+      align: "right",
+      cell: (m) => (
+        <span className="text-muted-foreground">{m._count.vehicles}</span>
+      ),
+    },
+  ];
 
   const rateColumns: DataTableColumn<CategoryRow>[] = [
     {
@@ -327,7 +457,7 @@ export default function PricingPage() {
       <FinanceTabsBar />
 
       <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0">
-        {(["rates", "addons", "insurance", "discounts", "seasons"] as Tab[]).map((t) => (
+        {(["rates", "models", "addons", "insurance", "discounts", "seasons"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -380,6 +510,106 @@ export default function PricingPage() {
           )}
 
           {ratesView === "tiered" && <TieredPricingPanel />}
+        </div>
+      )}
+
+      {tab === "models" && (
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Per-model (make + model) base rate and base period. When set, these
+            override the category default for every vehicle of that model. Leave
+            base rate empty to fall back to the category daily rate. Set period
+            to 48 h for premium bikes that rent in 2-day minimums.
+          </p>
+
+          <div className="grid gap-3 md:grid-cols-[1fr_12rem_12rem]">
+            <Input
+              placeholder="Search make or model…"
+              value={modelSearch}
+              onChange={(e) => setModelSearch(e.target.value)}
+              aria-label="Search models"
+            />
+            <Select value={modelCategory} onValueChange={setModelCategory}>
+              <SelectTrigger>
+                <SelectValue placeholder="All categories" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all">All categories</SelectItem>
+                {(data?.categories ?? []).map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={modelFleetFilter}
+              onValueChange={(v) =>
+                setModelFleetFilter(v as typeof modelFleetFilter)
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All models</SelectItem>
+                <SelectItem value="with-fleet">With fleet</SelectItem>
+                <SelectItem value="without-fleet">Without fleet</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="text-xs text-muted-foreground">
+            Showing {filteredModels.length} of {modelData?.models.length ?? 0} models
+          </div>
+
+          <DataTable
+            columns={modelColumns}
+            data={filteredModels}
+            getRowId={(m) => m.id}
+            rowActions={(m) => (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  setEditingModel({
+                    id: m.id,
+                    label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
+                  })
+                }
+              >
+                {(tierCountByModel[m.id] ?? 0) > 0 ? "Edit tiers" : "Add tiers"}
+              </Button>
+            )}
+            empty="No models match the current filters."
+            mobileMode="cards"
+          />
+
+          <Dialog
+            open={editingModel !== null}
+            onOpenChange={(open) => {
+              if (!open) setEditingModel(null);
+            }}
+          >
+            <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+              <DialogHeader>
+                <DialogTitle>Tier ladder · {editingModel?.label}</DialogTitle>
+                <DialogDescription>
+                  Edit the per-model PricingTier ladder. Saved changes apply to
+                  every vehicle of this model unless that vehicle has its own
+                  override ladder.
+                </DialogDescription>
+              </DialogHeader>
+              {editingModel ? (
+                <TierEditor
+                  key={editingModel.id}
+                  scope="MODEL"
+                  scopeId={editingModel.id}
+                  scopeLabel={editingModel.label}
+                />
+              ) : null}
+            </DialogContent>
+          </Dialog>
         </div>
       )}
 
@@ -574,6 +804,26 @@ export default function PricingPage() {
 
     </PageShell>
   );
+}
+
+type TierRow = NonNullable<
+  ModelRatesSummary["tiersByModel"][string]
+>[number];
+
+function renderTierPreview(tiers: TierRow[]): string {
+  // Compact one-line summary of the ladder so operators can read the rate
+  // card without opening the editor. Falls back to a tier-count when the
+  // mix is weird (mode-switched mid-ladder, both fields blank).
+  const sorted = [...tiers].sort((a, b) => a.minDays - b.minDays);
+  if (sorted.every((t) => t.tierMode === "PER_WEEK" && t.pricePerWeek != null)) {
+    return sorted
+      .map((t) => `$${Number(t.pricePerWeek!).toFixed(0)}/wk`)
+      .join(" → ");
+  }
+  if (sorted.every((t) => t.tierMode === "PROGRESSIVE")) {
+    return sorted.map((t) => `$${Number(t.tierTotal).toFixed(0)}`).join(" + ");
+  }
+  return `${tiers.length} mixed tier(s)`;
 }
 
 function NumberCell({ value, onSave }: { value: number; onSave: (v: number) => void }) {

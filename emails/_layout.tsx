@@ -40,7 +40,7 @@ export async function EmailLayout({
   heading: string;
   children: ReactNode;
 }) {
-  const { siteName, legalName, abn, logoWideUrl } = await getBranding();
+  const { siteName, legalName, abn, logoWideUrl, supportEmail } = await getBranding();
   const logoSrc = absoluteUrl(logoWideUrl);
   return (
     <Html lang="en-AU">
@@ -69,7 +69,7 @@ export async function EmailLayout({
           <Hr style={{ borderColor: EMAIL_COLORS.border, margin: "32px 0 16px" }} />
           <Text style={{ fontSize: 11, color: EMAIL_COLORS.textSubtle, lineHeight: 1.5 }}>
             {legalName}
-            {abn ? ` · ABN ${abn}` : ""} · hello@scootering.com.au
+            {abn ? ` · ABN ${abn}` : ""} · {supportEmail ?? "hello@xpertmoto.com.au"}
             <br />
             You are receiving this email because you have a booking or account with {siteName}.
           </Text>

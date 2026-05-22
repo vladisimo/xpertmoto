@@ -22,6 +22,7 @@ import {
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { formatDateTime } from "@/lib/utils";
 import { AuditRowDetail } from "@/components/admin/audit-row-detail";
+import { useBranding } from "@/components/shared/branding-provider";
 
 const CATEGORIES = ["AUTH", "PAGE_VIEW", "MUTATION", "QUERY", "JOB", "API", "WEBHOOK"] as const;
 const STATUSES = ["SUCCESS", "FAILURE", "DENIED"] as const;
@@ -129,6 +130,12 @@ export function AuditLogTableView({
   showExport = true,
   queryHook = defaultQueryHook,
 }: AuditLogTableViewProps) {
+  const { siteName } = useBranding();
+  const auditSlug =
+    siteName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "audit";
   const s = {
     category: showFilters.category ?? true,
     status: showFilters.status ?? true,
@@ -191,7 +198,7 @@ export function AuditLogTableView({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `scootering-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `${auditSlug}-audit-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }

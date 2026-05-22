@@ -1,4 +1,4 @@
-# Scootering — Claude Code hooks
+# XPERT Moto — Claude Code hooks
 
 Project-scoped hooks that run on every Claude Code session in this repo. They enforce the change-management rules in [CLAUDE.md](../../CLAUDE.md) § "Change Management for Claude Code Sessions" and give fast feedback so scope creep and regressions are caught before they compound.
 

@@ -92,7 +92,7 @@ export const defaultGithubEmailsFetcher: GithubEmailsFetcher = async (
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "scootering-auth",
+      "User-Agent": "xpertmoto-auth",
     },
   });
   if (!res.ok) return [];

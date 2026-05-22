@@ -243,7 +243,7 @@ export async function createCheckoutSession(
 // propagate so callers can mark the Payment row FAILED and surface a
 // message to staff.
 export type RefundChargeArgs = {
-  // Prefer paymentIntentId (the Scootering Payment row stores both; we
+  // Prefer paymentIntentId (the XPERT Moto Payment row stores both; we
   // fall back to chargeId when only that is known).
   paymentIntentId?: string | null;
   chargeId?: string | null;

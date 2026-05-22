@@ -63,7 +63,7 @@ function createLogger(): Logger {
     level: process.env.LOG_LEVEL ?? (isDev ? "debug" : "info"),
     enabled: !isTest,
     base: {
-      app: "scootering",
+      app: "xpertmoto",
       env: process.env.NODE_ENV ?? "development",
     },
     redact: { paths: redactPaths, remove: false, censor: "[REDACTED]" },

@@ -6,9 +6,14 @@ import { formatDate } from "@/lib/utils";
 const MS_IN_DAY = 86_400_000;
 
 export async function StaffFleetTab({ depotId }: { depotId?: string }) {
-  const in7 = new Date(Date.now() + 7 * MS_IN_DAY);
-  const in14 = new Date(Date.now() + 14 * MS_IN_DAY);
-  const in30 = new Date(Date.now() + 30 * MS_IN_DAY);
+  // Server component — Date.now()'s impurity is fine here (each request
+  // is its own render). The react-hooks/purity rule assumes a client
+  // render; one disabled call keeps all three windows on the same clock.
+  // eslint-disable-next-line react-hooks/purity
+  const now = Date.now();
+  const in7 = new Date(now + 7 * MS_IN_DAY);
+  const in14 = new Date(now + 14 * MS_IN_DAY);
+  const in30 = new Date(now + 30 * MS_IN_DAY);
 
   const [regoSoon, ctpSoon, insuranceSoon, serviceSoon, vehicles] = await Promise.all([
     prisma.vehicle.count({

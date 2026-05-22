@@ -8,8 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { formatDateTime } from "@/lib/utils";
+import { useBranding } from "@/components/shared/branding-provider";
 
 export function IntegrationTabEtoll({ canManage = false }: { canManage?: boolean }) {
+  const { siteName } = useBranding();
   const util = trpc.useUtils();
   const { data: accounts } = trpc.etoll.listAccounts.useQuery();
   const create = trpc.etoll.createAccount.useMutation({
@@ -63,7 +65,7 @@ export function IntegrationTabEtoll({ canManage = false }: { canManage?: boolean
           </CardHeader>
           <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-2">
             <Input
-              placeholder="Account label (e.g. Scootering Fleet — NSW)"
+              placeholder={`Account label (e.g. ${siteName} Fleet — NSW)`}
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
             />

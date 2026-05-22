@@ -62,7 +62,7 @@ export const IMPORT_COLUMNS: readonly ImportColumn[] = [
   { key: "year",                  header: "year",                  kind: "integer", required: true,  hint: "4-digit year, 1980 – current + 1",     example: "2024",               width: 7 },
   { key: "colour",                header: "colour",                kind: "text",    required: true,  hint: "Primary colour",                       example: "White",              width: 10 },
   { key: "categoryName",          header: "categoryName",          kind: "text",    required: true,  hint: "Must match an active category on the Lookups sheet", example: "150cc Scooter", width: 18 },
-  { key: "depotName",             header: "depotName",             kind: "text",    required: true,  hint: "Must match an active depot on the Lookups sheet",    example: "Scootering Gold Coast", width: 22 },
+  { key: "depotName",             header: "depotName",             kind: "text",    required: true,  hint: "Must match an active depot on the Lookups sheet",    example: "XPERT Moto Gold Coast", width: 22 },
   { key: "vin",                   header: "vin",                   kind: "text",    required: false, hint: "Chassis number (unique)",              example: "JHMFK1F5XXK000123",  width: 20 },
   { key: "engineNumber",          header: "engineNumber",          kind: "text",    required: false, hint: "",                                     example: "ENG-X-8812",         width: 16 },
   { key: "regoExpiry",            header: "regoExpiry",            kind: "date",    required: false, hint: "YYYY-MM-DD",                           example: "2026-12-01",         width: 12 },

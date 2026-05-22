@@ -6,8 +6,8 @@ const CATEGORIES = [
   { id: "cat-150", name: "150cc Scooter" },
 ];
 const DEPOTS = [
-  { id: "depot-gc", name: "Scootering Gold Coast" },
-  { id: "depot-noosa", name: "Scootering Noosa" },
+  { id: "depot-gc", name: "XPERT Moto Gold Coast" },
+  { id: "depot-noosa", name: "XPERT Moto Noosa" },
 ];
 
 function makeCtx(
@@ -35,7 +35,7 @@ const VALID_ROW = {
   year: 2024,
   colour: "White",
   categoryName: "150cc Scooter",
-  depotName: "Scootering Gold Coast",
+  depotName: "XPERT Moto Gold Coast",
 };
 
 describe("validateVehicleRows", () => {

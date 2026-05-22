@@ -131,7 +131,7 @@ export const devToolsRouter = createTRPCRouter({
         account = await ctx.prisma.etollAccount.create({
           data: {
             name: TEST_TOLL_ACCOUNT_NAME,
-            username: "test@scootering.local",
+            username: "test@xpertmoto.local",
             passwordEnc: "test",
             passwordIv: "test",
             passwordTag: "test",

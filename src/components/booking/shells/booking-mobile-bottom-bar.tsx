@@ -33,6 +33,7 @@ export function BookingMobileBottomBar({
   const { data: quote } = trpc.booking.quote.useQuery(
     {
       categoryId: w.categoryId ?? "",
+      vehicleId: w.preferredVehicleId ?? undefined,
       pickupDepotId: w.pickupDepotId ?? "",
       returnDepotId: w.returnDepotId ?? "",
       pickupDateTime: new Date(w.pickupDateTime ?? new Date()),

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { auth } from "@/lib/auth";
+import { getBranding } from "@/lib/branding";
 import { prisma } from "@/lib/prisma";
 import { withAudit } from "@/lib/with-audit";
 import { CUSTOMER_IMPORT_COLUMNS } from "@/lib/validators/customer-import";
@@ -59,11 +60,18 @@ async function handleGet(req: Request) {
     );
   }
 
+  const { siteName } = await getBranding();
+  const slug =
+    siteName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "export";
+
   const rows: Array<Record<string, string | boolean>> = [];
-  let filename = "scootering-customer-template.xlsx";
+  let filename = `${slug}-customer-template.xlsx`;
 
   if (mode === "all") {
-    filename = `scootering-customers-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    filename = `${slug}-customers-${new Date().toISOString().slice(0, 10)}.xlsx`;
     const customers = await prisma.user.findMany({
       where: { role: "CUSTOMER", deletedAt: null },
       include: { customerProfile: true },

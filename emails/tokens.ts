@@ -1,5 +1,5 @@
 /**
- * Single source of truth for colours used across every Scootering email
+ * Single source of truth for colours used across every XPERT Moto email
  * template. Email clients don't understand CSS custom properties reliably,
  * so we inline hex values — but we inline them once, here. Template files
  * must not hardcode hex values; import from this module instead.

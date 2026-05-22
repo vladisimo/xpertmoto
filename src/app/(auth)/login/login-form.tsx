@@ -89,22 +89,14 @@ export function LoginForm({
     defaultValues: { email: "", password: "" },
   });
 
-  async function redirectByRole() {
-    const session = await fetch("/api/auth/session").then((r) => r.json());
-    const role = session?.user?.role;
-    // Back-office roles always land on their section dashboard. callbackUrl
-    // is ignored because the section root (`/admin`, `/staff`) 404s and
-    // deep-links in those areas are rare in practice.
-    if (role === "ADMIN" || role === "SUPER_ADMIN") {
-      window.location.href = "/admin/dashboard";
-      return;
-    }
-    if (role === "STAFF" || role === "MANAGER") {
-      window.location.href = "/staff/dashboard";
-      return;
-    }
-    const callback = new URLSearchParams(window.location.search).get("callbackUrl");
-    window.location.href = callback ?? "/dashboard";
+  function redirectPostLogin() {
+    // `/portal-select` is the universal post-login landing — it inspects
+    // role + hasCustomerProfile server-side and either renders the
+    // multi-portal selector or redirects straight to the single dashboard
+    // the user can access. callbackUrl deep-links are intentionally
+    // dropped here for dual-access users; pure-role users still get
+    // forwarded immediately so they never see the selector.
+    window.location.href = "/portal-select";
   }
 
   async function onSubmit(values: LoginInput) {
@@ -123,7 +115,7 @@ export function LoginForm({
           setError("Invalid 2FA code");
           return;
         }
-        await redirectByRole();
+        redirectPostLogin();
         return;
       }
 
@@ -143,7 +135,9 @@ export function LoginForm({
         setError("Invalid credentials");
         return;
       }
-      await redirectByRole();
+      redirectPostLogin();
+    } catch {
+      setError("Couldn't reach the server. Check your connection and try again.");
     } finally {
       setSubmitting(false);
     }
@@ -159,13 +153,19 @@ export function LoginForm({
     }
     setSendingMagicLink(true);
     try {
-      const res = await signIn("nodemailer", { email, redirect: false });
+      const res = await signIn("nodemailer", {
+        email,
+        redirect: false,
+        callbackUrl: "/portal-select",
+      });
       if (res?.error) {
         setError(errorMessage("EmailSignin"));
         return;
       }
       const dest = new URLSearchParams({ email });
       window.location.href = `/magic-link-sent?${dest.toString()}`;
+    } catch {
+      setError("Couldn't reach the server. Check your connection and try again.");
     } finally {
       setSendingMagicLink(false);
     }
@@ -210,6 +210,7 @@ export function LoginForm({
             providers={allProviders}
             enabled={enabledProviders}
             disabled={submitting || sendingMagicLink}
+            callbackUrl="/portal-select"
             onUnavailable={onProviderUnavailable}
           />
           {!oauthAllowedForBackOffice && (

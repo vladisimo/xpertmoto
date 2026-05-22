@@ -37,10 +37,10 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DepotEditSheet } from "@/components/admin/depot-edit-sheet";
 import { FormGrid } from "@/components/forms/form-grid";
+import { useBranding } from "@/components/shared/branding-provider";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
 import { DesktopRecommendedNotice } from "@/components/layout/desktop-recommended-notice";
-import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { DepotPin } from "@/components/maps/admin-depot-map";
 import type { inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "@/server/trpc/router";
@@ -80,7 +80,7 @@ type DepotFormValues = z.infer<typeof depotSchema>;
 
 export default function AdminDepotsPage() {
   const util = trpc.useUtils();
-  const isMobile = useIsMobile();
+  const { siteName } = useBranding();
   const { data: depots } = trpc.admin.listDepots.useQuery();
 
   const form = useForm<DepotFormValues>({
@@ -220,15 +220,13 @@ export default function AdminDepotsPage() {
           className="md:hidden"
           description="The depot map is built for a wide screen. Tap a depot in the list below to edit it on a phone."
         />
-        {!isMobile && (
-          <div className="relative isolate h-[480px] overflow-hidden rounded-lg border bg-card shadow-sm lg:h-[720px]">
-            <AdminDepotMap
-              depots={pins}
-              selectedDepotId={selectedId}
-              onSelectDepot={(id) => setSelectedId(id)}
-            />
-          </div>
-        )}
+        <div className="relative isolate hidden h-[480px] overflow-hidden rounded-lg border bg-card shadow-sm md:block lg:h-[720px]">
+          <AdminDepotMap
+            depots={pins}
+            selectedDepotId={selectedId}
+            onSelectDepot={(id) => setSelectedId(id)}
+          />
+        </div>
       </PageSection>
 
       <PageSection
@@ -278,7 +276,7 @@ export default function AdminDepotsPage() {
                     <FormItem>
                       <FormLabel>Depot name</FormLabel>
                       <FormControl>
-                        <Input placeholder="e.g. Scootering Melbourne" {...field} />
+                        <Input placeholder={`e.g. ${siteName} Melbourne`} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

@@ -8,7 +8,7 @@ import { prisma } from "../../src/lib/prisma";
  * don't hold the partial-unique lock.
  */
 
-const STAFF = { email: "staff.gold-coast@scootering.com.au", password: "staff1234" };
+const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
 
 test.beforeEach(async () => {
   // Release any stale IN_PROGRESS activities so the seeded claimable tasks

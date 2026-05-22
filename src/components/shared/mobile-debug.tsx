@@ -24,6 +24,11 @@ export function MobileDebug() {
 
     const script = document.createElement("script");
     script.src = "https://cdn.jsdelivr.net/npm/eruda@3.4.1/eruda.js";
+    // SRI: refuse to execute a tampered CDN response. Hash pinned to the
+    // 3.4.1 release artefact above — bump together when upgrading.
+    script.integrity =
+      "sha384-daS5bEfWdSq146t9c4BureB/fQWO3lHohseXBelPqKvbOUx2D6PE3TxcQ9jrKZDM";
+    script.crossOrigin = "anonymous";
     script.async = true;
     script.onload = () => {
       if (!w.eruda) return;

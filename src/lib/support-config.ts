@@ -67,8 +67,8 @@ export function getSupportConfig(): SupportConfig {
     model: defaultModel(provider, process.env.SUPPORT_AI_MODEL),
     openRouter: {
       baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
-      httpReferer: process.env.OPENROUTER_HTTP_REFERER ?? "https://scootering.com.au",
-      appTitle: process.env.OPENROUTER_APP_TITLE ?? "Scootering Support",
+      httpReferer: process.env.OPENROUTER_HTTP_REFERER ?? "https://xpertmoto.com.au",
+      appTitle: process.env.OPENROUTER_APP_TITLE ?? "XPERT Moto Support",
     },
     costCapAudDaily: Number.parseFloat(process.env.SUPPORT_COST_CAP_AUD_DAILY ?? "25"),
   };

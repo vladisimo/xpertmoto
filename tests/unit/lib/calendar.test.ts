@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { generateIcs, googleCalendarUrl } from "@/lib/calendar";
 
 const sample = {
-  uid: "booking-abc@scootering.com.au",
+  uid: "booking-abc@xpertmoto.com.au",
   title: "Scooter hire: 125cc (SCT-20260420-0001)",
   description: "Pickup, return details.",
   location: "Byron Bay Depot",

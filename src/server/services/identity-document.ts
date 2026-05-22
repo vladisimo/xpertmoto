@@ -109,10 +109,7 @@ export async function applyLatestDocumentToProfile(
       return;
     }
     case "LICENCE_BACK": {
-      await tx.customerProfile.update({
-        where: { userId: customerId },
-        data: { licenceImageBack: doc?.fileUrl ?? null },
-      });
+      await applyLicenceBackProjection(tx, customerId, doc);
       return;
     }
     case "PASSPORT": {
@@ -183,6 +180,26 @@ async function applyLicenceFrontProjection(
   await tx.customerProfile.update({
     where: { userId: customerId },
     data,
+  });
+}
+
+async function applyLicenceBackProjection(
+  tx: IdentityTxClient,
+  customerId: string,
+  doc: ProjectableDoc | null,
+): Promise<void> {
+  // Same defensive guard as applyLicenceFrontProjection / applyPassportProjection:
+  // the profile row may not exist yet (e.g. OAuth users who never went through
+  // auth.register, or whose OCR-driven customer.updateProfile upsert hasn't
+  // run yet). Without this guard, prisma throws ERR_NOT_FOUND.
+  const profile = await tx.customerProfile.findUnique({
+    where: { userId: customerId },
+    select: { userId: true },
+  });
+  if (!profile) return;
+  await tx.customerProfile.update({
+    where: { userId: customerId },
+    data: { licenceImageBack: doc?.fileUrl ?? null },
   });
 }
 

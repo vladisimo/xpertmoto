@@ -172,8 +172,8 @@ function getProvider(): ResolvedProvider | null {
 
   const openRouter = {
     baseUrl: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
-    httpReferer: process.env.OPENROUTER_HTTP_REFERER ?? "https://scootering.com.au",
-    appTitle: process.env.OPENROUTER_APP_TITLE ?? "Scootering Document Extract",
+    httpReferer: process.env.OPENROUTER_HTTP_REFERER ?? "https://xpertmoto.com.au",
+    appTitle: process.env.OPENROUTER_APP_TITLE ?? "XPERT Moto Document Extract",
   };
 
   const modelOverride = process.env.DOCUMENT_EXTRACT_MODEL;

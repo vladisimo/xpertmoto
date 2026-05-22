@@ -40,7 +40,7 @@ const registered = new WeakSet<Redis>();
 function getRunner(client: Redis): ScriptRunner {
   if (!registered.has(client)) {
     (client as unknown as { defineCommand: (name: string, opts: unknown) => void }).defineCommand(
-      "scooteringSlidingRateLimit",
+      "slidingRateLimit",
       { numberOfKeys: 1, lua: SLIDING_WINDOW_LUA },
     );
     registered.add(client);
@@ -51,7 +51,7 @@ function getRunner(client: Redis): ScriptRunner {
   // `Cannot read properties of undefined (reading 'options')`.
   return ((...args) => {
     const fn = (client as unknown as Record<string, unknown>)[
-      "scooteringSlidingRateLimit"
+      "slidingRateLimit"
     ] as ScriptRunner;
     return fn.apply(client, args);
   }) as ScriptRunner;

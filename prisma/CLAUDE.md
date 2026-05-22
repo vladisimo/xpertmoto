@@ -6,7 +6,7 @@ For a step-by-step walkthrough of a schema change, run the `prisma-migration` sk
 
 ## Scope vs spec
 
-The original CLAUDE.md spec listed ~60 entities. The actual schema has **~117 models** across 63+ migrations (April 2026). Scope additions include gift cards, referrals, eToLL integration, telematics revenue, subscriptions, loyalty, partner programs, support-AI tickets, yield pricing. Treat the entity lists in any historical spec doc as a starting point, not the inventory — `prisma/schema.prisma` is the source of truth.
+The original CLAUDE.md spec listed ~60 entities. The actual schema has **117 models** across 62 migrations (May 2026). Scope additions include gift cards, referrals, eToLL integration, telematics revenue, subscriptions, loyalty, partner programs, support-AI tickets, yield pricing. Treat the entity lists in any historical spec doc as a starting point, not the inventory — `prisma/schema.prisma` is the source of truth.
 
 ## Schema-edit discipline (enforced)
 
@@ -25,6 +25,20 @@ The original CLAUDE.md spec listed ~60 entities. The actual schema has **~117 mo
 | Indexes | `@@index([...])` on every FK and any field that's commonly filtered, sorted, or grouped. Compound indexes match the actual query order. |
 | Enums | Live in `schema.prisma` itself — never split into a separate file. |
 | Naming | Models PascalCase singular (`Booking`, `Vehicle`). Fields camelCase. Enum values SCREAMING_SNAKE_CASE. |
+
+## Pricing precedence (xpertmoto parity, May 2026)
+
+Base rate and `PricingTier` ladder resolve through three layers, vehicle-first:
+
+1. **Per-vehicle override** — `Vehicle.baseRateOverride` / `Vehicle.basePeriodHoursOverride` / any `PricingTier` rows scoped to `vehicleId`.
+2. **Per-model default** — `VehicleModel.baseRate` / `VehicleModel.basePeriodHours` (default `H24`) / any `PricingTier` rows scoped to `modelId`.
+3. **Per-category fallback** — `VehicleCategory.baseDailyRate|baseWeeklyRate|baseMonthlyRate` / any `PricingTier` rows scoped to `categoryId`.
+
+`PricingTier` rows carry a `tierMode` discriminator:
+- `PROGRESSIVE` (default) — pays `tierTotal` for each fully-spanned tier, pro-rata for the partial tail. Pre-existing math.
+- `PER_WEEK` — pays `pricePerWeek × ceil(days/7)` for any rental whose day count falls in `[minDays, maxDays]`. Mirrors xpertmoto.com.au's rate card.
+
+A CHECK constraint enforces (a) exactly one of `categoryId | modelId | vehicleId` is non-null and (b) PER_WEEK rows carry a non-null positive `pricePerWeek` while PROGRESSIVE rows leave it null.
 
 ## Migration breaking-change checklist
 

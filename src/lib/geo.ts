@@ -52,7 +52,7 @@ export async function geocodeAddress(address: string): Promise<LatLng | null> {
   const url = `https://nominatim.openstreetmap.org/search?q=${q}&countrycodes=au&format=json&limit=1`;
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Scootering/1.0" },
+      headers: { "User-Agent": "XPERT Moto/1.0" },
     });
     if (!res.ok) return null;
     const data = (await res.json()) as { lat?: string; lon?: string }[];
@@ -352,7 +352,7 @@ async function nominatimSearch(raw: string): Promise<NominatimResult | null> {
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Scootering/1.0" },
+      headers: { "User-Agent": "XPERT Moto/1.0" },
     });
     if (!res.ok) return null;
     const data = (await res.json()) as NominatimResult[];
@@ -376,7 +376,7 @@ async function nominatimPostcodeLookup(
   const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Scootering/1.0" },
+      headers: { "User-Agent": "XPERT Moto/1.0" },
     });
     if (!res.ok) return null;
     const data = (await res.json()) as NominatimResult[];

@@ -11,6 +11,7 @@ import {
   SheetContent,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 
 export interface Breadcrumb {
   label: string;
@@ -163,6 +164,7 @@ function PageHeaderActions({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = React.useState(false);
+  const isMobile = useIsMobile();
 
   if (!overflow) {
     return (
@@ -172,12 +174,21 @@ function PageHeaderActions({
     );
   }
 
-  return (
-    <>
-      <div className="hidden w-auto shrink-0 flex-wrap items-center gap-2 sm:flex">
+  // Single-subtree render: on mobile, children live inside the Sheet body
+  // only (so stateful action children mount once). On desktop, children
+  // live inline. useIsMobile() is false on first render to preserve
+  // hydration parity — the inline branch is the hydration-safe default.
+  if (!isMobile) {
+    return (
+      <div className="flex w-auto shrink-0 flex-wrap items-center gap-2">
         {children}
       </div>
-      <div className="flex w-full justify-end sm:hidden">
+    );
+  }
+
+  return (
+    <>
+      <div className="flex w-full justify-end">
         <Button
           type="button"
           variant="secondary"
@@ -196,12 +207,7 @@ function PageHeaderActions({
           <SheetTitle className="text-base font-semibold">
             {title} actions
           </SheetTitle>
-          <div
-            className="flex flex-col gap-2 [&>*]:w-full"
-            onClick={() => setOpen(false)}
-          >
-            {children}
-          </div>
+          <div className="flex flex-col gap-2 [&>*]:w-full">{children}</div>
         </SheetContent>
       </Sheet>
     </>

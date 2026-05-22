@@ -45,7 +45,7 @@ export const useSupportWidget = create<SupportWidgetState>()(
         }),
     }),
     {
-      name: "scootering-support-widget",
+      name: "xpertmoto-support-widget",
       storage: createJSONStorage(() => localStorage),
       // Only persist conversationId so the user can reopen a session.
       partialize: (s) => ({

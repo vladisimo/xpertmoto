@@ -15,7 +15,7 @@ import {
 import { classifyDevice, hashIp, lookupGeo } from "@/lib/geo-ip";
 import { classifyChannel } from "@/lib/analytics/channel";
 
-const VISITOR_COOKIE = "scootering_vid";
+const VISITOR_COOKIE = "xpertmoto_vid";
 const PRESENCE_ACTIVE_MS = 60_000;
 const BODY_MAX = 4000;
 const MAX_ATTACHMENTS = 5;

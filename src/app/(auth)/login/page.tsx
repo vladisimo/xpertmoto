@@ -14,6 +14,12 @@ export default async function LoginPage({
   const session = await auth();
   if (session?.user) {
     const role = session.user.role;
+    const isBackOffice =
+      role === "STAFF" || role === "MANAGER" || role === "ADMIN" || role === "SUPER_ADMIN";
+    // Dual-access back-office users (those with a customerProfile) go via
+    // the portal selector so they can choose; everyone else short-circuits
+    // straight to their single landing page.
+    if (isBackOffice && session.hasCustomerProfile === true) redirect("/portal-select");
     if (role === "ADMIN" || role === "SUPER_ADMIN") redirect("/admin/dashboard");
     if (role === "STAFF" || role === "MANAGER") redirect("/staff/dashboard");
     const { callbackUrl } = await searchParams;

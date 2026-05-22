@@ -1336,6 +1336,122 @@ export const staffBookingRouter = createTRPCRouter({
       return updated;
     }),
 
+  /**
+   * Close out a booking in one shot once the check-in wizard has produced
+   * a SIGNED/FINALISED return assessment. Folds markReturned +
+   * completeFromReturned into a single transaction: vehicle goes
+   * AVAILABLE (with depot relocation if relevant) and the booking moves
+   * straight to COMPLETED. Use this when settlement is already done via
+   * the Payment Console and the staff member just wants to close the
+   * hire.
+   */
+  closeOut: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        odometerKm: z.number().int().min(0).optional(),
+        notes: z.string().optional(),
+      }),
+    )
+    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .mutation(async ({ ctx, input }) => {
+      const b = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        include: { returnAssessments: { select: { status: true } } },
+      });
+      captureCustomerId(ctx, b.customerId);
+      if (!["ACTIVE", "OVERDUE", "CHECKED_OUT", "RETURNED"].includes(b.status)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Cannot close out from ${b.status}`,
+        });
+      }
+      const hasSigned = b.returnAssessments.some(
+        (a) => a.status === "SIGNED" || a.status === "FINALISED",
+      );
+      if (!hasSigned) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Close out requires a signed return assessment",
+        });
+      }
+
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const now = new Date();
+        if (b.status !== "RETURNED") {
+          await tx.bookingStatusLog.create({
+            data: {
+              bookingId: b.id,
+              previousStatus: b.status,
+              newStatus: "RETURNED",
+              changedById: ctx.user.id,
+              reason: "Closed out via Payment Console",
+            },
+          });
+          if (b.vehicleId) {
+            const vehicle = await tx.vehicle.findUniqueOrThrow({
+              where: { id: b.vehicleId },
+              select: { depotId: true },
+            });
+            const depotChanged =
+              !!b.returnDepotId && b.returnDepotId !== vehicle.depotId;
+            await tx.vehicle.update({
+              where: { id: b.vehicleId },
+              data: {
+                status: "AVAILABLE",
+                ...(input.odometerKm !== undefined && {
+                  currentOdometerKm: input.odometerKm,
+                }),
+                ...(depotChanged && { depotId: b.returnDepotId }),
+              },
+            });
+            await tx.vehicleStatusLog.create({
+              data: {
+                vehicleId: b.vehicleId,
+                newStatus: "AVAILABLE",
+                changedById: ctx.user.id,
+                reason: depotChanged
+                  ? `Returned from ${b.bookingReference} to a different depot; home depot updated`
+                  : `Returned from ${b.bookingReference}`,
+              },
+            });
+          }
+        }
+        return tx.booking.update({
+          where: { id: b.id },
+          data: {
+            status: "COMPLETED",
+            checkedInById: ctx.user.id,
+            ...(b.status !== "RETURNED" && { actualReturnDateTime: now }),
+            ...(input.odometerKm !== undefined && { returnOdometerKm: input.odometerKm }),
+            ...(input.notes && { staffNotes: input.notes }),
+            statusLog: {
+              create: {
+                previousStatus: b.status === "RETURNED" ? "RETURNED" : "RETURNED",
+                newStatus: "COMPLETED",
+                changedById: ctx.user.id,
+                reason: input.notes ?? "Settlement finalised — closed out",
+              },
+            },
+          },
+        });
+      });
+      try {
+        await markPartnerTransactionsPayable(ctx.prisma, b.id);
+      } catch {
+        // non-fatal
+      }
+      try {
+        await qualifyReferral(ctx.prisma, {
+          refereeId: b.customerId,
+          qualifyingBookingId: b.id,
+        });
+      } catch {
+        // non-fatal
+      }
+      return updated;
+    }),
+
   setVerification: staffProcedure
     .input(
       z.object({

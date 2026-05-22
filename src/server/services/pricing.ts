@@ -1,10 +1,13 @@
 import type {
   PrismaClient,
   VehicleCategory,
+  VehicleModel,
+  Vehicle,
   InsuranceOption,
   BillingFrequency,
   OnlinePaymentStrategy,
   PricingTier,
+  BasePeriodHours,
 } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
@@ -57,6 +60,24 @@ export type PricingLineItem = {
   amount: number;
   qty?: number;
   unit?: number;
+  /** Optional small-text formula shown under the line item in the UI,
+   *  e.g. "$70.86/day × 11 days" for the base rental or "$12/day × 11
+   *  days" for insurance. Lets the customer see exactly how each row was
+   *  computed without having to re-derive the math. */
+  detail?: string;
+};
+
+/** Single line in the "Pay now" breakdown surfaced under the deposit
+ *  callout. Lets the customer see exactly what the upfront charge is
+ *  composed of — deposit slice, long-term first-period rental, any
+ *  one-time fees folded in — without re-deriving the math from the line
+ *  items above. */
+export type PayOnlineBreakdownItem = {
+  label: string;
+  amount: number;
+  /** Optional formula / arithmetic shown in small text under the label,
+   *  e.g. "50% × $496.00 (first week)". */
+  detail?: string;
 };
 
 export type PricingQuote = {
@@ -90,6 +111,10 @@ export type PricingQuote = {
   onlinePaymentStrategy: OnlinePaymentStrategy;
   payOnlineAmount: number;
   remainderDueAtPickup: number;
+  /** Itemised breakdown explaining what payOnlineAmount is composed of.
+   *  Always at least one row. The bond is NOT in this list — it's
+   *  authorised separately and surfaced as its own panel in the UI. */
+  payOnlineBreakdown: PayOnlineBreakdownItem[];
 
   // Phase A2 — populated only when durationDays >= longTermMinDays on
   // the selected category (i.e. a progressive billing plan is created).
@@ -111,6 +136,20 @@ export class OneWayDisallowedError extends Error {
       `One-way rentals between ${fromName} and ${toName} are not available. Please return the vehicle to the pickup depot.`,
     );
     this.name = "OneWayDisallowedError";
+  }
+}
+
+/** Thrown when a 48-hour-base vehicle is quoted for a single-day rental.
+ *  The xpertmoto model uses a 48 h minimum for premium bikes — a 1-day
+ *  booking would otherwise either over- or under-charge; surfacing it as a
+ *  validation error keeps the cascade honest. */
+export class MinimumRentalPeriodError extends Error {
+  readonly code = "MIN_RENTAL_PERIOD";
+  constructor(public readonly minDays: number) {
+    super(
+      `This vehicle has a ${minDays}-day minimum rental. Choose a return date at least ${minDays} day${minDays > 1 ? "s" : ""} after pickup.`,
+    );
+    this.name = "MinimumRentalPeriodError";
   }
 }
 
@@ -181,6 +220,70 @@ function chooseBaseRateDecimal(cat: VehicleCategory, days: number): Prisma.Decim
   return aud(cat.baseDailyRate);
 }
 
+/** Vehicle → model → category cascade for the per-rental base rate.
+ *
+ *  When the resolved scope sets `basePeriodHours = H48`, the resolved rate
+ *  is a *minimum charge* covering days 1–2: any 1- or 2-day booking pays
+ *  exactly `baseRate`, and 1-day bookings throw `MinimumRentalPeriodError`
+ *  (the xpertmoto premium bikes do not rent for a single day).
+ *
+ *  Returns the GST-inclusive subtotal for the base rental and the per-day
+ *  rate exposed in the quote summary. */
+type ModelLite = Pick<VehicleModel, "baseRate" | "basePeriodHours"> | null;
+type VehicleLite = Pick<Vehicle, "baseRateOverride" | "basePeriodHoursOverride"> | null;
+
+function resolveBasePeriodHours(
+  vehicle: VehicleLite,
+  model: ModelLite,
+): BasePeriodHours {
+  return (
+    vehicle?.basePeriodHoursOverride ??
+    model?.basePeriodHours ??
+    "H24"
+  );
+}
+
+function resolveBaseRateDecimal(
+  vehicle: VehicleLite,
+  model: ModelLite,
+): Prisma.Decimal | null {
+  if (vehicle?.baseRateOverride != null) return aud(vehicle.baseRateOverride);
+  if (model?.baseRate != null) return aud(model.baseRate);
+  return null;
+}
+
+/** Compute the flat-rate base subtotal for a booking, honouring per-vehicle
+ *  and per-model overrides on top of the category daily/weekly/monthly
+ *  cascade. Falls back to the category cascade when no override is set.
+ *
+ *  Throws `MinimumRentalPeriodError` if the resolved scope sets `H48` and
+ *  the booking is shorter than 2 days. */
+export function computeFlatBaseSubtotal(args: {
+  category: VehicleCategory;
+  model: ModelLite;
+  vehicle: VehicleLite;
+  days: number;
+}): { baseSubtotal: Prisma.Decimal; baseRate: Prisma.Decimal } {
+  const { category, model, vehicle, days } = args;
+  const override = resolveBaseRateDecimal(vehicle, model);
+  if (override != null) {
+    const period = resolveBasePeriodHours(vehicle, model);
+    if (period === "H48" && days < 2) {
+      throw new MinimumRentalPeriodError(2);
+    }
+    // H48: rate is the minimum charge for any 1-2 day rental (`days < 2`
+    // is rejected above); from day 2 onward each additional day costs
+    // baseRate / 2 to keep day-over-day pricing continuous.
+    if (period === "H48") {
+      const perDay = divide(override, 2);
+      return { baseSubtotal: times(perDay, days), baseRate: perDay };
+    }
+    return { baseSubtotal: times(override, days), baseRate: override };
+  }
+  const rate = chooseBaseRateDecimal(category, days);
+  return { baseSubtotal: times(rate, days), baseRate: rate };
+}
+
 function durationDiscountPct(days: number): number {
   if (days >= 30) return 0.25;
   if (days >= 7) return 0.1;
@@ -191,36 +294,62 @@ function durationDiscountPct(days: number): number {
  *  unseeded SystemSetting row preserves historical behaviour. Read off the
  *  passed-in `prisma` so test fakes that omit `systemSetting` (every error
  *  is caught) and production clients use the same path. */
-type PricingFlags = { yieldEnabled: boolean; durationDiscountEnabled: boolean };
+type DepositBasis = "TOTAL" | "WEEK1";
+
+type PricingFlags = {
+  yieldEnabled: boolean;
+  durationDiscountEnabled: boolean;
+  /**
+   * Controls how the PERCENT `OnlinePaymentStrategy` interprets the
+   * deposit-percent setting on a category:
+   *   - `TOTAL` (default): deposit = bookingFeePercent × totalAmount
+   *   - `WEEK1`: deposit = bookingFeePercent × min(7-day, total) base
+   *     subtotal. Matches xpertmoto.com.au's "50% of the first week +
+   *     bond on top" convention.
+   * FULL / ZERO / FLAT strategies ignore this — they don't reference
+   * totalAmount × percent.
+   */
+  depositBasis: DepositBasis;
+};
 
 async function readPricingFlags(prisma: PrismaClient): Promise<PricingFlags> {
   try {
     const rows = await prisma.systemSetting.findMany({
       where: {
-        key: { in: ["pricing.yieldEnabled", "pricing.durationDiscountEnabled"] },
+        key: {
+          in: [
+            "pricing.yieldEnabled",
+            "pricing.durationDiscountEnabled",
+            "pricing.depositBasis",
+          ],
+        },
       },
     });
     const byKey = new Map(rows.map((r) => [r.key, r.value as unknown]));
     const yieldEnabled = byKey.get("pricing.yieldEnabled");
     const durationDiscountEnabled = byKey.get("pricing.durationDiscountEnabled");
+    const depositBasisRaw = byKey.get("pricing.depositBasis");
+    const depositBasis: DepositBasis = depositBasisRaw === "WEEK1" ? "WEEK1" : "TOTAL";
     return {
       yieldEnabled: typeof yieldEnabled === "boolean" ? yieldEnabled : true,
       durationDiscountEnabled:
         typeof durationDiscountEnabled === "boolean" ? durationDiscountEnabled : true,
+      depositBasis,
     };
   } catch {
-    return { yieldEnabled: true, durationDiscountEnabled: true };
+    return { yieldEnabled: true, durationDiscountEnabled: true, depositBasis: "TOTAL" };
   }
 }
 
-/** Look up the active PricingTier ladder for a booking. Vehicle-scoped tiers
- *  override category-scoped tiers when present. Returns null when neither
- *  scope has any active tiers — the caller falls back to the legacy
- *  daily/weekly/monthly + durationDiscountPct cascade. */
+/** Look up the active PricingTier ladder for a booking. Resolution order:
+ *  vehicle → model → category. Returns null when no scope has any active
+ *  tiers — the caller falls back to the legacy daily/weekly/monthly +
+ *  durationDiscountPct cascade. */
 export async function resolvePricingTiers(
   prisma: PrismaClient,
   categoryId: string,
   vehicleId?: string,
+  modelId?: string | null,
 ): Promise<PricingTier[] | null> {
   if (vehicleId) {
     const vehicleTiers = await prisma.pricingTier.findMany({
@@ -228,6 +357,13 @@ export async function resolvePricingTiers(
       orderBy: { minDays: "asc" },
     });
     if (vehicleTiers.length > 0) return vehicleTiers;
+  }
+  if (modelId) {
+    const modelTiers = await prisma.pricingTier.findMany({
+      where: { modelId, isActive: true },
+      orderBy: { minDays: "asc" },
+    });
+    if (modelTiers.length > 0) return modelTiers;
   }
   const categoryTiers = await prisma.pricingTier.findMany({
     where: { categoryId, isActive: true },
@@ -257,6 +393,31 @@ export function computeProgressiveTierTotal(
   days: number,
 ): Prisma.Decimal {
   if (tiers.length === 0 || days <= 0) return aud(0);
+
+  // PER_WEEK ladders use pro-rata-within-tier semantics: the tier that
+  // contains the whole booking sets the per-week rate, billed as
+  // `pricePerWeek × days / 7`. This is smooth across whole-week
+  // boundaries (CB125F 14-day = $152 × 14/7 = $304, R1250GS 28-day =
+  // $960 × 28/7 = $3,840) but avoids the abrupt $/wk jump that
+  // round-up-by-week produced (11 days no longer mysteriously costs
+  // the same as 14). PROGRESSIVE ladders use the existing tax-bracket
+  // accumulator. We don't mix modes within a single ladder — pick the
+  // row whose [minDays, maxDays] contains `days`, or the last row when
+  // `days` overshoots.
+  const perWeekTier = tiers.find(
+    (t) => t.tierMode === "PER_WEEK" && days >= t.minDays && days <= t.maxDays,
+  );
+  if (perWeekTier && perWeekTier.pricePerWeek != null) {
+    return divide(times(perWeekTier.pricePerWeek, days), 7);
+  }
+  // Overshoot path: when `days` exceeds the last PER_WEEK tier's maxDays,
+  // bill at the last tier's per-week rate. Lets operators set "12+ weeks"
+  // open-endedly without a separate sentinel.
+  const lastTier = tiers[tiers.length - 1]!;
+  if (lastTier.tierMode === "PER_WEEK" && lastTier.pricePerWeek != null && days > lastTier.maxDays) {
+    return divide(times(lastTier.pricePerWeek, days), 7);
+  }
+
   let total = aud(0);
   let remaining = days;
   for (const tier of tiers) {
@@ -310,6 +471,15 @@ export function computePayOnlineAmount(args: {
   totalAmount: Prisma.Decimal;
   bookingFeeFlat: Prisma.Decimal | null;
   bookingFeePercent: Prisma.Decimal | null;
+  /**
+   * Optional alternate base for the PERCENT strategy. When set, the
+   * percentage multiplies against this amount instead of `totalAmount`.
+   * Used by the `pricing.depositBasis = WEEK1` SystemSetting so xpertmoto-
+   * style "50% of the first week + bond on top" can be expressed without
+   * a new enum value. Capped at `totalAmount` so the deposit never
+   * exceeds what's actually owed.
+   */
+  percentBaseAmount?: Prisma.Decimal;
 }): Prisma.Decimal {
   switch (args.strategy) {
     case "FULL":
@@ -324,7 +494,149 @@ export function computePayOnlineAmount(args: {
     case "PERCENT": {
       const pct = args.bookingFeePercent ?? aud(0);
       const factor = divide(pct, 100);
-      return roundCents(multiply(args.totalAmount, factor));
+      const base = args.percentBaseAmount ?? args.totalAmount;
+      const deposit = roundCents(multiply(base, factor));
+      // Never deposit more than the actual total (short rentals where
+      // 50% × week1 > total would otherwise look wrong).
+      return gt(deposit, args.totalAmount) ? roundCents(args.totalAmount) : deposit;
+    }
+  }
+}
+
+/** Build the itemised "Pay now" breakdown the customer sees under the
+ *  deposit callout. Each row maps to one of the strategy outcomes
+ *  computed by `computePayOnlineAmount` — long-term hires get their own
+ *  "first period" framing because the strategy is bypassed in that path. */
+function buildPayOnlineBreakdown(args: {
+  strategy: OnlinePaymentStrategy;
+  isLongTerm: boolean;
+  recurringFrequency: BillingFrequency | null;
+  payOnlineDec: Prisma.Decimal;
+  totalDec: Prisma.Decimal;
+  percentBaseDec: Prisma.Decimal | undefined;
+  week1DepositDec: Prisma.Decimal | undefined;
+  addonLines: PricingLineItem[];
+  insuranceLabel: string | null;
+  insuranceAmount: Prisma.Decimal;
+  deliveryAmount: Prisma.Decimal;
+  oneWayLabel: string | null;
+  oneWayAmount: Prisma.Decimal;
+  depositBasis: DepositBasis;
+  bookingFeePercent: Prisma.Decimal | null;
+  bookingFeeFlat: Prisma.Decimal | null;
+}): PayOnlineBreakdownItem[] {
+  const amount = toNumber(roundCents(args.payOnlineDec));
+
+  if (args.isLongTerm) {
+    const word =
+      args.recurringFrequency === "WEEKLY"
+        ? "weekly"
+        : args.recurringFrequency === "FORTNIGHTLY"
+          ? "fortnightly"
+          : args.recurringFrequency === "MONTHLY"
+            ? "monthly"
+            : "first";
+    return [
+      {
+        label: `First ${word.replace(/ly$/, "")} period`,
+        amount,
+        detail: "Covers rental, per-day add-ons, and any one-time fees (delivery, one-way). Recurring charges follow on the saved card.",
+      },
+    ];
+  }
+
+  // WEEK1 deposit path: composed of the week-1 rental slice + 100% of
+  // add-ons / insurance / delivery / one-way. Render each as its own
+  // row so the customer can see exactly what they're being charged for.
+  if (args.week1DepositDec !== undefined) {
+    const items: PayOnlineBreakdownItem[] = [];
+    const pct = toNumber(args.bookingFeePercent ?? aud(0));
+    const baseAmount = toNumber(roundCents(args.percentBaseDec ?? aud(0)));
+    items.push({
+      label: `Deposit (${pct}% of first week)`,
+      amount: toNumber(roundCents(args.week1DepositDec)),
+      detail: `${pct}% × $${baseAmount.toFixed(2)} first-week rental`,
+    });
+    for (const a of args.addonLines) {
+      items.push({ label: a.label, amount: a.amount });
+    }
+    if (toNumber(args.insuranceAmount) > 0 && args.insuranceLabel) {
+      items.push({
+        label: args.insuranceLabel,
+        amount: toNumber(roundCents(args.insuranceAmount)),
+      });
+    }
+    if (toNumber(args.deliveryAmount) > 0) {
+      items.push({
+        label: "Delivery",
+        amount: toNumber(roundCents(args.deliveryAmount)),
+      });
+    }
+    if (toNumber(args.oneWayAmount) > 0 && args.oneWayLabel) {
+      items.push({
+        label: args.oneWayLabel,
+        amount: toNumber(roundCents(args.oneWayAmount)),
+      });
+    }
+    // Final cap reconciliation: if the deposit was capped at totalDec
+    // (very short rentals) the rows above may overshoot — surface a
+    // single explanatory note rather than over-itemising.
+    const itemSum = items.reduce((acc, it) => acc + it.amount, 0);
+    if (Math.abs(itemSum - amount) > 0.01) {
+      return [
+        {
+          label: "Deposit (capped at rental total)",
+          amount,
+          detail: `${pct}% × first-week rental + extras exceeded the rental total — capped at $${amount.toFixed(2)}.`,
+        },
+      ];
+    }
+    return items;
+  }
+
+  switch (args.strategy) {
+    case "FULL":
+      return [
+        {
+          label: "Full rental total",
+          amount,
+          detail: "Rental + add-ons + insurance + delivery (GST incl).",
+        },
+      ];
+    case "ZERO":
+      return [
+        {
+          label: "No deposit",
+          amount: 0,
+          detail: "All charges collected at pickup.",
+        },
+      ];
+    case "FLAT": {
+      const fee = toNumber(args.bookingFeeFlat ?? aud(0));
+      return [
+        {
+          label: "Booking fee",
+          amount,
+          detail: `Flat fee of $${fee.toFixed(2)} (capped at the rental total).`,
+        },
+      ];
+    }
+    case "PERCENT": {
+      const pct = toNumber(args.bookingFeePercent ?? aud(0));
+      const baseDec = args.percentBaseDec ?? args.totalDec;
+      const baseAmount = toNumber(roundCents(baseDec));
+      const basisLabel =
+        args.depositBasis === "WEEK1"
+          ? "of first-week rental"
+          : "of rental total";
+      const detail = `${pct}% × $${baseAmount.toFixed(2)} ${args.depositBasis === "WEEK1" ? "(first week's rental)" : "(rental total)"}`;
+      return [
+        {
+          label: `Deposit (${pct}% ${basisLabel})`,
+          amount,
+          detail,
+        },
+      ];
     }
   }
 }
@@ -335,17 +647,63 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
   });
   const durationDays = calcDurationDays(input.pickupDateTime, input.returnDateTime);
 
+  // Per-vehicle + per-model context for the base-rate cascade.
+  // `vehicle.modelId` ties a Vehicle to its catalogue VehicleModel; we look
+  // both up in one round-trip when a vehicle is known. When the wizard only
+  // knows the category (allocation happens at check-out) both stay null and
+  // the cascade falls back to category-level rates.
+  let vehicle: VehicleLite = null;
+  let model: ModelLite = null;
+  let modelId: string | null = null;
+  // `vehicleLabel` overrides the line-item label when set — shows the
+  // actual bike the customer picked (e.g. "Ducati Monster 659") instead
+  // of the generic category name ("Unrestricted Motorcycle").
+  let vehicleLabel: string | null = null;
+  if (input.vehicleId) {
+    const v = await prisma.vehicle.findUnique({
+      where: { id: input.vehicleId },
+      select: {
+        make: true,
+        model: true,
+        baseRateOverride: true,
+        basePeriodHoursOverride: true,
+        modelId: true,
+        catalogueModel: { select: { baseRate: true, basePeriodHours: true } },
+      },
+    });
+    if (v) {
+      vehicle = { baseRateOverride: v.baseRateOverride, basePeriodHoursOverride: v.basePeriodHoursOverride } as VehicleLite;
+      model = v.catalogueModel;
+      modelId = v.modelId;
+      vehicleLabel = `${v.make} ${v.model}`;
+    }
+  }
+
   // Progressive tier ladder (if configured) replaces the legacy
   // daily/weekly/monthly + duration-discount cascade for the base subtotal.
-  // Seasons, yield and code discounts still apply on top.
-  const tiers = await resolvePricingTiers(prisma, input.categoryId, input.vehicleId);
+  // Seasons, yield and code discounts still apply on top. When the rental
+  // is shorter than the first tier's minDays (e.g. a 3-day rental against
+  // a 7+ days PER_WEEK ladder), fall back to the flat per-day rate —
+  // tiers anchored at a week shouldn't quietly bill $0 for sub-week
+  // rentals.
+  const rawTiers = await resolvePricingTiers(prisma, input.categoryId, input.vehicleId, modelId);
+  const tiers = rawTiers && rawTiers[0] && durationDays >= rawTiers[0].minDays ? rawTiers : null;
   const pricingMethod: PricingMethod = tiers ? "TIERED" : "FLAT";
-  const baseSubtotalDec = tiers
-    ? computeProgressiveTierTotal(tiers, durationDays)
-    : times(chooseBaseRateDecimal(category, durationDays), durationDays);
-  const baseRateDec = tiers
-    ? divide(baseSubtotalDec, durationDays)
-    : chooseBaseRateDecimal(category, durationDays);
+  let baseSubtotalDec: Prisma.Decimal;
+  let baseRateDec: Prisma.Decimal;
+  if (tiers) {
+    baseSubtotalDec = computeProgressiveTierTotal(tiers, durationDays);
+    baseRateDec = divide(baseSubtotalDec, durationDays);
+  } else {
+    const flat = computeFlatBaseSubtotal({
+      category,
+      model,
+      vehicle,
+      days: durationDays,
+    });
+    baseSubtotalDec = flat.baseSubtotal;
+    baseRateDec = flat.baseRate;
+  }
 
   const seasons = await prisma.season.findMany({
     where: {
@@ -415,11 +773,17 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
         : times(unit, sel.quantity);
       addonTotalDec = sum(addonTotalDec, amount);
       if (!a.isPerDay) flatAddonTotalDec = sum(flatAddonTotalDec, amount);
+      const detail = a.isPerDay
+        ? `$${toNumber(unit).toFixed(2)}/day × ${durationDays} day${durationDays > 1 ? "s" : ""}${sel.quantity > 1 ? ` × ${sel.quantity}` : ""}`
+        : sel.quantity > 1
+          ? `$${toNumber(unit).toFixed(2)} × ${sel.quantity}`
+          : undefined;
       addonLines.push({
         label: a.name,
         amount: toNumber(amount),
         qty: sel.quantity,
         unit: toNumber(unit),
+        ...(detail ? { detail } : {}),
       });
     }
   }
@@ -467,61 +831,165 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
   const gstDec = gstFromInclusive(totalDec);
   const subtotalExGstDec = subExGstDecimal(totalDec);
 
+  const baseEntity = vehicleLabel ?? category.name;
   const baseLineLabel =
     pricingMethod === "TIERED"
-      ? `${category.name} × ${durationDays} day${durationDays > 1 ? "s" : ""} (tiered)`
-      : `${category.name} × ${durationDays} day${durationDays > 1 ? "s" : ""}`;
+      ? `${baseEntity} × ${durationDays} day${durationDays > 1 ? "s" : ""} (tiered)`
+      : `${baseEntity} × ${durationDays} day${durationDays > 1 ? "s" : ""}`;
+  // For TIERED PER_WEEK rentals, surface the $/wk source so the customer
+  // can tie the line back to the rate card ("$496/wk × 11/7 days").
+  // For FLAT (no tier ladder) the formula is "$X/day × N days".
+  let baseDetail: string | undefined;
+  if (tiers) {
+    const perWeekTier = tiers.find(
+      (t) => t.tierMode === "PER_WEEK" && durationDays >= t.minDays && durationDays <= t.maxDays,
+    );
+    const fallbackTier =
+      tiers[tiers.length - 1] &&
+      tiers[tiers.length - 1]!.tierMode === "PER_WEEK" &&
+      durationDays > tiers[tiers.length - 1]!.maxDays
+        ? tiers[tiers.length - 1]
+        : null;
+    const activeTier = perWeekTier ?? fallbackTier;
+    if (activeTier?.pricePerWeek != null) {
+      baseDetail = `$${Number(activeTier.pricePerWeek).toFixed(0)}/wk × ${durationDays}/7 days = $${toNumber(baseSubtotalDec).toFixed(2)}`;
+    } else {
+      // PROGRESSIVE ladder — show the effective per-day rate.
+      baseDetail = `$${toNumber(baseRateDec).toFixed(2)}/day × ${durationDays} days (progressive tiers)`;
+    }
+  } else {
+    const period = resolveBasePeriodHours(vehicle, model);
+    if (period === "H48") {
+      baseDetail = `$${toNumber(baseRateDec).toFixed(2)}/day × ${durationDays} days (48 h base period)`;
+    } else {
+      baseDetail = `$${toNumber(baseRateDec).toFixed(2)}/day × ${durationDays} days`;
+    }
+  }
   const lineItems: PricingLineItem[] = [
     {
       label: baseLineLabel,
       amount: toNumber(baseSubtotalDec),
       qty: durationDays,
       unit: toNumber(baseRateDec),
+      detail: baseDetail,
     },
   ];
   if (!seasonMultiplier.equals(1)) {
     lineItems.push({
       label: `Seasonal adjustment (×${seasonMultiplier.toString()})`,
       amount: toNumber(seasonedDec.minus(baseSubtotalDec)),
+      detail: `Rental base $${toNumber(baseSubtotalDec).toFixed(2)} × (${seasonMultiplier.toString()} − 1)`,
     });
   }
   if (!yieldMultiplier.equals(1)) {
     lineItems.push({
       label: `Demand adjustment (×${yieldMultiplier.toString()})`,
       amount: toNumber(afterYieldDec.minus(seasonedDec)),
+      detail: `Post-season $${toNumber(seasonedDec).toFixed(2)} × (${yieldMultiplier.toString()} − 1)`,
     });
   }
   if (durDiscPct > 0) {
     lineItems.push({
       label: `Duration discount (${Math.round(durDiscPct * 100)}%)`,
       amount: -toNumber(times(afterYieldDec, durDiscPct)),
+      detail: `${Math.round(durDiscPct * 100)}% off $${toNumber(afterYieldDec).toFixed(2)}`,
     });
   }
   if (gt(codeDiscountDec, 0)) {
-    lineItems.push({ label: `Discount code`, amount: -toNumber(codeDiscountDec) });
+    lineItems.push({
+      label: `Discount code`,
+      amount: -toNumber(codeDiscountDec),
+      detail: input.discountCode ? `Code ${input.discountCode}` : undefined,
+    });
   }
   lineItems.push(...addonLines);
   if (insurance) {
     lineItems.push({
       label: `${insurance.name} insurance × ${durationDays} days`,
       amount: toNumber(insuranceTotalDec),
+      detail: `$${Number(insurance.dailyRate).toFixed(2)}/day × ${durationDays} day${durationDays > 1 ? "s" : ""}`,
     });
   }
   if (gt(deliveryFeeDec, 0)) {
-    lineItems.push({ label: "Delivery", amount: toNumber(deliveryFeeDec) });
+    lineItems.push({
+      label: "Delivery",
+      amount: toNumber(deliveryFeeDec),
+      detail: "Flat fee, one-time charge",
+    });
   }
   if (gt(oneWayFeeDec, 0) && oneWayFeeLabel) {
-    lineItems.push({ label: oneWayFeeLabel, amount: toNumber(oneWayFeeDec) });
+    lineItems.push({
+      label: oneWayFeeLabel,
+      amount: toNumber(oneWayFeeDec),
+      detail: "Flat fee, one-time charge",
+    });
   }
 
-  // Phase A1 — per-category online payment strategy.
+  // Phase A1 — per-category online payment strategy. When the operator
+  // has opted into the WEEK1 deposit basis, the deposit is composed of:
+  //   - bookingFeePercent × first-week base rental (post-multipliers)
+  //   - 100% of any add-ons, insurance, delivery and one-way fees
+  // Bond is on top of all of this (held separately, not captured here).
+  // This matches xpertmoto.com.au's "50% of the first week of bike hire
+  // + extras + bond on top" convention. Rentals shorter than a week
+  // collapse the week-1 slice to the actual booked days; the deposit is
+  // always capped at totalDec so it can't exceed what's owed.
   const strategy = category.onlinePaymentStrategy;
-  const strategyPayOnlineDec = computePayOnlineAmount({
-    strategy,
-    totalAmount: totalDec,
-    bookingFeeFlat: category.bookingFeeFlat as Prisma.Decimal | null,
-    bookingFeePercent: category.bookingFeePercent as Prisma.Decimal | null,
-  });
+  let percentBaseDec: Prisma.Decimal | undefined;
+  let week1DepositDec: Prisma.Decimal | undefined;
+  if (
+    strategy === "PERCENT" &&
+    flags.depositBasis === "WEEK1" &&
+    durationDays > 0
+  ) {
+    const weekDays = Math.min(durationDays, 7);
+    // For PER_WEEK ladders whose first tier starts at day 7+, a sub-tier
+    // week-1 slice (e.g. weekDays < firstTier.minDays) must use the flat
+    // rate too — otherwise the deposit basis silently lands at $0.
+    const weekTiers =
+      tiers && tiers[0] && weekDays >= tiers[0].minDays ? tiers : null;
+    const weekRawBaseDec = weekTiers
+      ? computeProgressiveTierTotal(weekTiers, weekDays)
+      : computeFlatBaseSubtotal({ category, model, vehicle, days: weekDays }).baseSubtotal;
+    // Apply the same season + yield + duration-discount multipliers to
+    // the week-1 slice so the deposit basis is consistent with how the
+    // total is computed. Code discounts and per-day add-ons are NOT
+    // applied — the deposit anchors on the rental rate alone.
+    let weekDec = multiply(weekRawBaseDec, seasonMultiplier);
+    weekDec = multiply(weekDec, yieldMultiplier);
+    if (durDiscPct > 0) {
+      weekDec = applyPercentage(weekDec, durDiscPct);
+    }
+    percentBaseDec = roundCents(weekDec);
+    // bookingFeePercent × week-1 base — the rental slice of the deposit.
+    const pct = category.bookingFeePercent ?? aud(0);
+    const factor = divide(pct, 100);
+    week1DepositDec = roundCents(multiply(percentBaseDec, factor));
+  }
+  const strategyPayOnlineDec =
+    week1DepositDec !== undefined
+      ? roundCents(
+          // Deposit slice + 100% of every extra. Cap at the total so we
+          // never collect more than the customer owes (very short
+          // rentals where week-1 deposit + extras > total).
+          (() => {
+            const dep = sum(
+              week1DepositDec,
+              addonTotalDec,
+              insuranceTotalDec,
+              deliveryFeeDec,
+              oneWayFeeDec,
+            );
+            return gt(dep, totalDec) ? totalDec : dep;
+          })(),
+        )
+      : computePayOnlineAmount({
+          strategy,
+          totalAmount: totalDec,
+          bookingFeeFlat: category.bookingFeeFlat as Prisma.Decimal | null,
+          bookingFeePercent: category.bookingFeePercent as Prisma.Decimal | null,
+          percentBaseAmount: percentBaseDec,
+        });
 
   // Phase A2 — progressive billing plan (long-term hires).
   const longTermMinDays = category.longTermMinDays;
@@ -581,6 +1049,27 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
     ? aud(0)
     : roundCents(max(aud(0), totalDec.minus(payOnlineDec)));
 
+  const payOnlineBreakdown = buildPayOnlineBreakdown({
+    strategy,
+    isLongTerm,
+    recurringFrequency,
+    payOnlineDec,
+    totalDec,
+    percentBaseDec,
+    week1DepositDec,
+    addonLines,
+    insuranceLabel: insurance
+      ? `${insurance.name} insurance × ${durationDays} day${durationDays > 1 ? "s" : ""}`
+      : null,
+    insuranceAmount: insuranceTotalDec,
+    deliveryAmount: deliveryFeeDec,
+    oneWayLabel: oneWayFeeLabel,
+    oneWayAmount: oneWayFeeDec,
+    depositBasis: flags.depositBasis,
+    bookingFeePercent: category.bookingFeePercent as Prisma.Decimal | null,
+    bookingFeeFlat: category.bookingFeeFlat as Prisma.Decimal | null,
+  });
+
   return {
     durationDays,
     baseRate: toNumber(baseRateDec),
@@ -602,6 +1091,7 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
     onlinePaymentStrategy: strategy,
     payOnlineAmount: toNumber(payOnlineDec),
     remainderDueAtPickup: toNumber(remainderDec),
+    payOnlineBreakdown,
     isLongTerm,
     recurringFrequency,
     recurringAmount: toNumber(recurringAmountDec),
@@ -653,17 +1143,49 @@ export async function quoteExtension(
   });
   const extensionDays = calcDurationDays(input.oldReturnDateTime, input.newReturnDateTime);
 
+  // Per-vehicle + per-model cascade context — see `quote()` for the rules.
+  let vehicle: VehicleLite = null;
+  let model: ModelLite = null;
+  let modelId: string | null = null;
+  if (input.vehicleId) {
+    const v = await prisma.vehicle.findUnique({
+      where: { id: input.vehicleId },
+      select: {
+        baseRateOverride: true,
+        basePeriodHoursOverride: true,
+        modelId: true,
+        catalogueModel: { select: { baseRate: true, basePeriodHours: true } },
+      },
+    });
+    if (v) {
+      vehicle = { baseRateOverride: v.baseRateOverride, basePeriodHoursOverride: v.basePeriodHoursOverride } as VehicleLite;
+      model = v.catalogueModel;
+      modelId = v.modelId;
+    }
+  }
+
   // Mirror quote(): tier ladder (if any) replaces the legacy cascade for
-  // the extension window too. Treat the extension as a standalone rental
-  // priced by the tier ladder — consistent and easy to reason about.
-  const tiers = await resolvePricingTiers(prisma, input.categoryId, input.vehicleId);
+  // the extension window too. Sub-tier-minimum windows fall back to the
+  // flat per-day rate (same rule as quote()) so a 2-day extension on a
+  // 7+ days PER_WEEK ladder is priced sensibly.
+  const rawTiers = await resolvePricingTiers(prisma, input.categoryId, input.vehicleId, modelId);
+  const tiers = rawTiers && rawTiers[0] && extensionDays >= rawTiers[0].minDays ? rawTiers : null;
   const pricingMethod: PricingMethod = tiers ? "TIERED" : "FLAT";
-  const baseSubtotalDec = tiers
-    ? computeProgressiveTierTotal(tiers, extensionDays)
-    : times(chooseBaseRateDecimal(category, extensionDays), extensionDays);
-  const baseRateDec = tiers
-    ? divide(baseSubtotalDec, extensionDays)
-    : chooseBaseRateDecimal(category, extensionDays);
+  let baseSubtotalDec: Prisma.Decimal;
+  let baseRateDec: Prisma.Decimal;
+  if (tiers) {
+    baseSubtotalDec = computeProgressiveTierTotal(tiers, extensionDays);
+    baseRateDec = divide(baseSubtotalDec, extensionDays);
+  } else {
+    const flat = computeFlatBaseSubtotal({
+      category,
+      model,
+      vehicle,
+      days: extensionDays,
+    });
+    baseSubtotalDec = flat.baseSubtotal;
+    baseRateDec = flat.baseRate;
+  }
 
   const seasons = await prisma.season.findMany({
     where: {
@@ -766,14 +1288,45 @@ export async function quoteSwapDelta(
     });
   }
 
-  const [oldCategory, newCategory, oldTiers, newTiers] = await Promise.all([
+  async function loadVehicleCtx(vehicleId?: string) {
+    if (!vehicleId) return { vehicle: null as VehicleLite, model: null as ModelLite, modelId: null as string | null };
+    const v = await prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+      select: {
+        baseRateOverride: true,
+        basePeriodHoursOverride: true,
+        modelId: true,
+        catalogueModel: { select: { baseRate: true, basePeriodHours: true } },
+      },
+    });
+    if (!v) return { vehicle: null as VehicleLite, model: null as ModelLite, modelId: null as string | null };
+    return {
+      vehicle: { baseRateOverride: v.baseRateOverride, basePeriodHoursOverride: v.basePeriodHoursOverride } as VehicleLite,
+      model: v.catalogueModel as ModelLite,
+      modelId: v.modelId,
+    };
+  }
+
+  const [oldCategory, newCategory, oldCtx, newCtx] = await Promise.all([
     prisma.vehicleCategory.findUniqueOrThrow({ where: { id: input.oldCategoryId } }),
     prisma.vehicleCategory.findUniqueOrThrow({ where: { id: input.newCategoryId } }),
-    resolvePricingTiers(prisma, input.oldCategoryId, input.oldVehicleId),
-    resolvePricingTiers(prisma, input.newCategoryId, input.newVehicleId),
+    loadVehicleCtx(input.oldVehicleId),
+    loadVehicleCtx(input.newVehicleId),
+  ]);
+
+  const [rawOldTiers, rawNewTiers] = await Promise.all([
+    resolvePricingTiers(prisma, input.oldCategoryId, input.oldVehicleId, oldCtx.modelId),
+    resolvePricingTiers(prisma, input.newCategoryId, input.newVehicleId, newCtx.modelId),
   ]);
 
   const remainingDays = calcDurationDays(input.swapAt, input.returnDateTime);
+
+  // Same sub-tier-minimum fallback as quote() — a tier ladder that starts
+  // at day 7 shouldn't return 0 for a 3-day swap window.
+  const oldTiers =
+    rawOldTiers && rawOldTiers[0] && remainingDays >= rawOldTiers[0].minDays ? rawOldTiers : null;
+  const newTiers =
+    rawNewTiers && rawNewTiers[0] && remainingDays >= rawNewTiers[0].minDays ? rawNewTiers : null;
 
   // If either side has tiers we mark the whole quote as TIERED. Duration
   // discount is zeroed for any side with tiers.
@@ -781,16 +1334,36 @@ export async function quoteSwapDelta(
 
   const oldBaseSubtotalDec = oldTiers
     ? computeProgressiveTierTotal(oldTiers, remainingDays)
-    : times(chooseBaseRateDecimal(oldCategory, remainingDays), remainingDays);
+    : computeFlatBaseSubtotal({
+        category: oldCategory,
+        model: oldCtx.model,
+        vehicle: oldCtx.vehicle,
+        days: remainingDays,
+      }).baseSubtotal;
   const newBaseSubtotalDec = newTiers
     ? computeProgressiveTierTotal(newTiers, remainingDays)
-    : times(chooseBaseRateDecimal(newCategory, remainingDays), remainingDays);
+    : computeFlatBaseSubtotal({
+        category: newCategory,
+        model: newCtx.model,
+        vehicle: newCtx.vehicle,
+        days: remainingDays,
+      }).baseSubtotal;
   const oldBaseRateDec = oldTiers
     ? divide(oldBaseSubtotalDec, remainingDays)
-    : chooseBaseRateDecimal(oldCategory, remainingDays);
+    : computeFlatBaseSubtotal({
+        category: oldCategory,
+        model: oldCtx.model,
+        vehicle: oldCtx.vehicle,
+        days: remainingDays,
+      }).baseRate;
   const newBaseRateDec = newTiers
     ? divide(newBaseSubtotalDec, remainingDays)
-    : chooseBaseRateDecimal(newCategory, remainingDays);
+    : computeFlatBaseSubtotal({
+        category: newCategory,
+        model: newCtx.model,
+        vehicle: newCtx.vehicle,
+        days: remainingDays,
+      }).baseRate;
 
   const seasons = await prisma.season.findMany({
     where: {

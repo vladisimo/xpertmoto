@@ -360,8 +360,9 @@ export function PortalShell({
 
         {/* Main area */}
         <div className="flex flex-1 flex-col min-w-0">
-          {/* Mobile top bar */}
-          <div className="flex lg:hidden h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black px-4 sticky top-0 z-20 text-white">
+          {/* Mobile top bar — pt-[env(safe-area-inset-top)] keeps the bar
+              clear of the iOS notch / Android cutout in PWA standalone. */}
+          <div className="flex lg:hidden min-h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black px-4 pt-[env(safe-area-inset-top)] sticky top-0 z-20 text-white">
             <BrandLogo variant="mark" height={32} className="shrink-0" />
             <span className="text-lg font-semibold tracking-tight truncate">
               {pageTitle}

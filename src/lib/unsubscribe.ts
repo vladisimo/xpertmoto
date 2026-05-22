@@ -7,7 +7,7 @@ function getSigningKey(): string {
     process.env.UNSUBSCRIBE_SIGNING_KEY ??
     process.env.NEXTAUTH_SECRET ??
     process.env.SECRET_ENC_KEY ??
-    "scootering-dev-unsub-key"
+    "xpertmoto-dev-unsub-key"
   );
 }
 

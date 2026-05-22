@@ -539,14 +539,83 @@ export const returnRouter = createTRPCRouter({
           where: { id: assessment.inspectionId },
           data: { status: "COMPLETED" },
         });
-        await tx.damageCharge.updateMany({
-          where: { returnAssessmentId: assessment.id, resolution: "STANDARD" },
-          data: { status: "CONFIRMED", resolvedAt: new Date(), resolvedById: ctx.user.id },
-        });
+        // STANDARD charges: confirm + spawn a PENDING Payment row so the
+        // capture-pending-payments job can pull them off-session. Mirrors
+        // return.confirmCharge so the post-sign settle UI surfaces every
+        // line in the Payment Console.
+        for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
+          const amountNumber = Number(c.amount);
+          if (amountNumber > 0) {
+            const payment = await tx.payment.create({
+              data: {
+                reference: `DMG-${c.id}`,
+                customerId: assessment.booking.customerId,
+                bookingId: assessment.bookingId,
+                type: "DAMAGE_CHARGE",
+                method: "STRIPE",
+                amount: c.amount,
+                gstAmount: gstFromInclusive(amountNumber),
+                status: "PENDING",
+                notes: `DamageCharge ${c.id} on booking ${assessment.booking.bookingReference}: ${c.description.slice(0, 140)}`,
+                processedById: ctx.user.id,
+              },
+            });
+            await tx.damageCharge.update({
+              where: { id: c.id },
+              data: {
+                status: "CONFIRMED",
+                capturedPaymentId: payment.id,
+                resolvedAt: new Date(),
+                resolvedById: ctx.user.id,
+              },
+            });
+          } else {
+            await tx.damageCharge.update({
+              where: { id: c.id },
+              data: {
+                status: "CONFIRMED",
+                resolvedAt: new Date(),
+                resolvedById: ctx.user.id,
+              },
+            });
+          }
+        }
         await tx.damageCharge.updateMany({
           where: { returnAssessmentId: assessment.id, resolution: { in: ["WAIVED", "WARRANTY"] } },
           data: { status: "WAIVED", resolvedAt: new Date(), resolvedById: ctx.user.id },
         });
+        if (fees.lateFee > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `LATE-${assessment.id}`,
+              customerId: assessment.booking.customerId,
+              bookingId: assessment.bookingId,
+              type: "LATE_FEE",
+              method: "STRIPE",
+              amount: fees.lateFee,
+              gstAmount: gstFromInclusive(fees.lateFee),
+              status: "PENDING",
+              notes: `Late return fee — ${fees.lateHours.toFixed(2)}h beyond grace on ${assessment.booking.bookingReference}`,
+              processedById: ctx.user.id,
+            },
+          });
+        }
+        if (fees.fuelCharge > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `FUEL-${assessment.id}`,
+              customerId: assessment.booking.customerId,
+              bookingId: assessment.bookingId,
+              type: "FUEL_CHARGE",
+              method: "STRIPE",
+              amount: fees.fuelCharge,
+              gstAmount: gstFromInclusive(fees.fuelCharge),
+              status: "PENDING",
+              notes: `Refuel charge — ${fees.missingLitres.toFixed(2)}L on ${assessment.booking.bookingReference}`,
+              processedById: ctx.user.id,
+            },
+          });
+        }
         await tx.returnAssessment.update({
           where: { id: assessment.id },
           data: {

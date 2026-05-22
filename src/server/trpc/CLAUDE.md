@@ -6,7 +6,7 @@ For a step-by-step walkthrough of adding a procedure, run the `trpc-procedure` s
 
 ## Scope vs spec
 
-The original CLAUDE.md spec listed 14 routers. The actual repo has **~43 routers** under [router/](router/), spanning bookings, fleet, customers, payments, maintenance, incidents, gift cards, referrals, loyalty, subscriptions, eToLL integration, yield pricing, telematics revenue, support AI, analytics, and backups. The procedure layer is the largest API surface in the codebase.
+The original CLAUDE.md spec listed 14 routers. The actual repo has **44 routers** under [router/](router/), spanning bookings, fleet, customers, payments, maintenance, incidents, gift cards, referrals, loyalty, subscriptions, eToLL integration, yield pricing, telematics revenue, support AI, analytics, and backups. The procedure layer is the largest API surface in the codebase.
 
 ## Procedure layers — pick the right base
 

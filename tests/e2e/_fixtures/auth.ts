@@ -41,7 +41,7 @@ export const test = base.extend<RoleContexts>({
     await ctx.close();
   },
   freshCustomerEmail: async ({}, use) => {
-    const email = `e2e+${Date.now()}-${Math.random().toString(36).slice(2, 8)}@scootering.test`;
+    const email = `e2e+${Date.now()}-${Math.random().toString(36).slice(2, 8)}@xpertmoto.test`;
     await use(email);
   },
   freshCustomerPage: async ({ browser, freshCustomerEmail }, use) => {

@@ -10,7 +10,7 @@ import { test, expect } from "@playwright/test";
 
 test("homepage renders hero + primary CTA", async ({ page }) => {
   await page.goto("/");
-  await expect(page).toHaveTitle(/Scootering/i);
+  await expect(page).toHaveTitle(/XPERT Moto/i);
   await expect(page.getByRole("link", { name: /book now/i }).first()).toBeVisible();
 });
 

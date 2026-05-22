@@ -22,7 +22,7 @@ Invoke if any of:
 
 ```bash
 # 1. Confirm deploy id matches recent Payments release
-gh release view --repo scootering/scootering | head -10
+gh release view --repo vladisimo/xpertmoto | head -10
 
 # 2. Pull last hour of payment errors
 psql "$DATABASE_URL" -c "

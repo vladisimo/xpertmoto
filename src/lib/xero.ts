@@ -1,3 +1,4 @@
+import { getBranding } from "@/lib/branding";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { getSecret, getString } from "@/lib/integration-config";
@@ -156,6 +157,7 @@ export async function syncInvoice(invoiceId: string): Promise<"pushed" | "skippe
     ? (invoice.lineItems as Array<{ description?: string; quantity?: number; unitAmount?: number }>)
     : [];
 
+  const { siteName } = await getBranding();
   const body = {
     Type: "ACCREC",
     Contact: {
@@ -167,7 +169,7 @@ export async function syncInvoice(invoiceId: string): Promise<"pushed" | "skippe
     DueDate: invoice.dueDate?.toISOString().split("T")[0],
     LineAmountTypes: "Inclusive",
     LineItems: lineItems.map((li) => ({
-      Description: li.description ?? "Scootering hire",
+      Description: li.description ?? `${siteName} hire`,
       Quantity: li.quantity ?? 1,
       UnitAmount: li.unitAmount ?? Number(invoice.totalAmount),
       TaxType: "OUTPUT",

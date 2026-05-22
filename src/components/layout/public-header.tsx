@@ -48,17 +48,13 @@ const SCROLL_THRESHOLD = 8;
 // needs dark text to stay legible. Scrolled state is always dark with white text.
 const LIGHT_BG_ROUTES = ["/booking"];
 
-// Routes that always render the solid dark header (no transparent unscrolled state).
-const SOLID_BG_ROUTES = [
-  "/fleet",
-  "/locations",
-  "/pricing",
-  "/contact",
-  "/faq",
-  "/terms",
-  "/privacy",
-  "/refund-policy",
-];
+// Routes that intentionally pull a dark hero up behind the fixed header
+// (via `-mt-20` on the hero section), so the unscrolled navbar can stay
+// transparent with white text and remain legible against the image.
+// Every other route gets the solid dark header by default — otherwise the
+// white-on-transparent navbar disappears over a light page background until
+// the user scrolls.
+const TRANSPARENT_BG_ROUTES = ["/", "/tours"];
 
 type HeaderUser = {
   name: string | null;
@@ -90,11 +86,14 @@ export function PublicHeader({ user, signOutAction }: PublicHeaderProps) {
   const pathname = usePathname();
   const onBooking = pathname.startsWith("/booking");
   const lightBg = LIGHT_BG_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
-  // /booking is always solid + dark — the wizard shouldn't render against
-  // a transparent hero overlay, and the logo + nav must stay readable as
-  // the user scrolls through forms with light backgrounds underneath.
-  const forceSolid =
-    onBooking || SOLID_BG_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
+  // Only the routes that explicitly pull a dark hero up behind the navbar
+  // get the transparent unscrolled state. Everything else is solid so the
+  // navbar text stays legible against the page bg. `/booking` is also
+  // always solid — the wizard shouldn't render against a transparent hero
+  // overlay, and the logo + nav must stay readable as the user scrolls
+  // through forms with light backgrounds underneath.
+  const hasTransparentHero = TRANSPARENT_BG_ROUTES.includes(pathname);
+  const forceSolid = onBooking || !hasTransparentHero;
   const solid = scrolled || forceSolid;
   const darkText = lightBg && !solid;
 
@@ -108,7 +107,7 @@ export function PublicHeader({ user, signOutAction }: PublicHeaderProps) {
   return (
     <header
       className={cn(
-        "fixed inset-x-0 top-0 z-50 transition-colors duration-300",
+        "fixed inset-x-0 top-0 z-50 pt-[env(safe-area-inset-top)] transition-colors duration-300",
         solid
           ? "border-b border-white/10 bg-black/85 backdrop-blur-md"
           : "border-b border-transparent bg-transparent",

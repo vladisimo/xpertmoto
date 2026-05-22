@@ -2,8 +2,8 @@ import { test as setup, expect } from "@playwright/test";
 import { STORAGE_STATE } from "../../playwright.config";
 
 const CUSTOMER = { email: "sarah.smith@example.com", password: "customer1234" };
-const STAFF = { email: "staff.gold-coast@scootering.com.au", password: "staff1234" };
-const ADMIN = { email: "admin@scootering.com.au", password: "admin1234" };
+const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
+const ADMIN = { email: "admin@xpertmoto.com.au", password: "admin1234" };
 
 async function login(
   page: import("@playwright/test").Page,

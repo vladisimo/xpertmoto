@@ -1,7 +1,7 @@
 # Grafana dashboards — payments
 
 This folder holds the committed Grafana dashboard JSON used by the
-`Scootering — Payments Overview` dashboard. Panels source from the
+`XPERT Moto — Payments Overview` dashboard. Panels source from the
 `/api/metrics` Prometheus scrape endpoint (see [G14](../risk-register.md)).
 
 ## Import
@@ -15,14 +15,14 @@ This folder holds the committed Grafana dashboard JSON used by the
 
 ```yaml
 scrape_configs:
-  - job_name: scootering
+  - job_name: xpertmoto
     metrics_path: /api/metrics
     scheme: https
     authorization:
       type: Bearer
-      credentials_file: /etc/prometheus/scootering-metrics-token
+      credentials_file: /etc/prometheus/xpertmoto-metrics-token
     static_configs:
-      - targets: ['scootering.com.au']
+      - targets: ['xpertmoto.com.au']
 ```
 
 Generate the token and store it in `SystemSetting`:

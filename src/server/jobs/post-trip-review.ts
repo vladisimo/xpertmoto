@@ -118,7 +118,7 @@ export async function runPostTripReview(
 
     // Ensure customer has a referral code for the share CTA.
     const referralCode = await ensureReferralCode(prisma, b.customerId);
-    const appUrl = process.env.APP_URL ?? "https://scootering.com.au";
+    const appUrl = process.env.APP_URL ?? "https://xpertmoto.com.au";
     const reviewUrl = `${appUrl}/reviews/new?booking=${b.bookingReference}`;
 
     const { siteName } = await getBranding();

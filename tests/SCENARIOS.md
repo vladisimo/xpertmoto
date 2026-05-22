@@ -1,4 +1,4 @@
-# Scootering — Scenario Coverage Matrix
+# XPERT Moto — Scenario Coverage Matrix
 
 Every user, operator, and system scenario in the platform, mapped to the test
 that covers it. Derived from the plan at

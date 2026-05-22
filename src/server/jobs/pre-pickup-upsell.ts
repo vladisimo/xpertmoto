@@ -96,7 +96,7 @@ export async function runPrePickupUpsell(
     }
 
     const acceptUrl =
-      (process.env.APP_URL ?? "https://scootering.com.au") +
+      (process.env.APP_URL ?? "https://xpertmoto.com.au") +
       `/dashboard/bookings/${b.id}?upsellInsuranceId=${zeroExcess.id}`;
     const dailyRate = Number(zeroExcess.dailyRate);
     const totalDays = b.durationDays;

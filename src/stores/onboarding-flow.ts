@@ -140,7 +140,7 @@ export const useOnboardingFlow = create<OnboardingFlowState>()(
         }),
     }),
     {
-      name: "scootering-onboarding-flow",
+      name: "xpertmoto-onboarding-flow",
       // Drop the signature data URL on serialisation. Keeping it in
       // localStorage is a PII / size hazard — re-prompt for signature on
       // resume, the rest of the form repopulates.

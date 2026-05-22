@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Scootering background worker entrypoint.
+ * XPERT Moto background worker entrypoint.
  *
  * Boots a single Node process that holds a BullMQ Worker for every queue
  * in the system, plus registers the repeatable schedules from CLAUDE.md:
@@ -73,12 +73,12 @@ if (process.env.SENTRY_DSN) {
     environment: process.env.NODE_ENV,
     tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
     enabled: process.env.NODE_ENV !== "test",
-    serverName: "scootering-worker",
+    serverName: "xpertmoto-worker",
   });
 }
 
 async function main() {
-  log.info("starting Scootering background worker…");
+  log.info("starting XPERT Moto background worker…");
   const redis = getRedis();
   if (!redis) {
     log.warn("REDIS_URL not set — nothing to run. Exiting.");

@@ -27,6 +27,7 @@ import {
   IntegrationsTabApiKeys,
 } from "@/components/admin/integration-tabs";
 import { IntegrationsStats } from "@/components/admin/integrations-stats";
+import { useBranding } from "@/components/shared/branding-provider";
 
 const TABS = [
   { value: "overview", label: "Overview", icon: LayoutGrid },
@@ -42,6 +43,7 @@ const TABS = [
 export default function AdminIntegrationsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { siteName } = useBranding();
   const activeTab = searchParams.get("tab") ?? "overview";
   const { data: overview, isLoading } = trpc.admin.integrationsOverview.useQuery();
 
@@ -56,7 +58,7 @@ export default function AdminIntegrationsPage() {
       <PageHeader
         eyebrow="Administration"
         title="Integrations"
-        description="Connection status and management for every external service Scootering uses."
+        description={`Connection status and management for every external service ${siteName} uses.`}
       />
 
       <IntegrationsStats overview={overview} loading={isLoading} />

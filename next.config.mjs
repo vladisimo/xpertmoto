@@ -3,6 +3,24 @@ import { withSentryConfig } from "@sentry/nextjs";
 /** @type {import('next').NextConfig} */
 const isDev = process.env.NODE_ENV !== "production";
 
+// Object-storage origin (S3/MinIO) for CSP img-src and next/image
+// remotePatterns. Parsed from S3_PUBLIC_URL (preferred) or S3_ENDPOINT so
+// the allow-lists track the configured bucket host without a code edit.
+// A misconfigured prod host that still points at localhost will be visible
+// here in the rendered CSP rather than only as failed image loads.
+function parseStorageOrigin(raw) {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return { protocol: u.protocol.replace(":", ""), hostname: u.hostname, origin: u.origin };
+  } catch {
+    return null;
+  }
+}
+const storageOrigin =
+  parseStorageOrigin(process.env.S3_PUBLIC_URL) ??
+  parseStorageOrigin(process.env.S3_ENDPOINT);
+
 // Next.js dev server compiles modules with `eval` for fast HMR, and the
 // React Refresh runtime evaluates fresh code on every hot update. Both
 // trip `script-src` without 'unsafe-eval'. Production builds emit only
@@ -21,11 +39,23 @@ const scriptSrc = [
 // security tier adds a middleware.ts that issues per-request nonces and
 // tightens to strict-dynamic. Shipping report-only here first so we see
 // real violations before enforcing.
+const imgSrc = [
+  "'self'",
+  "data:",
+  "blob:",
+  "https://*.s3.ap-southeast-2.amazonaws.com",
+  "https://files.stripe.com",
+  "https://*.googleusercontent.com",
+  storageOrigin ? storageOrigin.origin : null,
+]
+  .filter(Boolean)
+  .join(" ");
+
 const cspDirectives = [
   "default-src 'self'",
   `script-src ${scriptSrc}`,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://*.s3.ap-southeast-2.amazonaws.com https://files.stripe.com https://*.googleusercontent.com",
+  `img-src ${imgSrc}`,
   "font-src 'self' data:",
   `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io${
     process.env.NEXT_PUBLIC_MAP_STYLE_URL
@@ -99,10 +129,13 @@ const nextConfig = {
       { protocol: "http", hostname: "localhost" },
       { protocol: "https", hostname: "*.s3.ap-southeast-2.amazonaws.com" },
       { protocol: "https", hostname: "s3.ap-southeast-2.amazonaws.com" },
-      { protocol: "https", hostname: "www.scootering.com.au" },
-      { protocol: "https", hostname: "scootering.com.au" },
+      { protocol: "https", hostname: "www.xpertmoto.com.au" },
+      { protocol: "https", hostname: "xpertmoto.com.au" },
       { protocol: "https", hostname: "files.stripe.com" },
       { protocol: "https", hostname: "*.googleusercontent.com" },
+      ...(storageOrigin
+        ? [{ protocol: storageOrigin.protocol, hostname: storageOrigin.hostname }]
+        : []),
     ],
   },
   async headers() {

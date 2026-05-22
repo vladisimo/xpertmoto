@@ -7,7 +7,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useSession } from "next-auth/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronDown, ChevronRight, Eye, FileText, Info, Pencil } from "lucide-react";
+import { Eye, FileText, Info, Pencil } from "lucide-react";
 
 import { useBookingWizard } from "@/stores/booking-wizard";
 import { trpc } from "@/lib/trpc/client";
@@ -37,6 +37,7 @@ import {
 import { LoadingBlock } from "@/components/ui/spinner";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { IdentityUploadCard, type IdentityExtractedPatch } from "@/components/customer/identity-upload-card";
+import { LicenceDropzonePair } from "@/components/customer/licence-dropzone-pair";
 import { detailsStepSchema, type DetailsStepValues } from "@/lib/validators/booking";
 import { useBookingFlags } from "@/components/booking/booking-flags-context";
 import { InlineAuthPanel } from "@/components/booking/identity/inline-auth-panel";
@@ -116,22 +117,30 @@ export function StepDetails() {
 
   // Deep-link guard: a logged-in customer who hasn't completed
   // onboarding yet and lands directly on /booking/4 must be routed to
-  // /onboarding before they can keep going. Mirrors the pending2fa
-  // step-up redirect at the layout level — booking is unauthenticated-
-  // safe so the layout doesn't catch this case for us.
+  // /onboarding before they can keep going. Booking is unauthenticated-
+  // safe so the layout doesn't catch this case for us. pending2fa
+  // step-up takes priority over onboarding (see src/server/trpc/CLAUDE.md).
   useEffect(() => {
-    if (status === "authenticated" && session?.requiresOnboarding === true) {
+    if (status !== "authenticated") return;
+    if (session?.pending2fa === true) {
+      router.push(`/verify-2fa-step-up?next=${encodeURIComponent(STEP4_RETURN_PATH)}`);
+      return;
+    }
+    if (session?.requiresOnboarding === true) {
       router.push(`/onboarding?next=${encodeURIComponent(STEP4_RETURN_PATH)}`);
     }
-  }, [status, session?.requiresOnboarding, router]);
+  }, [status, session?.pending2fa, session?.requiresOnboarding, router]);
   const { data: me, refetch: refetchMe, isSuccess: meLoaded } = trpc.customer.me.useQuery(undefined, {
-    // Don't fire while the customer is being routed through /onboarding —
-    // the protectedProcedure gate would reject and surface a noisy error.
-    enabled: !!session?.user && session?.requiresOnboarding !== true,
+    // Don't fire while the customer is being routed through step-up or
+    // onboarding — the protectedProcedure gate would reject and surface
+    // a noisy error.
+    enabled:
+      !!session?.user &&
+      session?.pending2fa !== true &&
+      session?.requiresOnboarding !== true,
     staleTime: 60_000,
   });
   const updateProfile = trpc.customer.updateProfile.useMutation();
-  const [showBackUpload, setShowBackUpload] = useState(false);
   // Legacy passport toggle — only used when wizard_intl_licence_flow is OFF.
   // With the flag ON the binary AU-vs-IDP gate drives the UI, so this
   // state is ignored.
@@ -310,10 +319,13 @@ export function StepDetails() {
   });
 
   if (status === "loading") return <LoadingBlock padded="md" />;
-  // While the redirect-to-/onboarding useEffect runs, render a spinner
-  // instead of the form. Avoids flashing the licence inputs on a
-  // customer who is about to be bounced.
-  if (status === "authenticated" && session?.requiresOnboarding === true) {
+  // While the redirect-to-/verify-2fa-step-up or /onboarding useEffect
+  // runs, render a spinner instead of the form. Avoids flashing the
+  // licence inputs on a customer who is about to be bounced.
+  if (
+    status === "authenticated" &&
+    (session?.pending2fa === true || session?.requiresOnboarding === true)
+  ) {
     return <LoadingBlock padded="md" />;
   }
 
@@ -564,32 +576,11 @@ export function StepDetails() {
               />
 
               {w.identityPath === "AU_LICENCE" && (
-                <>
-                  <IdentityUploadCard
-                    kind="LICENCE_FRONT"
-                    currentImageUrl={profile?.licenceImageFront ?? null}
-                    currentExpiry={profile?.licenceExpiry ?? null}
-                    currentVerifiedAt={profile?.licenceVerifiedAt ?? null}
-                    onExtracted={applyExtractedPatch}
-                    onUploaded={() => refetchMe()}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowBackUpload((v) => !v)}
-                    className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-                  >
-                    {showBackUpload ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    {showBackUpload ? "Hide" : "Add"} back-of-licence photo (optional)
-                  </button>
-                  {showBackUpload && (
-                    <IdentityUploadCard
-                      kind="LICENCE_BACK"
-                      currentImageUrl={profile?.licenceImageBack ?? null}
-                      currentExpiry={null}
-                      onUploaded={() => refetchMe()}
-                    />
-                  )}
-                </>
+                <LicenceDropzonePair
+                  profile={profile ?? null}
+                  onExtracted={applyExtractedPatch}
+                  onUploaded={() => refetchMe()}
+                />
               )}
 
               {w.identityPath === "INTERNATIONAL" && (
@@ -625,30 +616,11 @@ export function StepDetails() {
             </>
           ) : (
             <>
-              <IdentityUploadCard
-                kind="LICENCE_FRONT"
-                currentImageUrl={profile?.licenceImageFront ?? null}
-                currentExpiry={profile?.licenceExpiry ?? null}
-                currentVerifiedAt={profile?.licenceVerifiedAt ?? null}
+              <LicenceDropzonePair
+                profile={profile ?? null}
                 onExtracted={applyExtractedPatch}
                 onUploaded={() => refetchMe()}
               />
-              <button
-                type="button"
-                onClick={() => setShowBackUpload((v) => !v)}
-                className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-              >
-                {showBackUpload ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                {showBackUpload ? "Hide" : "Add"} back-of-licence photo (optional)
-              </button>
-              {showBackUpload && (
-                <IdentityUploadCard
-                  kind="LICENCE_BACK"
-                  currentImageUrl={profile?.licenceImageBack ?? null}
-                  currentExpiry={null}
-                  onUploaded={() => refetchMe()}
-                />
-              )}
 
               <label className="flex items-start gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm">
                 <input

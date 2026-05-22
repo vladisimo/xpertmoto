@@ -1,4 +1,4 @@
-# XPERT Moto / Scootering — Claude Code project context
+# XPERT Moto — Claude Code project context
 
 This file is loaded into every Claude Code turn in this repo. It is the
 top-level contract; topic-specific rules live in **per-folder CLAUDE.md** files
@@ -28,8 +28,8 @@ complete; **Phase 6 (Polish) is in flight** — error handling, Sentry, PDF,
 SMS, BullMQ jobs, and CI are wired up; per-router unit-test coverage is the
 biggest remaining gap.
 
-The actual codebase has expanded well beyond the original spec — ~117 Prisma
-models, ~43 tRPC routers, ~70 service modules, 27 React Email templates. See
+The actual codebase has expanded well beyond the original spec — 117 Prisma
+models, 44 tRPC routers, 88 service modules, 27 React Email templates. See
 the `project_codebase_scope` memory for context.
 
 **Locale:** en-AU. **Currency:** AUD (GST-inclusive at 10%, divide-by-11).
@@ -38,7 +38,7 @@ the `project_codebase_scope` memory for context.
 
 ---
 
-## Authoritative tech stack (April 2026)
+## Authoritative tech stack (May 2026)
 
 The dependency list in [package.json](package.json) is the source of truth.
 Additions or swaps require explicit user approval. The PreToolUse hook
@@ -163,7 +163,7 @@ session should never miss.
 
 ```
 scootering/
-├── prisma/                  # Schema (~117 models), 63+ migrations, seed
+├── prisma/                  # Schema (117 models), 62 migrations, seed
 ├── src/
 │   ├── app/                 # Next.js App Router (route groups by audience)
 │   │   ├── (public)/        # Marketing + booking wizard
@@ -174,8 +174,8 @@ scootering/
 │   │   ├── (onboarding)/    # TOTP enrolment, vehicle-owner signup
 │   │   └── api/             # tRPC, webhooks (stripe/twilio), cron, health
 │   ├── server/
-│   │   ├── trpc/router/     # ~43 tRPC routers — see src/server/trpc/CLAUDE.md
-│   │   ├── services/        # ~70 business-logic modules
+│   │   ├── trpc/router/     # 44 tRPC routers — see src/server/trpc/CLAUDE.md
+│   │   ├── services/        # 88 business-logic modules
 │   │   └── jobs/            # BullMQ workers (Australia/Brisbane TZ — gotcha)
 │   ├── lib/                 # Auth, branding, money, logger — see src/lib/CLAUDE.md
 │   ├── components/

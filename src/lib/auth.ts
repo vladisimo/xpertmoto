@@ -106,6 +106,11 @@ declare module "next-auth" {
     // sessions. Cleared on the next `useSession().update()` after
     // `onboarding.complete` succeeds.
     requiresOnboarding?: boolean;
+    // Set on first sign-in for back-office roles when the user also has a
+    // customerProfile row — drives the post-login `/portal-select` page so
+    // a staff/manager/admin who personally books vehicles can choose
+    // between the customer portal and their back-office workspace.
+    hasCustomerProfile?: boolean;
   }
   interface User {
     role?: UserRole;
@@ -339,7 +344,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // supports Resend, SMTP, and a console fallback.
     Nodemailer({
       server: { host: "unused", port: 0 },
-      from: "no-reply@scootering.com.au",
+      from: "no-reply@xpertmoto.com.au",
       maxAge: MAGIC_LINK_TTL_MINUTES * 60,
       async sendVerificationRequest({ identifier, url }) {
         const maskedEmail = maskEmail(identifier);
@@ -660,6 +665,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             if (needsOnboarding(profile)) {
               t.requiresOnboarding = true;
             }
+          } else {
+            const profile = await prisma.customerProfile.findUnique({
+              where: { userId: user.id as string },
+              select: { id: true },
+            });
+            if (profile) {
+              t.hasCustomerProfile = true;
+            }
           }
         }
         return token;
@@ -727,6 +740,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.impersonatorId = (t.impersonatorId as string | null) ?? null;
         session.pending2fa = t.pending2fa === true ? true : undefined;
         session.requiresOnboarding = t.requiresOnboarding === true ? true : undefined;
+        session.hasCustomerProfile = t.hasCustomerProfile === true ? true : undefined;
       }
       return session;
     },

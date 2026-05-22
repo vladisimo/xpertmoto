@@ -92,7 +92,16 @@ export function MobileCalendarFallback() {
     () => Array.from({ length: 14 }, (_, i) => addDays(today, i)),
     [today],
   );
-  const [selected, setSelected] = React.useState<Date>(today);
+  const [rawSelected, setSelected] = React.useState<Date>(today);
+
+  // When the day rolls over (midnight or visibilitychange brings the tab
+  // back the next morning) `today` advances and the chip strip regenerates.
+  // Clamp during render so a stale `rawSelected` that's now outside the
+  // window snaps forward — without it, the agenda silently renders
+  // yesterday under today's header.
+  const selected = days.some((d) => isSameDay(d, rawSelected))
+    ? rawSelected
+    : today;
 
   const start = React.useMemo(() => startOfDay(selected).toISOString(), [selected]);
   const end = React.useMemo(() => endOfDay(selected).toISOString(), [selected]);

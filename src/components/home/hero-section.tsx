@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { HeroCarousel, type HeroSlide } from "@/components/marketing/hero-carousel";
 import { HeroAvailabilityWidget } from "@/components/home/hero-availability-widget";
 
@@ -19,13 +19,10 @@ export function HeroSection({
   secondaryCta,
 }: HeroSectionProps) {
   const [showWidget, setShowWidget] = useState(false);
-  const widgetRef = useRef<HTMLDivElement>(null);
 
   const openWidget = () => {
     setShowWidget(true);
-    requestAnimationFrame(() => {
-      widgetRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   return (
@@ -36,7 +33,7 @@ export function HeroSection({
         title={title}
         description={description}
         primaryCta={{
-          label: "Check Availability",
+          label: "Find Available Bikes for Your Dates",
           onClick: openWidget,
         }}
         secondaryCta={secondaryCta}
@@ -45,7 +42,7 @@ export function HeroSection({
         <>
           <div className="container relative z-10 pb-12 md:absolute md:inset-x-0 md:top-0 md:h-full md:pb-0">
             <div className="md:pointer-events-none md:flex md:h-full md:items-center md:justify-end">
-              <div ref={widgetRef} className="scroll-mt-24 md:pointer-events-auto md:w-[560px]">
+              <div className="md:pointer-events-auto md:w-[560px]">
                 <HeroAvailabilityWidget onDismiss={() => setShowWidget(false)} />
               </div>
             </div>

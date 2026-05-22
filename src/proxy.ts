@@ -6,7 +6,7 @@ const STAFF_ROLES = new Set(["STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"]);
 const MANAGER_ROLES = new Set(["MANAGER", "ADMIN", "SUPER_ADMIN"]);
 const ADMIN_ROLES = new Set(["ADMIN", "SUPER_ADMIN"]);
 
-const VISITOR_COOKIE = "scootering_vid";
+const VISITOR_COOKIE = "xpertmoto_vid";
 const VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 
 /**

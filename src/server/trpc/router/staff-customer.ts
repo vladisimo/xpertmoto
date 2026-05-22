@@ -3468,7 +3468,7 @@ function keyFromStorageRef(raw: string): string {
     try {
       const u = new URL(raw);
       const parts = u.pathname.replace(/^\//, "").split("/");
-      const bucket = process.env.S3_BUCKET ?? "scootering";
+      const bucket = process.env.S3_BUCKET ?? "xpertmoto";
       if (parts[0] === bucket) parts.shift();
       return parts.join("/");
     } catch {

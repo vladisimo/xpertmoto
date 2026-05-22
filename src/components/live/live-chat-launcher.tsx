@@ -19,7 +19,7 @@ type Msg = {
  * Floating launcher on every public page. Appears ONLY when at least one
  * staff member has the live-view open. Opens a chat panel that reuses the
  * same message primitives as the support widget; messages are keyed to
- * the `scootering_vid` cookie so a visitor's thread follows them across
+ * the `xpertmoto_vid` cookie so a visitor's thread follows them across
  * pages without any extra state.
  */
 export function LiveChatLauncher() {

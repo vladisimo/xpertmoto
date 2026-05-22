@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
  * when the seed isn't present so CI doesn't fail on fresh databases.
  */
 
-const STAFF = { email: "staff.gold-coast@scootering.com.au", password: "staff1234" };
+const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/login");

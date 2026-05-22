@@ -30,7 +30,7 @@ import { PrismaClient } from "@prisma/client";
 
 async function main() {
   const prisma = new PrismaClient();
-  const dbName = new URL(process.env.DATABASE_URL ?? "postgres://localhost/scootering").pathname.slice(1);
+  const dbName = new URL(process.env.DATABASE_URL ?? "postgres://localhost/xpertmoto").pathname.slice(1);
 
   const child = spawn("npx", ["vitest", "run", "tests/integration/booking-flow.test.ts"], {
     stdio: "inherit",

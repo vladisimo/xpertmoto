@@ -12,7 +12,7 @@ export function SilenceExtensionHydrationWarning() {
       const joined = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
       if (
         (msg.includes("hydrated") || msg.includes("hydration")) &&
-        /fdprocessedid|bis_skin_checked|cz-shortcut-listen|__gchrome_|__gcruniqueid/i.test(joined)
+        /fdprocessedid|bis_skin_checked|cz-shortcut-listen|__gchrome_|__gcr/i.test(joined)
       ) {
         return;
       }

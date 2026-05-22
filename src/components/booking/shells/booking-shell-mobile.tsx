@@ -30,7 +30,7 @@ export function BookingShellMobile({ children }: { children: React.ReactNode }) 
   return (
     <WizardShellLayoutProvider layout="mobile">
       <div className="flex min-h-[100svh] flex-col bg-background">
-      <header className="sticky top-14 z-30 flex items-center justify-between border-b border-border bg-muted/95 px-3 py-2 backdrop-blur">
+      <header className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-30 flex items-center justify-between border-b border-border bg-muted/95 px-3 py-2 backdrop-blur">
         {step > 1 ? (
           <button
             type="button"

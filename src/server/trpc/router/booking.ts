@@ -52,6 +52,12 @@ import BookingModified from "../../../../emails/booking-modified";
 
 const quoteInput = z.object({
   categoryId: z.string(),
+  // Optional: a specific vehicle the customer pre-selected in the wizard.
+  // When set, quote() resolves the base rate through the
+  // vehicle → model → category cascade and renders the model name in the
+  // base line item. Not used to allocate stock — allocation still happens
+  // at check-out unless the staff flow pre-allocates explicitly.
+  vehicleId: z.string().optional(),
   pickupDepotId: z.string(),
   returnDepotId: z.string(),
   pickupDateTime: z.coerce.date(),
@@ -445,6 +451,7 @@ export const bookingRouter = createTRPCRouter({
     try {
       return await quotePricing(ctx.prisma, {
         categoryId: input.categoryId,
+        vehicleId: input.vehicleId,
         pickupDateTime: input.pickupDateTime,
         returnDateTime: input.returnDateTime,
         pickupDepotId: input.pickupDepotId,

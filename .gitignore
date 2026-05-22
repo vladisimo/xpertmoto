@@ -24,6 +24,10 @@ dist
 # regenerated locally via seed/upload flows. NEVER commit these.
 /public/uploads/
 
+# Scraped marketing data (xpertmoto.com.au public site export)
+/xpertmoto-fleet.xlsx
+/xpertmoto-fleet.debug.json
+
 # Build artefacts
 /tsconfig.tsbuildinfo
 

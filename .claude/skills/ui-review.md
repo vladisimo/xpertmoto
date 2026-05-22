@@ -1,12 +1,12 @@
 ---
 name: ui-review
-description: Audit UI changes in the Scootering app against the UI/UX Contract in CLAUDE.md. Run after editing any file under src/app/** or src/components/** before marking the work done. Reports file:line violations and the contract-compliant replacement.
+description: Audit UI changes in the XPERT Moto app against the UI/UX Contract in CLAUDE.md. Run after editing any file under src/app/** or src/components/** before marking the work done. Reports file:line violations and the contract-compliant replacement.
 ---
 
 # UI Review
 
 You are auditing the files that were edited in this session against the
-Scootering UI/UX Contract. Your output must be a concrete list of violations
+XPERT Moto UI/UX Contract. Your output must be a concrete list of violations
 with file:line references and the fix. Do not be vague.
 
 ## Files to audit

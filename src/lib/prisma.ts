@@ -150,7 +150,7 @@ function createExtendedPrisma() {
   };
 
   return client.$extends({
-    name: "scootering-lifecycle",
+    name: "xpertmoto-lifecycle",
     query: {
       $allModels: {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

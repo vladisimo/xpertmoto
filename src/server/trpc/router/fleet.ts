@@ -940,6 +940,10 @@ export const fleetRouter = createTRPCRouter({
         purchaseDate: z.coerce.date().nullable().optional(),
         depreciationMethod: z.enum(["STRAIGHT_LINE", "DIMINISHING_VALUE"]).nullable().optional(),
         depreciationRate: z.number().nonnegative().nullable().optional(),
+        // Pricing — per-vehicle overrides of the per-model defaults.
+        // Set null to clear an override and re-inherit from the model.
+        baseRateOverride: z.number().nonnegative().nullable().optional(),
+        basePeriodHoursOverride: z.enum(["H24", "H48"]).nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {

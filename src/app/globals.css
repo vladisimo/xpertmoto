@@ -74,6 +74,32 @@
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
+
+  /* iOS Safari auto-zooms any form control whose font-size resolves to
+     < 16px when focused. The page snaps in, the layout shifts under the
+     keyboard, and users perceive the input as broken. Force every native
+     text-entry control to 16px under the sm breakpoint. Attribute
+     selectors give the rule enough specificity to beat Tailwind's
+     `text-sm` utility without `!important`. */
+  @media (max-width: 639px) {
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    input[type="number"],
+    input[type="search"],
+    input[type="tel"],
+    input[type="url"],
+    input[type="date"],
+    input[type="datetime-local"],
+    input[type="month"],
+    input[type="time"],
+    input[type="week"],
+    input:not([type]),
+    textarea,
+    select {
+      font-size: 16px;
+    }
+  }
 }
 
 @layer components {
@@ -221,8 +247,8 @@
   }
 }
 
-/* FullCalendar — Scootering brand overrides */
-.fc-scootering {
+/* FullCalendar — XPERT Moto brand overrides */
+.fc-calendar {
   --fc-border-color: hsl(var(--border));
   --fc-page-bg-color: hsl(var(--background));
   --fc-neutral-bg-color: hsl(var(--muted));
@@ -232,12 +258,12 @@
   font-family: inherit;
 }
 
-.fc-scootering .fc-toolbar-title {
+.fc-calendar .fc-toolbar-title {
   font-size: 1.25rem !important;
   font-weight: 700;
 }
 
-.fc-scootering .fc-button {
+.fc-calendar .fc-button {
   @apply rounded-md text-sm font-medium shadow-sm;
   background-color: hsl(var(--background)) !important;
   border-color: hsl(var(--border)) !important;
@@ -245,129 +271,129 @@
   padding: 0.375rem 0.75rem !important;
 }
 
-.fc-scootering .fc-button:hover {
+.fc-calendar .fc-button:hover {
   background-color: hsl(var(--muted)) !important;
 }
 
-.fc-scootering .fc-button-active,
-.fc-scootering .fc-button.fc-button-active {
+.fc-calendar .fc-button-active,
+.fc-calendar .fc-button.fc-button-active {
   background-color: hsl(var(--primary)) !important;
   border-color: hsl(var(--primary)) !important;
   color: hsl(var(--primary-foreground)) !important;
 }
 
-.fc-scootering .fc-today-button {
+.fc-calendar .fc-today-button {
   text-transform: capitalize !important;
 }
 
-.fc-scootering .fc-today-button:disabled {
+.fc-calendar .fc-today-button:disabled {
   opacity: 0.4 !important;
 }
 
-.fc-scootering .fc-col-header-cell {
+.fc-calendar .fc-col-header-cell {
   @apply text-xs font-semibold uppercase tracking-wider;
   color: hsl(var(--muted-foreground));
   padding: 0.5rem 0;
 }
 
-.fc-scootering .fc-daygrid-day-number {
+.fc-calendar .fc-daygrid-day-number {
   @apply text-sm font-medium p-1.5;
   color: hsl(var(--foreground));
 }
 
-.fc-scootering .fc-day-other .fc-daygrid-day-number {
+.fc-calendar .fc-day-other .fc-daygrid-day-number {
   color: hsl(var(--muted-foreground));
 }
 
-.fc-scootering .fc-daygrid-event {
+.fc-calendar .fc-daygrid-event {
   @apply rounded-sm text-xs;
   margin: 1px 2px;
   border: none;
 }
 
-.fc-scootering .fc-timegrid-event {
+.fc-calendar .fc-timegrid-event {
   @apply rounded-sm;
   border-left-width: 3px;
 }
 
-.fc-scootering .fc-popover {
+.fc-calendar .fc-popover {
   @apply rounded-lg shadow-lg border;
   background: hsl(var(--background));
   border-color: hsl(var(--border));
   z-index: 50;
 }
 
-.fc-scootering .fc-popover-header {
+.fc-calendar .fc-popover-header {
   @apply text-sm font-semibold px-3 py-2;
   background: hsl(var(--muted));
   color: hsl(var(--foreground));
   border-radius: 0.5rem 0.5rem 0 0;
 }
 
-.fc-scootering .fc-popover-body {
+.fc-calendar .fc-popover-body {
   @apply px-2 py-1;
   max-height: 16rem;
   overflow-y: auto;
 }
 
-.fc-scootering .fc-more-link {
+.fc-calendar .fc-more-link {
   @apply text-xs font-semibold;
   color: hsl(var(--primary));
 }
 
-.fc-scootering .fc-more-link:hover {
+.fc-calendar .fc-more-link:hover {
   text-decoration: underline;
 }
 
-.fc-scootering .fc-list-event:hover td {
+.fc-calendar .fc-list-event:hover td {
   background-color: hsl(var(--muted)) !important;
   cursor: pointer;
 }
 
-.fc-scootering .fc-list-day-cushion {
+.fc-calendar .fc-list-day-cushion {
   @apply font-semibold text-sm;
   background: hsl(var(--muted));
 }
 
-.fc-scootering .fc-event {
+.fc-calendar .fc-event {
   cursor: pointer;
 }
 
-.fc-scootering .fc-daygrid-day {
+.fc-calendar .fc-daygrid-day {
   background-color: hsl(var(--background));
 }
 
-.fc-scootering .fc-daygrid-day.fc-day-sat,
-.fc-scootering .fc-daygrid-day.fc-day-sun {
+.fc-calendar .fc-daygrid-day.fc-day-sat,
+.fc-calendar .fc-daygrid-day.fc-day-sun {
   background-color: hsl(var(--muted));
 }
 
-.fc-scootering .fc-col-header-cell.fc-day-sat,
-.fc-scootering .fc-col-header-cell.fc-day-sun {
+.fc-calendar .fc-col-header-cell.fc-day-sat,
+.fc-calendar .fc-col-header-cell.fc-day-sun {
   background-color: hsl(var(--muted));
 }
 
-.fc-scootering .fc-daygrid-day.fc-day-today {
+.fc-calendar .fc-daygrid-day.fc-day-today {
   background-color: hsl(var(--primary) / 0.06);
 }
 
-.fc-scootering .fc-timegrid-slot {
+.fc-calendar .fc-timegrid-slot {
   height: auto;
   min-height: 1.5rem;
 }
 
 /* Prevent internal scrolling in timegrid views — slots compress to fit. */
-.fc-scootering .fc-timegrid .fc-scroller {
+.fc-calendar .fc-timegrid .fc-scroller {
   overflow: hidden !important;
 }
 
-.fc-scootering .fc-scrollgrid {
+.fc-calendar .fc-scrollgrid {
   border: 1px solid hsl(var(--foreground) / 0.2) !important;
   border-radius: 0.5rem;
   overflow: hidden;
 }
 
-.fc-scootering .fc-list {
+.fc-calendar .fc-list {
   border: 1px solid hsl(var(--foreground) / 0.2) !important;
   border-radius: 0.5rem;
   overflow: hidden;
@@ -376,7 +402,7 @@
 /* Keeps the FullCalendar toolbar chunk from overlapping the depot-filter
    widget on desktop. Using --depot-filter-width lets the depot-filter set
    its own width instead of hardcoding a pixel value. */
-.fc-scootering--with-depot-filter .fc-toolbar.fc-header-toolbar .fc-toolbar-chunk:last-child {
+.fc-calendar--with-depot-filter .fc-toolbar.fc-header-toolbar .fc-toolbar-chunk:last-child {
   margin-right: var(--depot-filter-width, 392px);
 }
 

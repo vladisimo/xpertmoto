@@ -17,14 +17,14 @@
 BEGIN;
 
 -- Pin the IDs we'll use so the script is deterministic.
---   Depot          : Scootering Lewisham
+--   Depot          : XPERT Moto Lewisham
 --   Category       : LAMS Motorcycle (cat-A for the swap — upgrade target
 --                    is "Unrestricted Motorcycle")
 --   Customer       : vladisimo@gmail.com
 --   Vehicle (out)  : MTB-13429 — AZJ57
 WITH refs AS (
   SELECT
-    (SELECT id FROM "Depot" WHERE name = 'Scootering Lewisham')               AS depot_id,
+    (SELECT id FROM "Depot" WHERE name = 'XPERT Moto Lewisham')               AS depot_id,
     (SELECT id FROM "VehicleCategory" WHERE name = 'LAMS Motorcycle')         AS category_id,
     (SELECT id FROM "User" WHERE email = 'vladisimo@gmail.com')               AS customer_id,
     (SELECT id FROM "Vehicle" WHERE "internalCode" = 'MTB-13429')             AS vehicle_id

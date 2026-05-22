@@ -31,7 +31,7 @@ interface FakeProfile {
   passportExpiry?: Date | null;
 }
 
-function makeTx(docs: FakeDoc[], profile: FakeProfile = {}) {
+function makeTx(docs: FakeDoc[], profile: FakeProfile | null = {}) {
   const updateCalls: Array<{ where: unknown; data: Record<string, unknown> }> = [];
   const tx = {
     customerDocument: {
@@ -76,6 +76,23 @@ describe("applyLatestDocumentToProfile", () => {
     );
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0]!.data).toEqual({ licenceImageBack: doc.fileUrl });
+  });
+
+  test("LICENCE_BACK returns silently when profile is missing", async () => {
+    const doc: FakeDoc = {
+      id: "d1",
+      fileUrl: "drivers/user-1/2026-04/back.jpg",
+      expiryDate: null,
+      metadata: null,
+      createdAt: new Date(),
+    };
+    const { tx, updateCalls } = makeTx([doc], null);
+    await applyLatestDocumentToProfile(
+      tx as unknown as Parameters<typeof applyLatestDocumentToProfile>[0],
+      "user-1",
+      "LICENCE_BACK",
+    );
+    expect(updateCalls).toHaveLength(0);
   });
 
   test("LICENCE_FRONT projects image and fills empty text fields from metadata", async () => {

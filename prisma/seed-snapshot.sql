@@ -28,7 +28,7 @@ SET SESSION AUTHORIZATION DEFAULT;
 ALTER TABLE public."Depot" DISABLE TRIGGER ALL;
 
 COPY public."Depot" (id, name, slug, "addressLine1", "addressLine2", suburb, state, postcode, country, latitude, longitude, phone, email, timezone, "maxCapacity", "isActive", "createdAt", "updatedAt", "deletedAt", "onCallUserId") FROM stdin;
-cmo4yrw3i0001ay1tw2e8y841	Scootering Lewisham	lewisham	798 Parramatta Road	\N	Lewisham	NSW	2049	Australia	\N	\N	+61 433 880 748	book@scootering.com.au	Australia/Sydney	50	t	2026-04-18 23:24:19.134	2026-04-18 23:24:19.134	\N	\N
+cmo4yrw3i0001ay1tw2e8y841	XPERT Moto Lewisham	lewisham	798 Parramatta Road	\N	Lewisham	NSW	2049	Australia	\N	\N	+61 433 880 748	book@xpertmoto.com.au	Australia/Sydney	50	t	2026-04-18 23:24:19.134	2026-04-18 23:24:19.134	\N	\N
 \.
 
 
@@ -43,7 +43,7 @@ ALTER TABLE public."User" DISABLE TRIGGER ALL;
 COPY public."User" (id, email, "emailVerified", phone, "phoneVerified", "passwordHash", "firstName", "lastName", "dateOfBirth", "avatarUrl", role, status, "depotId", "lastLoginAt", "createdAt", "updatedAt", "deletedAt", "failedLoginCount", "lastFailedLoginAt", "lockedUntil", "legacyDriverId", "legacyImportedAt") FROM stdin;
 cmo86hou90001ct3mhslyt8z0	elyeschieb@icloud.com	\N	+610412384409	\N	\N	Elyes	Chieb	1999-09-13	\N	CUSTOMER	SUSPENDED	\N	\N	2026-02-10 16:42:00	2026-04-21 05:28:05.376	2026-04-21 05:28:05.375	0	\N	\N	250676	2026-04-21 05:28:05.375+00
 cmo86huae065lct3mkower3an	danilo90.scarpo@gmail.com	\N	+610404441922	\N	\N	Danilo	Scarpo	1990-02-12	\N	CUSTOMER	ACTIVE	\N	\N	2025-02-03 13:27:00	2026-04-21 05:29:07.309	\N	0	\N	\N	231453	2026-04-21 05:29:07.308+00
-cmo4yrw8e0012ay1tigrvqjae	manager.lewisham@scootering.com.au	2026-04-18 23:24:19.31+00	\N	\N	$2a$10$oHj8Tk1qvnjlXMk4rTh3iODAqMAjv1Hm.HAvfQsXi/bPNhVFEx2S6	Manager	Lewisham	\N	\N	MANAGER	ACTIVE	cmo4yrw3i0001ay1tw2e8y841	2026-04-21 22:14:15.077+00	2026-04-18 23:24:19.311	2026-04-21 22:14:15.078	\N	0	\N	\N	\N	\N
+cmo4yrw8e0012ay1tigrvqjae	manager.lewisham@xpertmoto.com.au	2026-04-18 23:24:19.31+00	\N	\N	$2a$10$oHj8Tk1qvnjlXMk4rTh3iODAqMAjv1Hm.HAvfQsXi/bPNhVFEx2S6	Manager	Lewisham	\N	\N	MANAGER	ACTIVE	cmo4yrw3i0001ay1tw2e8y841	2026-04-21 22:14:15.077+00	2026-04-18 23:24:19.311	2026-04-21 22:14:15.078	\N	0	\N	\N	\N	\N
 cmo86houe0005ct3m75y32q5z	bacudmarithel@gmail.com	\N	+610433880748	\N	\N	Mari	Bacud	1995-12-20	\N	CUSTOMER	SUSPENDED	\N	\N	2025-12-23 11:33:00	2026-04-21 05:28:05.393	2026-04-21 05:28:05.392	0	\N	\N	248446	2026-04-21 05:28:05.392+00
 cmo86houh0009ct3m11oimcub	kenan.koray@hotmail.com	\N	+610452159730	\N	\N	Kenan	Tekyildiz	1986-03-12	\N	CUSTOMER	SUSPENDED	\N	\N	2025-12-09 09:18:00	2026-04-21 05:28:05.403	2026-04-21 05:28:05.402	0	\N	\N	247604	2026-04-21 05:28:05.402+00
 cmo86houl000dct3m4b8tztgt	testv2@xpertmoto.com.au	\N	+905433972101	\N	\N	WOJTEK	ZAWORSKI	\N	\N	CUSTOMER	SUSPENDED	\N	\N	2025-09-26 09:25:00	2026-04-21 05:28:05.414	2026-04-21 05:28:05.413	0	\N	\N	243619	2026-04-21 05:28:05.413+00
@@ -4465,7 +4465,7 @@ cmo86i2vr0e1hct3m238sl8hw	betzabe.fierro@gmail.com	\N	+610404129671	\N	\N	Betzab
 cmo86i2vt0e1lct3mczmwrvlm	jdhowsam@gmail.com	\N	+61477090947	\N	\N	James	Howsam	1983-09-28	\N	CUSTOMER	ACTIVE	\N	\N	2022-07-06 13:59:00	2026-04-21 05:52:12.396	\N	0	\N	\N	116509	2026-04-21 05:52:12.396+00
 cmo86i2vv0e1pct3m4cwqz79r	scottwbyers@gmail.com	\N	+610421752808	\N	\N	Scott	Byers	1982-09-25	\N	CUSTOMER	ACTIVE	\N	\N	2022-06-16 10:55:00	2026-04-21 05:52:12.508	\N	0	\N	\N	112256	2026-04-21 05:52:12.507+00
 cmo86i2vx0e1tct3mtx5m8kf8	sergio.lasuen@hotmail.es	\N	+610413630451	\N	\N	Sergio	Lasuen Garcia	1982-11-02	\N	CUSTOMER	ACTIVE	\N	\N	2022-03-09 17:55:00	2026-04-21 05:52:12.987	\N	0	\N	\N	81984	2026-04-21 05:52:12.987+00
-cmo4yrw840010ay1tapmuf28v	admin@scootering.com.au	2026-04-18 23:24:19.3+00	0457254560	\N	$2a$10$nC37VpDJBzjSyn1RPoghIeWoTOWK90ru4ZEy8/CZsq7WjjhLvK6PG	Vlad	Stanculescu	1985-01-26	\N	SUPER_ADMIN	ACTIVE	\N	2026-04-22 00:22:48.787+00	2026-04-18 23:24:19.301	2026-04-22 00:22:48.788	\N	0	\N	\N	\N	\N
+cmo4yrw840010ay1tapmuf28v	admin@xpertmoto.com.au	2026-04-18 23:24:19.3+00	0457254560	\N	$2a$10$nC37VpDJBzjSyn1RPoghIeWoTOWK90ru4ZEy8/CZsq7WjjhLvK6PG	Vlad	Stanculescu	1985-01-26	\N	SUPER_ADMIN	ACTIVE	\N	2026-04-22 00:22:48.787+00	2026-04-18 23:24:19.301	2026-04-22 00:22:48.788	\N	0	\N	\N	\N	\N
 cmo86hp2w00bdct3msjz297w3	ferdinando.collaro@gmail.com	\N	+393382117854	\N	\N	Ferdinando	Collaro	1997-12-09	\N	CUSTOMER	ACTIVE	\N	\N	2026-04-02 12:47:00	2026-04-21 05:28:15.672	\N	0	\N	\N	253188	2026-04-21 05:28:15.672+00
 cmo86hp5u00fdct3midqnxdj1	serhyl@hotmail.com	\N	+610437508049	\N	\N	Serge	Lamanov	1978-01-27	\N	CUSTOMER	ACTIVE	\N	\N	2026-03-25 12:52:00	2026-04-21 05:28:15.888	\N	0	\N	\N	252818	2026-04-21 05:28:15.887+00
 cmo86hp6p00gdct3mks999tzl	nermalmo@yahoo.com	\N	+12674089052	\N	\N	Robert	lukaszewski	1975-02-13	\N	CUSTOMER	ACTIVE	\N	\N	2026-03-23 09:18:00	2026-04-21 05:28:15.918	\N	0	\N	\N	252699	2026-04-21 05:28:15.917+00
@@ -4597,7 +4597,7 @@ cmo86i2rz0dv5ct3mdo48bd7o	ofviallejr@hotmail.com	\N	+610424620301	\N	\N	Orlando	
 cmo86i2tf0dxdct3mr4w9t7ky	alirazatarar145@gmail.com	\N	+610450476628	\N	\N	Ali	RAZA	1996-07-27	\N	CUSTOMER	ACTIVE	\N	\N	2023-07-04 14:34:00	2026-04-21 05:52:07.644	\N	0	\N	\N	192296	2026-04-21 05:52:07.643+00
 cmo86i2v80e0hct3mb78zqhr4	raphaelf.monteiro@hotmail.com	\N	+610452432550	\N	\N	Raphael	FERREIRA MONTEIRO	1998-11-27	\N	CUSTOMER	ACTIVE	\N	\N	2023-07-04 14:34:00	2026-04-21 05:52:09.488	\N	0	\N	\N	192267	2026-04-21 05:52:09.487+00
 cmo8dr3ty001tk4j9mzwaekq6	vladisimo@gmail.com	\N	0457254560	\N	$2a$10$Ly/In.35hJ2c6yZvqMPDe.9tnUvb6X1MZC016Gwj0mEO1AC7jAS8.	VLAD	STANCULESCU	1985-01-26	\N	CUSTOMER	ACTIVE	\N	2026-04-21 22:45:26.017+00	2026-04-21 08:46:55.271	2026-04-21 22:45:26.018	\N	0	\N	\N	\N	\N
-cmo4yrw8l0016ay1tyygr7x1e	staff.lewisham@scootering.com.au	2026-04-18 23:24:19.316+00	\N	\N	$2a$10$oHj8Tk1qvnjlXMk4rTh3iODAqMAjv1Hm.HAvfQsXi/bPNhVFEx2S6	Staff	Lewisham	\N	\N	STAFF	ACTIVE	cmo4yrw3i0001ay1tw2e8y841	2026-04-21 22:13:55.487+00	2026-04-18 23:24:19.317	2026-04-21 22:13:55.488	\N	0	\N	\N	\N	\N
+cmo4yrw8l0016ay1tyygr7x1e	staff.lewisham@xpertmoto.com.au	2026-04-18 23:24:19.316+00	\N	\N	$2a$10$oHj8Tk1qvnjlXMk4rTh3iODAqMAjv1Hm.HAvfQsXi/bPNhVFEx2S6	Staff	Lewisham	\N	\N	STAFF	ACTIVE	cmo4yrw3i0001ay1tw2e8y841	2026-04-21 22:13:55.487+00	2026-04-18 23:24:19.317	2026-04-21 22:13:55.488	\N	0	\N	\N	\N	\N
 \.
 
 
@@ -20652,7 +20652,7 @@ ALTER TABLE public."OneWayFee" ENABLE TRIGGER ALL;
 ALTER TABLE public."Organisation" DISABLE TRIGGER ALL;
 
 COPY public."Organisation" (id, name, abn, "logoUrl", settings, "createdAt", "updatedAt") FROM stdin;
-cmo4yrw3g0000ay1tr0a7zihi	Scootering Pty Ltd	72 629 456 408	\N	{"acn": "629 456 408", "gstRate": 0.1, "currency": "AUD"}	2026-04-18 23:24:19.133	2026-04-18 23:24:19.133
+cmo4yrw3g0000ay1tr0a7zihi	XPERT Moto Group Pty Ltd	72 629 456 408	\N	{"acn": "629 456 408", "gstRate": 0.1, "currency": "AUD"}	2026-04-18 23:24:19.133	2026-04-18 23:24:19.133
 \.
 
 
@@ -21161,7 +21161,7 @@ cmo8ajwf300bg9usillvez1cy	org.faviconUrl	"/uploads/branding/48cba0a0-7200-4596-8
 cmo4yrwm500bhay1tck6ed5b4	org.tradingName	"XPERT Moto"	organisation	Public-facing brand name used in emails and page titles.	cmo4yrw840010ay1tapmuf28v	2026-04-21 07:17:42.049
 cmo4yrwma00bjay1t4unmfcwt	org.supportPhone	"+61 433 880 748"	organisation	Customer support phone number shown in transactional emails.	cmo4yrw840010ay1tapmuf28v	2026-04-21 07:18:09.425
 cmo4yrwm300bgay1tio6t9j6g	org.invoiceFooter	"Powered by dFortix.ai"	organisation	Free-text block appended to the bottom of every invoice PDF.	cmo4yrw840010ay1tapmuf28v	2026-04-21 07:18:26.782
-cmo8kx530003cn2mo771v8t7e	integration:vapid:contact	{"type": "string", "value": "admin@scootering.com.au"}	integration:vapid	\N	\N	2026-04-21 12:07:34.14
+cmo8kx530003cn2mo771v8t7e	integration:vapid:contact	{"type": "string", "value": "admin@xpertmoto.com.au"}	integration:vapid	\N	\N	2026-04-21 12:07:34.14
 cmo8uan8h019n9p02iczrg521	reconcile:stripe:lastCheckpointCreated	{"iv": "ef3TmS+4Izpn0pCD", "enc": "WxB/iu6igZMQhg==", "tag": "hDQBFr0xkbWpddSgBSG28Q==", "type": "secret"}	integration:stripe	\N	\N	2026-04-21 16:30:00.737
 cmo8kwqym0032n2moapnjox61	integration:vapid:publicKey	{"type": "string", "value": "BFihqitPHWoeHpWvtHneH1E52pdgC3EW8VlPOaQOayssJujinK9A-_1ZkXrPKHkIK2k_0qcBECQn_ArqzTeW7CM"}	integration:vapid	\N	\N	2026-04-21 12:14:52.822
 cmo8kwqz10034n2mo5c8oqu0h	integration:vapid:privateKey	{"iv": "qDRaFmSg3MX6Q7Eg", "enc": "GRwQHnUgbJzaXmiHwxfSuTO0jsScUHABDUxgnjtI514GojjdNfq7PWMgTQ==", "tag": "M05nkm4Hq2XtxXj76SleAQ==", "type": "secret"}	integration:vapid	\N	\N	2026-04-21 12:14:52.836

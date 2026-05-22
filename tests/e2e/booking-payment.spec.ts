@@ -4,10 +4,10 @@ import { test, expect } from "@playwright/test";
  * G15 — E2E booking → payment → confirmation against real Stripe test mode.
  *
  * Requires the following environment in CI or local dev:
- *   - STRIPE_TEST_SECRET_KEY            (Scootering test-mode secret key)
+ *   - STRIPE_TEST_SECRET_KEY            (XPERT Moto test-mode secret key)
  *   - STRIPE_TEST_PUBLISHABLE_KEY       (exposed to browser)
  *   - STRIPE_WEBHOOK_SECRET              (webhook signing for local)
- *   - Scootering seed data loaded (depots, categories, sample vehicles)
+ *   - XPERT Moto seed data loaded (depots, categories, sample vehicles)
  *
  * Test cards used (Stripe documented test numbers):
  *   - 4242 4242 4242 4242  → succeeds
@@ -27,7 +27,7 @@ test.describe("booking → payment → confirmation (Stripe test mode)", () => {
     await page.goto("/booking");
 
     // Step 1 — pick depot + dates
-    await page.getByLabel("Pickup depot").selectOption({ label: "Scootering Gold Coast" });
+    await page.getByLabel("Pickup depot").selectOption({ label: "XPERT Moto Gold Coast" });
     await page.getByLabel("Pickup date").fill("2026-05-01");
     await page.getByLabel("Return date").fill("2026-05-03");
     await page.getByRole("button", { name: /continue/i }).click();
@@ -40,7 +40,7 @@ test.describe("booking → payment → confirmation (Stripe test mode)", () => {
     await page.getByRole("button", { name: /continue/i }).click();
 
     // Step 4 — customer details (reuses a seeded test account — env-driven)
-    await page.getByLabel("Email").fill(process.env.E2E_CUSTOMER_EMAIL ?? "e2e@scootering.test");
+    await page.getByLabel("Email").fill(process.env.E2E_CUSTOMER_EMAIL ?? "e2e@xpertmoto.test");
     await page.getByLabel("First name").fill("E2E");
     await page.getByLabel("Last name").fill("Tester");
     await page.getByLabel("Licence number").fill("123456789");

@@ -1,4 +1,4 @@
-# 🛵 Scootering
+# 🛵 XPERT Moto
 
 Enterprise scooter & motorbike hire platform for Australia. Production-ready full-stack Next.js 14 / TypeScript / Prisma / Postgres.
 
@@ -44,7 +44,7 @@ Services:
 ```bash
 npm install
 cp .env.example .env   # default DATABASE_URL is already correct
-createdb scootering
+createdb xpertmoto
 npx prisma migrate dev --name init
 npm run db:seed
 npm run dev              # in one terminal
@@ -69,9 +69,9 @@ Use this as the starting point for running scenarios — layer any additional da
 
 | Role | Email | Password |
 |---|---|---|
-| Super admin | admin@scootering.com.au | admin1234 |
-| Manager | manager.gold-coast@scootering.com.au | staff1234 |
-| Staff | staff.gold-coast@scootering.com.au | staff1234 |
+| Super admin | admin@xpertmoto.com.au | admin1234 |
+| Manager | manager.gold-coast@xpertmoto.com.au | staff1234 |
+| Staff | staff.gold-coast@xpertmoto.com.au | staff1234 |
 | Customer | sarah.smith@example.com | customer1234 |
 
 ## Portals

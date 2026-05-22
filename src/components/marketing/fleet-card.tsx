@@ -11,7 +11,7 @@ import { trackEvent } from "@/lib/analytics/track";
 
 export interface FleetCardProps {
   name: string;
-  /** Small caption above the title (e.g. "Scootering fleet"). */
+  /** Small caption above the title (e.g. "XPERT Moto fleet"). */
   vendor?: string;
   description?: string | null;
   imageSrc?: string | null;

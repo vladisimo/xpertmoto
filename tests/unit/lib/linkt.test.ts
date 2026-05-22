@@ -5,7 +5,7 @@ const account: LinktAccount = {
   id: "acc_1",
   name: "Fleet VIC",
   region: "VIC",
-  username: "ops@scootering.com.au",
+  username: "ops@xpertmoto.com.au",
   passwordEnc: "enc",
   passwordIv: "iv",
   passwordTag: "tag",

@@ -66,63 +66,122 @@ export function VehiclePicker() {
 
   // When the picker detects the preferred id is not in the available set
   // (e.g. user changed depot), clear it from the store and surface a
-  // one-off notice. Use the "adjust state on prop change" pattern — compare
-  // to a locally-tracked snapshot inside render to fire once per unique id.
+  // one-off notice. Runs in an effect because mutating the Zustand store
+  // during render would schedule updates in other subscribers mid-render.
   const [lastClearedId, setLastClearedId] = React.useState<string | null>(null);
   const [justCleared, setJustCleared] = React.useState<string | null>(null);
-  if (preferredIsStale && lastClearedId !== w.preferredVehicleId) {
-    const staleId = w.preferredVehicleId;
-    setLastClearedId(staleId);
-    setJustCleared(staleId);
-    w.set("preferredVehicleId", null);
-  }
+  React.useEffect(() => {
+    if (preferredIsStale && lastClearedId !== w.preferredVehicleId) {
+      const staleId = w.preferredVehicleId;
+      setLastClearedId(staleId);
+      setJustCleared(staleId);
+      w.set("preferredVehicleId", null);
+    }
+  }, [preferredIsStale, lastClearedId, w]);
 
+  // Make/model in the imported inventory has case drift (`HONDA` vs
+  // `Honda`). Dedupe filter options by their lowercased form, showing the
+  // first-seen display variant; match the same way when filtering below.
+  const normKey = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  const dedupeByKey = (values: string[]) => {
+    const seen = new Map<string, string>();
+    for (const v of values) {
+      const k = normKey(v);
+      if (!seen.has(k)) seen.set(k, v);
+    }
+    return Array.from(seen.values()).sort();
+  };
   const makeOptions = React.useMemo(
-    () => Array.from(new Set(list.map((v) => v.make))).sort(),
+    () => dedupeByKey(list.map((v) => v.make)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [list],
   );
   const modelOptions = React.useMemo(() => {
     const pool =
-      filters.make === "all" ? list : list.filter((v) => v.make === filters.make);
-    return Array.from(new Set(pool.map((v) => v.model))).sort();
+      filters.make === "all"
+        ? list
+        : list.filter((v) => normKey(v.make) === normKey(filters.make));
+    return dedupeByKey(pool.map((v) => v.model));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list, filters.make]);
   const colourOptions = React.useMemo(
-    () => Array.from(new Set(list.map((v) => v.colour))).sort(),
+    () => dedupeByKey(list.map((v) => v.colour)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [list],
   );
 
   const filtered = React.useMemo(() => {
-    const base = list.filter((v) => {
-      if (filters.make !== "all" && v.make !== filters.make) return false;
-      if (filters.model !== "all" && v.model !== filters.model) return false;
-      if (filters.colour !== "all" && v.colour !== filters.colour) return false;
+    return list.filter((v) => {
+      if (filters.make !== "all" && normKey(v.make) !== normKey(filters.make)) return false;
+      if (filters.model !== "all" && normKey(v.model) !== normKey(filters.model)) return false;
+      if (filters.colour !== "all" && normKey(v.colour) !== normKey(filters.colour)) return false;
       return true;
     });
-    const sorted = [...base];
+     
+  }, [list, filters]);
+
+  // Collapse the per-vehicle list into one card per make+model. The card
+  // shows the count and uses the "best" matching vehicle (newest year,
+  // then fewest km) as the visual representative. Key is normalised
+  // (lowercase + collapsed whitespace) so the legacy "HONDA" vs "Honda"
+  // data drift in the imported inventory still merges into one card.
+  const grouped = React.useMemo(() => {
+    const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+    const map = new Map<string, VehicleCardVehicle[]>();
+    for (const v of filtered) {
+      const key = `${norm(v.make)}|${norm(v.model)}`;
+      const arr = map.get(key);
+      if (arr) arr.push(v);
+      else map.set(key, [v]);
+    }
+    const groups = Array.from(map.values()).map((vehicles) => {
+      const rep = [...vehicles].sort(
+        (a, b) => b.year - a.year || a.currentOdometerKm - b.currentOdometerKm,
+      )[0]!;
+      return { rep, count: vehicles.length, ids: vehicles.map((v) => v.id) };
+    });
     switch (filters.sort) {
       case "year-desc":
-        sorted.sort((a, b) => b.year - a.year || a.currentOdometerKm - b.currentOdometerKm);
+        groups.sort(
+          (a, b) =>
+            b.rep.year - a.rep.year ||
+            a.rep.currentOdometerKm - b.rep.currentOdometerKm,
+        );
         break;
       case "make-asc":
-        sorted.sort((a, b) => `${a.make} ${a.model}`.localeCompare(`${b.make} ${b.model}`));
+        groups.sort((a, b) =>
+          `${a.rep.make} ${a.rep.model}`.localeCompare(`${b.rep.make} ${b.rep.model}`),
+        );
         break;
       default:
-        sorted.sort((a, b) => a.currentOdometerKm - b.currentOdometerKm);
+        groups.sort((a, b) => a.rep.currentOdometerKm - b.rep.currentOdometerKm);
     }
-    return sorted;
-  }, [list, filters]);
+    return groups;
+  }, [filtered, filters.sort]);
 
   const selectedVehicle = w.preferredVehicleId
     ? list.find((v) => v.id === w.preferredVehicleId) ?? null
     : null;
 
-  const filterExcludesSelection =
-    selectedVehicle !== null && !filtered.some((v) => v.id === selectedVehicle.id);
+  const selectedGroup = selectedVehicle
+    ? grouped.find((g) => g.ids.includes(selectedVehicle.id)) ?? null
+    : null;
+
+  const filterExcludesSelection = selectedVehicle !== null && selectedGroup === null;
 
   const toggle = (id: string) => {
     w.set("preferredVehicleId", w.preferredVehicleId === id ? null : id);
     // Picking a specific vehicle clears any active "No preference" flag —
     // they're mutually exclusive states.
+    if (w.noPreference) w.set("noPreference", false);
+    setJustCleared(null);
+  };
+
+  // Selecting a make/model group sets the preferred id to the group's
+  // representative vehicle. Clicking the same group again clears.
+  const toggleGroup = (group: { rep: VehicleCardVehicle; ids: string[] }) => {
+    const currentlySelected = group.ids.includes(w.preferredVehicleId ?? "");
+    w.set("preferredVehicleId", currentlySelected ? null : group.rep.id);
     if (w.noPreference) w.set("noPreference", false);
     setJustCleared(null);
   };
@@ -246,7 +305,7 @@ export function VehiclePicker() {
               makeOptions={makeOptions}
               modelOptions={modelOptions}
               colourOptions={colourOptions}
-              resultCount={filtered.length + (filterExcludesSelection ? 1 : 0)}
+              resultCount={grouped.length + (filterExcludesSelection ? 1 : 0)}
               onClear={() => handleFiltersChange(DEFAULT_FILTERS)}
             />
           </div>
@@ -266,24 +325,25 @@ export function VehiclePicker() {
             </section>
           )}
 
-          {filtered.length === 0 && !filterExcludesSelection ? (
+          {grouped.length === 0 && !filterExcludesSelection ? (
             <div className="rounded-md bg-muted/30 p-6 text-center text-sm text-muted-foreground">
               No vehicles match these filters.
             </div>
           ) : (
             <div className="md:max-h-[60vh] md:overflow-y-auto md:rounded-md md:border md:border-border md:bg-muted/20 md:p-3">
               <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-                {filtered.map((v) => {
-                  const isSelected = w.preferredVehicleId === v.id;
+                {grouped.map((g) => {
+                  const isSelected = g.ids.includes(w.preferredVehicleId ?? "");
                   return (
                     <div
-                      key={v.id}
+                      key={`${g.rep.make}|${g.rep.model}`}
                       ref={isSelected ? selectedCardScrollRef : undefined}
                     >
                       <VehicleCard
-                        vehicle={v}
+                        vehicle={g.rep}
                         selected={isSelected}
-                        onSelect={() => toggle(v.id)}
+                        availableCount={g.count}
+                        onSelect={() => toggleGroup(g)}
                       />
                     </div>
                   );

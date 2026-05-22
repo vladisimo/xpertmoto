@@ -11,7 +11,7 @@ import { SignJWT, importPKCS8 } from "jose";
  * cleared — acceptable, it takes milliseconds to rebuild.
  *
  * Env vars (all required for Apple to be enabled in auth.ts):
- *   AUTH_APPLE_ID          — the Services ID (e.g. `com.scootering.web`)
+ *   AUTH_APPLE_ID          — the Services ID (e.g. `com.xpertmoto.web`)
  *   AUTH_APPLE_TEAM_ID     — your 10-char Apple Team ID
  *   AUTH_APPLE_KEY_ID      — the Key ID for the .p8
  *   AUTH_APPLE_PRIVATE_KEY — the .p8 PEM contents. Escape newlines as \n

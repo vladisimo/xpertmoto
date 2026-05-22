@@ -17,22 +17,22 @@ describe("readVisitorCookie", () => {
     expect(readVisitorCookie(h(null))).toBeNull();
   });
 
-  test("extracts scootering_vid when present", () => {
-    expect(readVisitorCookie(h("scootering_vid=v_abc123"))).toBe("v_abc123");
+  test("extracts xpertmoto_vid when present", () => {
+    expect(readVisitorCookie(h("xpertmoto_vid=v_abc123"))).toBe("v_abc123");
   });
 
   test("extracts among multiple cookies", () => {
     expect(
-      readVisitorCookie(h("theme=dark; scootering_vid=v_xyz; cf_bm=foo")),
+      readVisitorCookie(h("theme=dark; xpertmoto_vid=v_xyz; cf_bm=foo")),
     ).toBe("v_xyz");
   });
 
   test("returns null when cookie set but value empty", () => {
-    expect(readVisitorCookie(h("scootering_vid="))).toBeNull();
+    expect(readVisitorCookie(h("xpertmoto_vid="))).toBeNull();
   });
 
   test("preserves base64 '=' padding in the value", () => {
-    expect(readVisitorCookie(h("scootering_vid=abc=="))).toBe("abc==");
+    expect(readVisitorCookie(h("xpertmoto_vid=abc=="))).toBe("abc==");
   });
 });
 

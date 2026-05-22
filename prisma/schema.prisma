@@ -114,6 +114,24 @@ enum PricingRuleType {
   CUSTOM
 }
 
+/// Length of the base-rate billing window. `H24` = standard daily rate;
+/// `H48` = the base rate covers any 1–2 day rental (xpertmoto.com.au's
+/// big-bike model). Used by VehicleModel (default) and Vehicle override.
+enum BasePeriodHours {
+  H24
+  H48
+}
+
+/// Discriminates how a PricingTier row is priced.
+/// - `PROGRESSIVE`: existing additive "tax-bracket" math — pays `tierTotal`
+///   for each fully-spanned tier and pro-rata for the partial tail.
+/// - `PER_WEEK`: xpertmoto.com.au's model — pays `pricePerWeek × weeks`
+///   for any rental whose day count falls within `[minDays, maxDays]`.
+enum TierMode {
+  PROGRESSIVE
+  PER_WEEK
+}
+
 enum AddonType {
   HELMET
   LOCK
@@ -957,6 +975,12 @@ model Vehicle {
   // Mid-rental swap history: times this vehicle was swapped off / onto a booking.
   outgoingSwaps        BookingSwap[]          @relation("BookingSwapOutgoingVehicle")
   incomingSwaps        BookingSwap[]          @relation("BookingSwapIncomingVehicle")
+  // Optional per-vehicle pricing overrides. When set these take precedence
+  // over the VehicleModel defaults (e.g. a hail-damaged unit discounted, or
+  // a premium colourway up-priced). Leave null to inherit from the model.
+  baseRateOverride        Decimal?         @db.Decimal(10, 2)
+  basePeriodHoursOverride BasePeriodHours?
+
   // Per-vehicle override of the category-level pricing tier ladder.
   pricingTiers         PricingTier[]
 
@@ -1014,9 +1038,18 @@ model VehicleModel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  category  VehicleCategory?       @relation(fields: [categoryId], references: [id])
-  vehicles  Vehicle[]
-  documents VehicleModelDocument[]
+  // xpertmoto.com.au-style per-model default rate. Lives at the model level
+  // so every Vehicle of (make, model, year) inherits the same rate unless
+  // its own override (`baseRateOverride`) is set.
+  baseRate        Decimal?         @db.Decimal(10, 2)
+  basePeriodHours BasePeriodHours? @default(H24)
+
+  category     VehicleCategory?       @relation(fields: [categoryId], references: [id])
+  vehicles     Vehicle[]
+  documents    VehicleModelDocument[]
+  // Per-model pricing tier ladder — sits between the category ladder and
+  // any per-vehicle override in `resolvePricingTiers()`.
+  pricingTiers PricingTier[]
 
   @@unique([make, model, year])
   @@index([categoryId])
@@ -1241,18 +1274,26 @@ model PricingRule {
 model PricingTier {
   id         String   @id @default(cuid())
   categoryId String?
+  modelId    String?
   vehicleId  String?
   minDays    Int
   maxDays    Int
-  tierTotal  Decimal  @db.Decimal(10, 2)
+  // PROGRESSIVE tiers use `tierTotal` (slab total). PER_WEEK tiers use
+  // `pricePerWeek` (× ceil(days/7)) within the slab. Exactly one of the
+  // two should be non-null per row — enforced by `tierMode`.
+  tierTotal    Decimal  @default(0) @db.Decimal(10, 2)
+  tierMode     TierMode @default(PROGRESSIVE)
+  pricePerWeek Decimal? @db.Decimal(10, 2)
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
   category VehicleCategory? @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  model    VehicleModel?    @relation(fields: [modelId], references: [id], onDelete: Cascade)
   vehicle  Vehicle?         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 
   @@index([categoryId, minDays])
+  @@index([modelId, minDays])
   @@index([vehicleId, minDays])
 }
 

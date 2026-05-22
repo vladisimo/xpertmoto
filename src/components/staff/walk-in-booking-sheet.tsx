@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -80,11 +80,18 @@ export function WalkInBookingSheet({
     { enabled: searchEnabled },
   );
 
-  useEffect(() => {
-    if (depotId || !depots) return;
+  // Auto-pick the sole depot once it loads. setState-during-render
+  // pattern (see React docs, "You Might Not Need an Effect") so the
+  // selection is in place before the next render rather than a tick
+  // later via useEffect.
+  const [depotsKnown, setDepotsKnown] = useState(false);
+  if (!depotsKnown && depots) {
+    setDepotsKnown(true);
     const only = depots.length === 1 ? depots[0] : undefined;
-    if (only) setDepotId(only.id);
-  }, [depots, depotId]);
+    if (!depotId && only) {
+      setDepotId(only.id);
+    }
+  }
 
   const pickupDateTime = useMemo(() => new Date(pickupAt), [pickupAt]);
   const returnDateTime = useMemo(() => new Date(returnAt), [returnAt]);
@@ -130,11 +137,23 @@ export function WalkInBookingSheet({
     { enabled: availabilityEnabled },
   );
 
-  useEffect(() => {
-    if (!vehicleId) return;
-    if (!availableVehicles) return;
-    if (!availableVehicles.some((v) => v.id === vehicleId)) setVehicleId("");
-  }, [availableVehicles, vehicleId]);
+  // Clear the selected vehicle whenever the available-vehicles list
+  // changes (e.g. depot or date moved) and the previous pick is no
+  // longer in the list. Compare-state pattern keeps the cascade fenced
+  // to the actual list-change event.
+  const [lastAvailableVehicles, setLastAvailableVehicles] = useState(
+    availableVehicles,
+  );
+  if (lastAvailableVehicles !== availableVehicles) {
+    setLastAvailableVehicles(availableVehicles);
+    if (
+      vehicleId &&
+      availableVehicles &&
+      !availableVehicles.some((v) => v.id === vehicleId)
+    ) {
+      setVehicleId("");
+    }
+  }
 
   const selectedVehicle = availableVehicles?.find((v) => v.id === vehicleId);
   const selectedCategory = selectedVehicle?.category ?? categories?.find((c) => c.id === categoryFilter);

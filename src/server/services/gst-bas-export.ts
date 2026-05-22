@@ -15,7 +15,7 @@ import { prisma } from "@/lib/prisma";
  *   - 1B  GST on purchases (not tracked here)
  *   - 7   Tax withheld (not applicable)
  *
- * Scootering only computes 1A (GST collected on rental revenue) and
+ * XPERT Moto only computes 1A (GST collected on rental revenue) and
  * feeds it into Xero / MYOB alongside manually entered 1B expense data.
  */
 export async function generateBasCsv(args: {

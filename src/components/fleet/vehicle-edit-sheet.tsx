@@ -31,7 +31,7 @@ import {
 import { FormGrid, FormGridRow } from "@/components/forms/form-grid";
 import type { VehicleWithRelations } from "./vehicle-detail-types";
 
-export type VehicleEditSection = "identity" | "compliance" | "assignment" | "financial";
+export type VehicleEditSection = "identity" | "compliance" | "assignment" | "financial" | "pricing";
 
 const CONDITIONS = ["EXCELLENT", "GOOD", "FAIR", "POOR"] as const;
 const DEPRECIATION_METHODS = ["STRAIGHT_LINE", "DIMINISHING_VALUE"] as const;
@@ -75,10 +75,16 @@ const financialSchema = z.object({
   depreciationRate: z.string(),
 });
 
+const pricingSchema = z.object({
+  baseRateOverride: z.string(),
+  basePeriodHoursOverride: z.enum(["INHERIT", "H24", "H48"]),
+});
+
 type IdentityValues = z.infer<typeof identitySchema>;
 type ComplianceValues = z.infer<typeof complianceSchema>;
 type AssignmentValues = z.infer<typeof assignmentSchema>;
 type FinancialValues = z.infer<typeof financialSchema>;
+type PricingValues = z.infer<typeof pricingSchema>;
 
 function toInputDate(d: Date | string | null | undefined): string {
   if (!d) return "";
@@ -118,6 +124,7 @@ const SECTION_COPY: Record<VehicleEditSection, { title: string; description: str
   compliance: { title: "Edit compliance", description: "Expiry dates and scheduled services." },
   assignment: { title: "Edit assignment", description: "Category, home depot, and condition." },
   financial:  { title: "Edit financial",  description: "Purchase cost and depreciation inputs." },
+  pricing:    { title: "Edit pricing",    description: "Per-vehicle override of the per-model base rate. Leave blank to inherit." },
 };
 
 export function VehicleEditSheet({
@@ -144,6 +151,7 @@ export function VehicleEditSheet({
         {section === "compliance" && <ComplianceForm vehicle={vehicle} onDone={() => onOpenChange(false)} />}
         {section === "assignment" && <AssignmentForm vehicle={vehicle} onDone={() => onOpenChange(false)} />}
         {section === "financial"  && <FinancialForm  vehicle={vehicle} onDone={() => onOpenChange(false)} />}
+        {section === "pricing"    && <PricingForm    vehicle={vehicle} onDone={() => onOpenChange(false)} />}
       </SheetContent>
     </Sheet>
   );
@@ -487,6 +495,73 @@ function FinancialForm({ vehicle: v, onDone }: { vehicle: VehicleWithRelations; 
         <FormItem>
           <FormLabel>Depreciation rate (% / yr)</FormLabel>
           <FormControl><Input type="number" min={0} step="0.01" {...field} /></FormControl>
+          <FormMessage />
+        </FormItem>
+      )} />
+    </FormShell>
+  );
+}
+
+function PricingForm({ vehicle: v, onDone }: { vehicle: VehicleWithRelations; onDone: () => void }) {
+  const utils = trpc.useUtils();
+  const update = trpc.fleet.updateVehicle.useMutation({
+    onSuccess: () => {
+      utils.fleet.vehicleDetail.invalidate({ id: v.id });
+      onDone();
+    },
+  });
+  const form = useForm<PricingValues>({
+    resolver: zodResolver(pricingSchema),
+    defaultValues: {
+      baseRateOverride: v.baseRateOverride != null ? String(v.baseRateOverride) : "",
+      basePeriodHoursOverride: v.basePeriodHoursOverride ?? "INHERIT",
+    },
+  });
+
+  // Show what would apply if the override is blanked — gives the operator
+  // a concrete fall-back value to compare against before they commit.
+  const inheritedRate =
+    v.catalogueModel?.baseRate != null ? `$${Number(v.catalogueModel.baseRate).toFixed(2)}` : "category default";
+  const inheritedPeriod = v.catalogueModel?.basePeriodHours === "H48" ? "48 h" : "24 h";
+
+  return (
+    <FormShell
+      form={form}
+      pending={update.isPending}
+      error={update.error?.message ?? null}
+      onSubmit={(values) => {
+        update.mutate({
+          id: v.id,
+          baseRateOverride: numOrNull(values.baseRateOverride),
+          basePeriodHoursOverride:
+            values.basePeriodHoursOverride === "INHERIT" ? null : values.basePeriodHoursOverride,
+        });
+      }}
+    >
+      <FormField control={form.control} name="baseRateOverride" render={({ field }) => (
+        <FormItem className="md:col-span-2">
+          <FormLabel>Base rate override (A$)</FormLabel>
+          <FormControl><Input type="number" min={0} step="0.01" placeholder={`Inherits ${inheritedRate}`} {...field} /></FormControl>
+          <p className="text-xs text-muted-foreground">
+            Leave blank to inherit the per-model rate ({inheritedRate}). Set a value to charge a different daily rate for this specific vehicle.
+          </p>
+          <FormMessage />
+        </FormItem>
+      )} />
+      <FormField control={form.control} name="basePeriodHoursOverride" render={({ field }) => (
+        <FormItem className="md:col-span-2">
+          <FormLabel>Base period override</FormLabel>
+          <Select onValueChange={field.onChange} value={field.value}>
+            <FormControl><SelectTrigger><SelectValue placeholder={`Inherits ${inheritedPeriod}`} /></SelectTrigger></FormControl>
+            <SelectContent>
+              <SelectItem value="INHERIT">Inherit ({inheritedPeriod})</SelectItem>
+              <SelectItem value="H24">24 h (standard daily)</SelectItem>
+              <SelectItem value="H48">48 h (2-day minimum charge)</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Use 48 h for premium bikes — the base rate covers any 1–2 day rental and 1-day bookings are blocked.
+          </p>
           <FormMessage />
         </FormItem>
       )} />

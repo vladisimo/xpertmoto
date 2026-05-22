@@ -3,9 +3,9 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 const KEEP_EMAILS = [
-  "admin@scootering.com.au",
-  "manager.gold-coast@scootering.com.au",
-  "staff.gold-coast@scootering.com.au",
+  "admin@xpertmoto.com.au",
+  "manager.gold-coast@xpertmoto.com.au",
+  "staff.gold-coast@xpertmoto.com.au",
   "sarah.smith@example.com",
 ];
 

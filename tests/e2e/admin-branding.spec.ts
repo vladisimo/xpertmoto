@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
  * to have been run so the admin credentials below exist.
  */
 
-const ADMIN = { email: "admin@scootering.com.au", password: "admin1234" };
+const ADMIN = { email: "admin@xpertmoto.com.au", password: "admin1234" };
 
 test("admin settings surfaces branding panel + propagates trading name", async ({ page }) => {
   await page.goto("/login");

@@ -6,6 +6,9 @@ export type CalendarEvent = {
   start: Date;
   end: Date;
   url?: string;
+  /** iCalendar PRODID product name — pass the branding siteName so the
+   *  generated calendar identifies the current tenant. */
+  prodId?: string;
 };
 
 function pad(n: number, width = 2): string {
@@ -39,7 +42,7 @@ export function generateIcs(event: CalendarEvent): string {
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
-    "PRODID:-//Scootering//Bookings//EN",
+    `PRODID:-//${event.prodId ?? "XPERT Moto"}//Bookings//EN`,
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
     "BEGIN:VEVENT",

@@ -14,7 +14,7 @@ import { test, expect } from "@playwright/test";
  * Skips gracefully when the seed doesn't expose a swappable booking.
  */
 
-const STAFF = { email: "staff.gold-coast@scootering.com.au", password: "staff1234" };
+const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/login");

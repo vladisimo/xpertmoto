@@ -9,7 +9,7 @@ import { deleteFile } from "@/lib/storage";
 // must be retained for 7 years of ATO tax compliance. Instead we:
 //   1. Overwrite every PII field on User + CustomerProfile with a non-
 //      identifiable placeholder.
-//   2. Rename email to `user_<id>@deleted.scootering.local` so the original
+//   2. Rename email to `user_<id>@deleted.xpertmoto.local` so the original
 //      address is immediately free for re-registration under a new account.
 //   3. Set `deletedAt` so the Prisma extension auto-filters this row from
 //      read paths.
@@ -29,7 +29,7 @@ export async function anonymiseUser(
   opts: AnonymiseOptions = {},
 ): Promise<void> {
   const reason = opts.reason ?? "APP 13 request";
-  const tombstoneEmail = `user_${userId}@deleted.scootering.local`;
+  const tombstoneEmail = `user_${userId}@deleted.xpertmoto.local`;
   const now = new Date();
 
   const user = await prisma.user.findUnique({

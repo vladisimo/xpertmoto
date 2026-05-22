@@ -3,7 +3,7 @@
  * Import a historical Stripe transaction into the Payment + BondLedger
  * tables. Useful when the nightly reconciliation job surfaces an
  * `UnmatchedTransaction` row and we want to hydrate the corresponding
- * Scootering Payment row rather than let it sit as unmatched.
+ * XPERT Moto Payment row rather than let it sit as unmatched.
  *
  * Usage:
  *   tsx scripts/import-stripe-transaction.ts <payment_intent_id> <booking_reference>

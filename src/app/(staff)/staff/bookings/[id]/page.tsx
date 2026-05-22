@@ -23,8 +23,19 @@ import { BookingDocumentsSection } from "@/components/booking/booking-documents-
 import { DisputePanel } from "@/components/staff/dispute-panel";
 import type { StatusKey } from "@/components/ui/status-badge";
 
-export default async function StaffBookingDetail({ params }: { params: Promise<{ id: string }> }) {
+const VALID_TABS = ["overview", "payments", "agreements", "activity", "notes"] as const;
+type BookingTab = (typeof VALID_TABS)[number];
+
+export default async function StaffBookingDetail({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ tab?: string }>;
+}) {
   const { id } = await params;
+  const { tab } = await searchParams;
+  const initialTab: BookingTab = VALID_TABS.includes(tab as BookingTab) ? (tab as BookingTab) : "overview";
   const b = await prisma.booking.findUnique({
     where: { id },
     include: {
@@ -133,6 +144,9 @@ export default async function StaffBookingDetail({ params }: { params: Promise<{
           pickupDateTime={b.pickupDateTime.toISOString()}
           returnDateTime={b.returnDateTime.toISOString()}
           balanceDue={Number(b.balanceDue)}
+          hasSignedReturnAssessment={b.returnAssessments.some(
+            (a) => a.status === "SIGNED" || a.status === "FINALISED",
+          )}
         />
         <BookingHeaderActions
           bookingId={b.id}
@@ -148,7 +162,7 @@ export default async function StaffBookingDetail({ params }: { params: Promise<{
         />
       </div>
 
-      <Tabs defaultValue="overview">
+      <Tabs defaultValue={initialTab}>
         <MobileScrollTabs>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="payments" className="gap-1.5">

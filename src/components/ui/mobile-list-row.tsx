@@ -82,9 +82,20 @@ export function MobileListRow({
   }
   if (onSelect) {
     return (
-      <button type="button" onClick={onSelect} className={cn(base, hover, className)}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onSelect}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
+        className={cn(base, hover, "cursor-pointer", className)}
+      >
         {body}
-      </button>
+      </div>
     );
   }
   return <div className={cn(base, className)}>{body}</div>;

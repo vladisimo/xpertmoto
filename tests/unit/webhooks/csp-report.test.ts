@@ -31,7 +31,7 @@ describe("/api/csp-report", () => {
     const res = await post(
       JSON.stringify({
         "csp-report": {
-          "document-uri": "https://scootering.com.au/",
+          "document-uri": "https://xpertmoto.com.au/",
           "violated-directive": "script-src",
           "blocked-uri": "https://evil.example/js",
         },

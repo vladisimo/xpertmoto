@@ -13,7 +13,7 @@ const VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365; // 1 year
 /**
  * Read or mint the persistent visitor-fingerprint cookie. Stable
  * across sessions, rotates the separate session cookie
- * (`scootering_vid`). Random UUID — not identifying by itself; the
+ * (`xpertmoto_vid`). Random UUID — not identifying by itself; the
  * server uses it only to derive `sessionNumber` and `isReturning` on
  * the visitor's future sessions.
  *

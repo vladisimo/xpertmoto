@@ -58,7 +58,19 @@ import {
   pricingTierDeleteInputSchema,
   pricingTierListInputSchema,
   pricingTierReplaceInputSchema,
+  type PricingTierScope,
 } from "@/lib/validators/pricing-tier";
+
+function tierScopeWhere(scope: PricingTierScope, scopeId: string) {
+  switch (scope) {
+    case "CATEGORY":
+      return { categoryId: scopeId };
+    case "MODEL":
+      return { modelId: scopeId };
+    case "VEHICLE":
+      return { vehicleId: scopeId };
+  }
+}
 import { reassignFutureBookings } from "@/server/services/fleet-reassign";
 
 export const adminRouter = createTRPCRouter({
@@ -642,16 +654,13 @@ export const adminRouter = createTRPCRouter({
       return category;
     }),
 
-  /** List the PricingTier ladder for a category or vehicle, sorted by
-   *  minDays ascending. Empty array means the scope falls back to the
-   *  legacy daily/weekly/monthly rate card. */
+  /** List the PricingTier ladder for a category, model, or vehicle, sorted
+   *  by minDays ascending. Empty array means the scope falls back to the
+   *  next layer (vehicle → model → category → flat daily/weekly/monthly). */
   listPricingTiers: adminProcedure
     .input(pricingTierListInputSchema)
     .query(async ({ ctx, input }) => {
-      const where =
-        input.scope === "CATEGORY"
-          ? { categoryId: input.scopeId }
-          : { vehicleId: input.scopeId };
+      const where = tierScopeWhere(input.scope, input.scopeId);
       return ctx.prisma.pricingTier.findMany({
         where,
         orderBy: { minDays: "asc" },
@@ -669,6 +678,11 @@ export const adminRouter = createTRPCRouter({
           where: { id: input.scopeId },
           select: { id: true },
         });
+      } else if (input.scope === "MODEL") {
+        await ctx.prisma.vehicleModel.findUniqueOrThrow({
+          where: { id: input.scopeId },
+          select: { id: true },
+        });
       } else {
         await ctx.prisma.vehicle.findUniqueOrThrow({
           where: { id: input.scopeId },
@@ -677,19 +691,27 @@ export const adminRouter = createTRPCRouter({
       }
 
       await ctx.prisma.$transaction(async (tx) => {
-        const where =
-          input.scope === "CATEGORY"
-            ? { categoryId: input.scopeId }
-            : { vehicleId: input.scopeId };
+        const where = tierScopeWhere(input.scope, input.scopeId);
         await tx.pricingTier.deleteMany({ where });
         if (input.tiers.length > 0) {
           await tx.pricingTier.createMany({
             data: input.tiers.map((t) => ({
               categoryId: input.scope === "CATEGORY" ? input.scopeId : null,
+              modelId: input.scope === "MODEL" ? input.scopeId : null,
               vehicleId: input.scope === "VEHICLE" ? input.scopeId : null,
               minDays: t.minDays,
               maxDays: t.maxDays,
-              tierTotal: new Prisma.Decimal(t.tierTotal),
+              tierMode: t.tierMode,
+              // PER_WEEK rows leave tierTotal at the 0 default; PROGRESSIVE
+              // rows leave pricePerWeek null. The DB CHECK enforces both.
+              tierTotal:
+                t.tierMode === "PROGRESSIVE"
+                  ? new Prisma.Decimal(t.tierTotal)
+                  : new Prisma.Decimal(0),
+              pricePerWeek:
+                t.tierMode === "PER_WEEK" && t.pricePerWeek != null
+                  ? new Prisma.Decimal(t.pricePerWeek)
+                  : null,
               isActive: t.isActive,
             })),
           });
@@ -699,18 +721,104 @@ export const adminRouter = createTRPCRouter({
       return { ok: true, count: input.tiers.length };
     }),
 
-  /** Clear the entire tier ladder for a scope so it falls back to flat
-   *  daily/weekly/monthly rates. */
+  /** Clear the entire tier ladder for a scope so it falls back to the next
+   *  layer (vehicle → model → category → flat). */
   deletePricingTiers: adminProcedure
     .input(pricingTierDeleteInputSchema)
     .mutation(async ({ ctx, input }) => {
-      const where =
-        input.scope === "CATEGORY"
-          ? { categoryId: input.scopeId }
-          : { vehicleId: input.scopeId };
+      const where = tierScopeWhere(input.scope, input.scopeId);
       const result = await ctx.prisma.pricingTier.deleteMany({ where });
       await invalidateTag(CACHE_TAGS.CATEGORIES);
       return { ok: true, deleted: result.count };
+    }),
+
+  // ----- Vehicle model rates (xpertmoto parity) -----
+  /** List every catalogue model with its per-model base rate, base period,
+   *  and tier-ladder count. Used by the admin Vehicle Models pricing tab. */
+  modelRates: adminProcedure.query(async ({ ctx }) => {
+    const [models, modelTiers] = await Promise.all([
+      ctx.prisma.vehicleModel.findMany({
+        orderBy: [{ make: "asc" }, { model: "asc" }, { year: "desc" }],
+        include: {
+          category: { select: { id: true, name: true } },
+          _count: { select: { vehicles: true } },
+        },
+      }),
+      // Tier rows scoped to a model — used for inline ladder previews on
+      // the Models tab so operators can see the rate card at a glance.
+      ctx.prisma.pricingTier.findMany({
+        where: { modelId: { not: null }, isActive: true },
+        orderBy: { minDays: "asc" },
+      }),
+    ]);
+    const tiersByModel: Record<string, typeof modelTiers> = {};
+    for (const t of modelTiers) {
+      if (!t.modelId) continue;
+      const list = tiersByModel[t.modelId] ?? [];
+      list.push(t);
+      tiersByModel[t.modelId] = list;
+    }
+    const tierCountByModel: Record<string, number> = {};
+    for (const [id, list] of Object.entries(tiersByModel)) {
+      tierCountByModel[id] = list.length;
+    }
+    return { models, tierCountByModel, tiersByModel };
+  }),
+
+  /** Update the per-model base rate / base period. Mirrors the existing
+   *  `updateCategoryRates` pattern. Pass `null` to clear a field so the
+   *  vehicle falls back to its category. */
+  updateModelRates: adminProcedure
+    .input(
+      z.object({
+        id: z.string(),
+        baseRate: z.number().nonnegative().nullable().optional(),
+        basePeriodHours: z.enum(["H24", "H48"]).nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...patch } = input;
+      const data: Prisma.VehicleModelUpdateInput = {};
+      if (patch.baseRate !== undefined) {
+        data.baseRate = patch.baseRate == null ? null : new Prisma.Decimal(patch.baseRate);
+      }
+      if (patch.basePeriodHours !== undefined) {
+        data.basePeriodHours = patch.basePeriodHours;
+      }
+      const model = await ctx.prisma.vehicleModel.update({
+        where: { id },
+        data,
+      });
+      await invalidateTag(CACHE_TAGS.CATEGORIES);
+      return model;
+    }),
+
+  /** Update per-vehicle pricing overrides (override per-model defaults).
+   *  Pass `null` to clear an override so the vehicle re-inherits from the
+   *  model / category. */
+  updateVehicleRateOverrides: adminProcedure
+    .input(
+      z.object({
+        id: z.string(),
+        baseRateOverride: z.number().nonnegative().nullable().optional(),
+        basePeriodHoursOverride: z.enum(["H24", "H48"]).nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { id, ...patch } = input;
+      const data: Prisma.VehicleUpdateInput = {};
+      if (patch.baseRateOverride !== undefined) {
+        data.baseRateOverride =
+          patch.baseRateOverride == null ? null : new Prisma.Decimal(patch.baseRateOverride);
+      }
+      if (patch.basePeriodHoursOverride !== undefined) {
+        data.basePeriodHoursOverride = patch.basePeriodHoursOverride;
+      }
+      const vehicle = await ctx.prisma.vehicle.update({
+        where: { id },
+        data,
+      });
+      return vehicle;
     }),
 
   // ----- Category CRUD -----

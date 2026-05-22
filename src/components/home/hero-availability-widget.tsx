@@ -43,7 +43,7 @@ function rangeToISO(range: DateRange | undefined) {
   return { pickup: toLocalDatetimeInputValue(from), ret: toLocalDatetimeInputValue(to) };
 }
 
-const INITIAL_RESULTS = 10;
+const INITIAL_RESULTS = 9;
 const FETCH_LIMIT = 500;
 
 // Simple Icons slugs for motorcycle brands. Keys are lower-cased make names
@@ -95,6 +95,54 @@ function dedupeMakes(vehicles: Array<{ make: string }>): string[] {
   return Array.from(firstSeen.values()).sort((a, b) => a.localeCompare(b));
 }
 
+type AvailableVehicleShape = {
+  make: string;
+  model: string;
+  images: Array<{ url: string }>;
+  category: { baseDailyRate: unknown };
+};
+
+type GroupedVehicle<V> = {
+  key: string;
+  make: string;
+  model: string;
+  count: number;
+  minRate: number;
+  imageUrl: string | null;
+  sample: V;
+};
+
+// Collapse the available-vehicle list down to one card per make+model with a
+// count of physical units. Case-insensitive on the grouping key, but the
+// first-seen casing is preserved for display. Generic so the returned
+// `sample` keeps the caller's full vehicle type (needed for booking links).
+function groupByMakeModel<V extends AvailableVehicleShape>(vehicles: V[]): GroupedVehicle<V>[] {
+  const map = new Map<string, GroupedVehicle<V>>();
+  for (const v of vehicles) {
+    const key = `${v.make.toLowerCase()}|${v.model.toLowerCase()}`;
+    const rate = Number(v.category.baseDailyRate);
+    const existing = map.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (rate < existing.minRate) existing.minRate = rate;
+      if (!existing.imageUrl && v.images[0]?.url) existing.imageUrl = v.images[0].url;
+    } else {
+      map.set(key, {
+        key,
+        make: v.make,
+        model: v.model,
+        count: 1,
+        minRate: rate,
+        imageUrl: v.images[0]?.url ?? null,
+        sample: v,
+      });
+    }
+  }
+  return Array.from(map.values()).sort((a, b) =>
+    `${a.make} ${a.model}`.localeCompare(`${b.make} ${b.model}`),
+  );
+}
+
 export interface HeroAvailabilityWidgetProps {
   onDismiss?: () => void;
 }
@@ -107,13 +155,7 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
   }, []);
 
   const [phase, setPhase] = useState<Phase>("dates");
-  const [range, setRange] = useState<DateRange | undefined>(() => {
-    const from = new Date(today);
-    from.setDate(from.getDate() + 1);
-    const to = new Date(from);
-    to.setDate(to.getDate() + 3);
-    return { from, to };
-  });
+  const [range, setRange] = useState<DateRange | undefined>(undefined);
   const [depotId, setDepotId] = useState<string>("");
   const [categoryId, setCategoryId] = useState<string>("");
   const [makeFilter, setMakeFilter] = useState<string>("");
@@ -125,7 +167,6 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
 
   const { data: depots } = trpc.depot.list.useQuery();
   const { data: categories } = trpc.vehicle.listCategories.useQuery();
-  const { data: popular } = trpc.booking.popularPicks.useQuery({ days: 90 });
 
   // Auto-skip depot selection when the org only has one active depot.
   useEffect(() => {
@@ -234,29 +275,8 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
     [filteredByMake, modelFilter],
   );
 
-  const visible = showAll ? filtered : filtered.slice(0, INITIAL_RESULTS);
-
-  // Insights shown while the user is still picking dates.
-  const rentalDays = useMemo(() => {
-    if (!range?.from || !range?.to) return 0;
-    const ms = range.to.getTime() - range.from.getTime();
-    return Math.max(1, Math.round(ms / 86_400_000));
-  }, [range]);
-
-  const minDailyRate = useMemo(() => {
-    if (vehicles.length === 0) return 0;
-    return Math.min(...vehicles.map((v) => Number(v.category.baseDailyRate)));
-  }, [vehicles]);
-
-  const depotsWithStock = useMemo(
-    () => new Set(vehicles.map((v) => v.depotId)).size,
-    [vehicles],
-  );
-
-  const categoriesWithStock = useMemo(
-    () => new Set(vehicles.map((v) => v.categoryId)).size,
-    [vehicles],
-  );
+  const groups = useMemo(() => groupByMakeModel(filtered), [filtered]);
+  const visibleGroups = showAll ? groups : groups.slice(0, INITIAL_RESULTS);
 
   const anyFilterActive = !!categoryId || !!makeFilter || !!modelFilter;
   const clearFilters = () => {
@@ -396,8 +416,8 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
                 }}
               />
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <p className="caption">
+            <div className="flex items-center justify-end gap-3">
+              <p className="caption text-right">
                 {range?.from && range?.to
                   ? `${format(range.from, "EEE d MMM")} – ${format(range.to, "EEE d MMM")}`
                   : range?.from
@@ -419,63 +439,6 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
                 Continue <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
-            {range?.from && range?.to && (
-              <div className="rounded-md border border-emerald-600/25 bg-emerald-500/10 p-3">
-                <div className="grid grid-cols-4 gap-2 text-center">
-                  <InsightStat
-                    value={query.isFetching ? "—" : vehicles.length}
-                    label="Available"
-                  />
-                  <InsightStat
-                    value={query.isFetching || vehicles.length === 0 ? "—" : formatCurrency(minDailyRate)}
-                    label="From/day"
-                  />
-                  <InsightStat
-                    value={rentalDays}
-                    label={rentalDays === 1 ? "Day" : "Days"}
-                  />
-                  <InsightStat
-                    value={query.isFetching ? "—" : depotsWithStock}
-                    label={depotsWithStock === 1 ? "Depot" : "Depots"}
-                  />
-                </div>
-                <p className="mt-2 text-center text-xs text-muted-foreground">
-                  {query.isFetching ? (
-                    "Searching…"
-                  ) : vehicles.length === 0 ? (
-                    <span className="font-medium text-foreground">
-                      No vehicles available for these dates
-                    </span>
-                  ) : (
-                    <>
-                      Across {categoriesWithStock}{" "}
-                      {categoriesWithStock === 1 ? "category" : "categories"} · est.
-                      from{" "}
-                      <span className="font-medium text-foreground">
-                        {formatCurrency(minDailyRate * rentalDays)}
-                      </span>{" "}
-                      total
-                    </>
-                  )}
-                </p>
-                <p className="mt-2 border-t border-border/40 pt-2 text-center text-xs text-muted-foreground">
-                  {!query.isFetching && vehicles.length > 0 && popular && popular.length > 0 ? (
-                    <>
-                      <span className="uppercase tracking-wide">Most hired</span>{" "}
-                      ·{" "}
-                      <span className="text-foreground">
-                        {popular
-                          .slice(0, 3)
-                          .map((p) => `${p.make} ${p.model}`)
-                          .join(", ")}
-                      </span>
-                    </>
-                  ) : (
-                    <span aria-hidden>&nbsp;</span>
-                  )}
-                </p>
-              </div>
-            )}
           </div>
         )}
 
@@ -615,51 +578,50 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
         )}
       </div>
 
-      {phase === "results" && !query.isFetching && filtered.length > 0 && (
+      {phase === "results" && !query.isFetching && groups.length > 0 && (
         <div className="min-h-0 flex-1 overflow-y-auto border-t border-border p-4 [mask-image:linear-gradient(to_bottom,transparent_0,black_1.5rem,black_calc(100%-2.5rem),transparent_100%)]">
-          <div className="grid grid-cols-1 gap-2.5">
-            {visible.map((v) => (
+          <div className="grid grid-cols-3 gap-2">
+            {visibleGroups.map((g) => (
               <Link
-                key={v.id}
-                href={bookingHref(v)}
-                className="flex items-center gap-3 rounded-md border border-border bg-card p-3 transition-colors hover:border-foreground hover:bg-muted"
+                key={g.key}
+                href={bookingHref(g.sample)}
+                className="group flex flex-col gap-2 rounded-md border border-border bg-card p-2 transition-colors hover:border-foreground hover:bg-muted"
               >
-                <div className="relative h-16 w-20 flex-shrink-0 overflow-hidden rounded-sm bg-muted">
-                  {v.images[0]?.url ? (
+                <div className="relative aspect-[4/3] w-full overflow-hidden rounded-sm bg-muted">
+                  {g.imageUrl ? (
                     <Image
-                      src={v.images[0].url}
-                      alt={`${v.make} ${v.model}`}
+                      src={g.imageUrl}
+                      alt={`${g.make} ${g.model}`}
                       fill
-                      sizes="80px"
-                      className="object-cover"
+                      sizes="200px"
+                      className="object-contain"
                     />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center text-muted-foreground">—</div>
                   )}
+                  <span className="absolute right-1 top-1 rounded-md bg-background/95 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-foreground shadow-sm">
+                    {g.count} avail.
+                  </span>
                 </div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-semibold">
-                    {v.make} {v.model}{" "}
-                    <span className="font-normal text-muted-foreground">{v.year}</span>
+                <div className="min-w-0 space-y-0.5">
+                  <div className="truncate text-xs font-semibold leading-tight">
+                    {g.make} {g.model}
                   </div>
-                  <div className="truncate text-xs text-muted-foreground">
-                    {v.category.name} · {v.depot.name} · {v.colour}
-                  </div>
-                </div>
-                <div className="flex-shrink-0 text-right">
-                  <div className="caption">from</div>
-                  <div className="font-semibold">
-                    {formatCurrency(Number(v.category.baseDailyRate))}
-                    <span className="text-xs font-normal text-muted-foreground">/day</span>
+                  <div className="text-[11px] text-muted-foreground">
+                    from{" "}
+                    <span className="font-semibold text-foreground">
+                      {formatCurrency(g.minRate)}
+                    </span>
+                    /day
                   </div>
                 </div>
               </Link>
             ))}
           </div>
-          {!showAll && filtered.length > INITIAL_RESULTS && (
+          {!showAll && groups.length > INITIAL_RESULTS && (
             <div className="mt-3 flex justify-center">
               <Button variant="secondary" size="sm" onClick={() => setShowAll(true)}>
-                Show {filtered.length - INITIAL_RESULTS} more
+                Show {groups.length - INITIAL_RESULTS} more
               </Button>
             </div>
           )}
@@ -722,17 +684,6 @@ function DepotOption({
         )}
       />
     </button>
-  );
-}
-
-function InsightStat({ value, label }: { value: string | number; label: string }) {
-  return (
-    <div className="flex flex-col items-center">
-      <div className="text-base font-semibold text-foreground leading-none">{value}</div>
-      <div className="mt-1 text-[0.65rem] uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
-    </div>
   );
 }
 

@@ -8,14 +8,14 @@ import { getRedis } from "@/lib/redis";
 
 type FakeClient = {
   defineCommand: ReturnType<typeof vi.fn>;
-  scooteringSlidingRateLimit?: ReturnType<typeof vi.fn>;
+  slidingRateLimit?: ReturnType<typeof vi.fn>;
 };
 
 function makeFake(impl: (count: number) => [number, number, number]): FakeClient {
   let count = 0;
   const fake: FakeClient = {
     defineCommand: vi.fn(function (this: FakeClient, name: string) {
-      this[name as "scooteringSlidingRateLimit"] = vi.fn(async () => {
+      this[name as "slidingRateLimit"] = vi.fn(async () => {
         count += 1;
         return impl(count);
       });
@@ -53,7 +53,7 @@ describe("rateLimit", () => {
   test("fails open on Redis error", async () => {
     const fake: FakeClient = {
       defineCommand: vi.fn(function (this: FakeClient, name: string) {
-        this[name as "scooteringSlidingRateLimit"] = vi.fn(async () => {
+        this[name as "slidingRateLimit"] = vi.fn(async () => {
           throw new Error("boom");
         });
       }),
@@ -71,7 +71,7 @@ describe("rateLimit", () => {
     const received: unknown[] = [];
     const fake: FakeClient = {
       defineCommand: vi.fn(function (this: FakeClient, name: string) {
-        this[name as "scooteringSlidingRateLimit"] = vi.fn(async function (
+        this[name as "slidingRateLimit"] = vi.fn(async function (
           this: unknown,
         ) {
           received.push(this);

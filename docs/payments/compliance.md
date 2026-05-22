@@ -1,7 +1,7 @@
 # Payments — Compliance Gap Analysis
 
 **Status:** Phase 2 discovery artefact.
-**Purpose:** Where Scootering stands against every relevant standard / statute for Australian rental payments, with "must-fix-before-prod" items escalated back into the risk register.
+**Purpose:** Where XPERT Moto stands against every relevant standard / statute for Australian rental payments, with "must-fix-before-prod" items escalated back into the risk register.
 
 Relevant regimes:
 
@@ -40,7 +40,7 @@ Relevant regimes:
 - **Dependabot/Renovate confirmation** (Phase 2, non-code): SRE to confirm scanner status and report at Phase 2 gate.
 - **ASV scan schedule** (Phase 2, non-code): Booked with external ASV quarterly.
 
-**Attestation plan.** Once the above land, Scootering signs SAQ-A annually. Sample attestation template to be committed under `docs/payments/compliance/saq-a-template.md` (P1 follow-up).
+**Attestation plan.** Once the above land, XPERT Moto signs SAQ-A annually. Sample attestation template to be committed under `docs/payments/compliance/saq-a-template.md` (P1 follow-up).
 
 ### Prohibited data
 
@@ -59,7 +59,7 @@ AU is **out of scope** for PSD2 SCA. However, any booking originating from an EU
 
 **Gap [G11]**: our `confirmCardPayment` path treats `requires_action` as indistinguishable from failure. EU visitors would see a failed booking.
 
-**Volume assessment.** Scootering targets domestic tourists + locals. EU inbound is ≤1% by estimation. Prioritised **P2**.
+**Volume assessment.** XPERT Moto targets domestic tourists + locals. EU inbound is ≤1% by estimation. Prioritised **P2**.
 
 **Remediation** (P2, deferred): client-side Stripe SDK handles `requires_action`; confirmPayment retries after the customer completes the challenge. Test with Stripe test card `4000 0027 6000 3184`.
 
@@ -132,7 +132,7 @@ Section 18 (misleading conduct), s.29 (false representations), s.60 (consumer gu
 - All prices must be GST-inclusive (advertised + invoiced).
 - Tax invoices required for amounts ≥ A$82.50.
 - Tax invoice must include: supplier name + ABN, date, description, amount, GST amount, "tax invoice" label.
-- BAS lodgement: monthly if GST turnover ≥ A$20M (Scootering is below threshold → quarterly expected).
+- BAS lodgement: monthly if GST turnover ≥ A$20M (XPERT Moto is below threshold → quarterly expected).
 
 ### Status
 
@@ -180,7 +180,7 @@ For hire periods ≤ 1 month this is ≤ A$1,500 per affected booking per report
 
 ## 7. State bond / rental regulations
 
-Scootering depots operate in NSW (Byron Bay) and QLD (Gold Coast, Noosa) as of this writing.
+XPERT Moto depots operate in NSW (Byron Bay) and QLD (Gold Coast, Noosa) as of this writing.
 
 ### QLD — Motor Vehicle Traders (Rental) Act 1989 / Transport Operations
 
@@ -202,7 +202,7 @@ Scootering depots operate in NSW (Byron Bay) and QLD (Gold Coast, Noosa) as of t
 
 ## 8. AML/CTF
 
-- Scootering does not provide "designated services" under AML/CTF Act 2006 (rental, not financial services).
+- XPERT Moto does not provide "designated services" under AML/CTF Act 2006 (rental, not financial services).
 - No AUSTRAC obligations triggered.
 - Standard fraud-detection still required (G15 test scenarios cover stolen-card / first-party fraud).
 
@@ -214,7 +214,7 @@ Scootering depots operate in NSW (Byron Bay) and QLD (Gold Coast, Noosa) as of t
 
 ### Assessment
 
-- We act on behalf of the account holder (Scootering corporate toll account), with stored credentials explicitly provided for this purpose.
+- We act on behalf of the account holder (XPERT Moto corporate toll account), with stored credentials explicitly provided for this purpose.
 - We do not scrape third-party accounts or redistribute the raw data.
 - A legal review should confirm the portal ToS permits authorised agent access via automated means.
 

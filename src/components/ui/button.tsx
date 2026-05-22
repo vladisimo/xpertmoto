@@ -22,7 +22,7 @@ const buttonVariants = cva(
          * Reserved for public marketing pages (homepage hero, fleet cards,
          * landing CTAs). Do not use in back-office or customer portal surfaces.
          * Authors include the trailing arrow in the label text, e.g.
-         * `<Button variant="cta">Rent with Scootering ➔</Button>`.
+         * `<Button variant="cta">Rent with XPERT Moto ➔</Button>`.
          */
         cta: "rounded-md bg-secondary text-secondary-foreground font-medium tracking-[0.02em] hover:bg-secondary/90 active:bg-secondary/80",
       },

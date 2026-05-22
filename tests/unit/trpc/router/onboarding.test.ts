@@ -13,7 +13,7 @@ vi.mock("@/server/services/audit", async () => ({
 }));
 vi.mock("@/lib/branding", () => ({
   getBranding: vi.fn().mockResolvedValue({
-    siteName: "Scootering",
+    siteName: "XPERT Moto",
     legalName: "Mercury Road Equipment Pty Ltd",
     abn: "36 614 422 187",
     supportEmail: "support@example.com",
@@ -197,7 +197,7 @@ describe("onboarding.bootstrap", () => {
     expect(result.consentDocs).toHaveLength(4);
     expect(result.consentDocs[0]?.key).toBe("TERMS");
     // Branding tokens were interpolated in body
-    expect(result.consentDocs[0]?.body).toContain("Scootering");
+    expect(result.consentDocs[0]?.body).toContain("XPERT Moto");
     expect(result.versions.terms).toMatch(/^v\d/);
   });
 });

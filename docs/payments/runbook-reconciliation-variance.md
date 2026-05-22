@@ -1,6 +1,6 @@
 # Runbook — Reconciliation Variance
 
-**Purpose:** Investigate and resolve any variance between Scootering's ledger, Stripe, and the bank statement.
+**Purpose:** Investigate and resolve any variance between XPERT Moto's ledger, Stripe, and the bank statement.
 
 **Audience:** Finance + Payments lead.
 

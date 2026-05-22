@@ -95,7 +95,7 @@ async function fromAddress(override?: string): Promise<string> {
   const branding = await getBranding();
   const raw =
     (await getString("integration:resend:from", "EMAIL_FROM")) ??
-    "no-reply@scootering.com.au";
+    "no-reply@xpertmoto.com.au";
   // If the caller (or env var) already provided a "Name <addr>" formatted
   // string, respect it. Otherwise prepend the branding site name so
   // recipients see the current trading name as the sender.

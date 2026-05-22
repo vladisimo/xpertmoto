@@ -17,8 +17,8 @@ import http from "k6/http";
 import { check, sleep } from "k6";
 import { Rate, Trend } from "k6/metrics";
 
-export const errorRate = new Rate("scootering_booking_errors");
-export const bookingLatency = new Trend("scootering_booking_latency_ms", true);
+export const errorRate = new Rate("xpertmoto_booking_errors");
+export const bookingLatency = new Trend("xpertmoto_booking_latency_ms", true);
 
 export const options = {
   scenarios: {
@@ -33,7 +33,7 @@ export const options = {
   },
   thresholds: {
     "http_req_duration{group:::booking}": ["p(99)<1000"],
-    scootering_booking_errors: ["rate<0.005"],
+    xpertmoto_booking_errors: ["rate<0.005"],
   },
 };
 

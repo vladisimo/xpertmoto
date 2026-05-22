@@ -1,13 +1,17 @@
-/* Scootering service worker — handles web push notifications. */
+/* XPERT Moto service worker — handles web push notifications. */
+// A static service worker can't read getBranding() at runtime. The push
+// payload carries its own `title`; the literal below is only the fallback
+// for an untitled push, so it's the one place a per-deployment brand string
+// is unavoidable.
 self.addEventListener("push", (event) => {
   if (!event.data) return;
   let payload;
   try {
     payload = event.data.json();
   } catch {
-    payload = { title: "Scootering", body: event.data.text() };
+    payload = { title: "XPERT Moto", body: event.data.text() };
   }
-  const { title = "Scootering", body = "", url = "/", tag } = payload;
+  const { title = "XPERT Moto", body = "", url = "/", tag } = payload;
   event.waitUntil(
     self.registration.showNotification(title, {
       body,

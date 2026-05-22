@@ -379,12 +379,16 @@ export function BackOfficeShell({
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const pathname = usePathname();
-
   // Close the mobile drawer on route change so tapping a nav item
-  // doesn't leave the sheet open over the destination page.
-  React.useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
+  // doesn't leave the sheet open over the destination page. Done via
+  // the setState-during-render pattern from the React docs ("You Might
+  // Not Need an Effect") to avoid the cascading-render flagged by the
+  // react-hooks/set-state-in-effect rule.
+  const [lastPathname, setLastPathname] = useState(pathname);
+  if (lastPathname !== pathname) {
+    setLastPathname(pathname);
+    if (mobileOpen) setMobileOpen(false);
+  }
 
   const handleSignOut = useCallback(() => {
     signOutAction();
@@ -441,10 +445,11 @@ export function BackOfficeShell({
 
         {/* Main area */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Mobile-only top bar. PWA / standalone-mode safe-area top is
-              handled by the body — we keep the bar a fixed 56px so the
-              page content always starts at the same y. */}
-          <div className="flex lg:hidden h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black px-4 text-white">
+          {/* Mobile-only top bar. In PWA standalone on notched devices the
+              status bar overlays the viewport, so we consume
+              safe-area-inset-top here — otherwise the burger sits under
+              the notch and there's no way to open the nav. */}
+          <div className="flex lg:hidden min-h-14 shrink-0 items-center gap-3 border-b border-white/10 bg-black px-4 pt-[env(safe-area-inset-top)] text-white">
             <Button
               variant="ghost"
               size="icon"

@@ -128,7 +128,7 @@ describe("booking wizard store", () => {
         disabled: false,
         onClick: () => {},
       });
-      const raw = localStorage.getItem("scootering-booking-wizard");
+      const raw = localStorage.getItem("xpertmoto-booking-wizard");
       expect(raw).not.toBeNull();
       const parsed = JSON.parse(raw!);
       expect(parsed.state).not.toHaveProperty("stepContinueAction");
@@ -141,7 +141,7 @@ describe("booking wizard store", () => {
       useBookingWizard.getState().setStep(5);
 
       // Sanity: Zustand persist writes to localStorage synchronously.
-      expect(localStorage.getItem("scootering-booking-wizard")).not.toBeNull();
+      expect(localStorage.getItem("xpertmoto-booking-wizard")).not.toBeNull();
 
       flushBookingWizard();
 
@@ -153,7 +153,7 @@ describe("booking wizard store", () => {
       // persist.clearStorage removes the row entirely — not just overwrites
       // with defaults. This is the belt-and-braces against a partial-write
       // that the plain reset() path wouldn't catch.
-      expect(localStorage.getItem("scootering-booking-wizard")).toBeNull();
+      expect(localStorage.getItem("xpertmoto-booking-wizard")).toBeNull();
 
       // Flag is set so /booking's useEffect skips URL-param seeding once
       // on the post-payment bounce.

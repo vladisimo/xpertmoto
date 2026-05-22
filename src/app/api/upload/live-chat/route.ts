@@ -13,7 +13,7 @@ const ALLOWED = new Set([
   "text/plain",
 ]);
 const MAX_BYTES = 15 * 1024 * 1024;
-const VISITOR_COOKIE = "scootering_vid";
+const VISITOR_COOKIE = "xpertmoto_vid";
 
 export const POST = withAudit(
   { name: "api.upload.liveChat", entity: "SupportMessage" },

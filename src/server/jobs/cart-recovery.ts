@@ -115,7 +115,7 @@ export async function runCartRecovery(
 
       const { type, stage } = STAGE_TYPE_MAP[nextStage]!;
       const checkoutUrl =
-        (process.env.APP_URL ?? "https://scootering.com.au") +
+        (process.env.APP_URL ?? "https://xpertmoto.com.au") +
         `/booking/resume/${booking.bookingReference}`;
 
       const html = await render(

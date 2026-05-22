@@ -34,12 +34,12 @@ if ! [ -x node_modules/.bin/tsc ]; then
   exit 0
 fi
 
-if node_modules/.bin/tsc --noEmit -p tsconfig.json 2>&1 | tee /tmp/.scootering-tsc.$$ >&2; then
-  rm -f /tmp/.scootering-tsc.$$
+if node_modules/.bin/tsc --noEmit -p tsconfig.json 2>&1 | tee /tmp/.xpertmoto-tsc.$$ >&2; then
+  rm -f /tmp/.xpertmoto-tsc.$$
   log INFO "typecheck-changed: clean"
   exit 0
 fi
-rm -f /tmp/.scootering-tsc.$$
+rm -f /tmp/.xpertmoto-tsc.$$
 echo "--- typecheck failed (see errors above) ---" >&2
 log WARN "typecheck-changed: errors"
 exit 1

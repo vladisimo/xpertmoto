@@ -15,10 +15,10 @@ import { test, expect } from "@playwright/test";
  * expanded here once `STORYBOOK`-style staff session helpers land.
  */
 
-test("public visit sets the scootering_vid cookie", async ({ page, context }) => {
+test("public visit sets the xpertmoto_vid cookie", async ({ page, context }) => {
   await page.goto("/");
   const cookies = await context.cookies();
-  const vid = cookies.find((c) => c.name === "scootering_vid");
+  const vid = cookies.find((c) => c.name === "xpertmoto_vid");
   expect(vid?.value).toMatch(/^v_/);
 });
 

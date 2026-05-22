@@ -1,3 +1,4 @@
+import { getBranding } from "@/lib/branding";
 import { prisma } from "@/lib/prisma";
 import { sendNotification } from "@/server/services/notification-sender";
 import { getQueue, registerWorker } from "./queue";
@@ -29,6 +30,8 @@ export function cardExpiresBy(
  * per customer (dedup via `sendNotification` dedupKey).
  */
 export async function runCardExpiryCheck(): Promise<number> {
+  const { siteName } = await getBranding();
+  const appUrl = process.env.APP_URL ?? "https://xpertmoto.com.au";
   const plans = await prisma.bookingBillingPlan.findMany({
     where: { status: "ACTIVE" },
     include: {
@@ -87,7 +90,7 @@ export async function runCardExpiryCheck(): Promise<number> {
         channels: ["EMAIL"],
         subject: `Your card expires soon — action needed for ${plan.booking.bookingReference}`,
         title: "Card on file expires soon",
-        body: `Hi ${plan.booking.customer.firstName ?? "there"},\n\nThe card we have on file for your Scootering booking ${plan.booking.bookingReference} expires ${String(expMonth).padStart(2, "0")}/${expYear}. Your rental has ${remaining} more scheduled charge(s) — the last one on ${lastCharge.toLocaleDateString("en-AU")}.\n\nPlease sign in and update your card: ${process.env.APP_URL ?? "https://scootering.com.au"}/dashboard/profile\n\nIf we can't take the next recurring charge, we'll send you a one-off "Pay now" link — but updating your card is the smoothest path.\n\n— Scootering`,
+        body: `Hi ${plan.booking.customer.firstName ?? "there"},\n\nThe card we have on file for your ${siteName} booking ${plan.booking.bookingReference} expires ${String(expMonth).padStart(2, "0")}/${expYear}. Your rental has ${remaining} more scheduled charge(s) — the last one on ${lastCharge.toLocaleDateString("en-AU")}.\n\nPlease sign in and update your card: ${appUrl}/dashboard/profile\n\nIf we can't take the next recurring charge, we'll send you a one-off "Pay now" link — but updating your card is the smoothest path.\n\n— ${siteName}`,
         bookingId: plan.bookingId,
         dedupKey: `card-expiry-warn-${days}d:${plan.id}`,
         data: {

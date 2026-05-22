@@ -17,7 +17,7 @@ first_unchecked="$(awk '
 ' "$claude_md")"
 
 if [ -n "$first_unchecked" ]; then
-  echo "Current Scootering build focus (from CLAUDE.md BUILD ORDER):" >&2
+  echo "Current XPERT Moto build focus (from CLAUDE.md BUILD ORDER):" >&2
   echo "  $first_unchecked" >&2
   log INFO "on-start: surfaced focus: $first_unchecked"
 fi

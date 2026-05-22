@@ -44,7 +44,7 @@ async function getWebPush() {
   const wp = (mod as unknown as { default?: typeof mod }).default ?? mod;
   const sig = `${pub.slice(0, 8)}:${priv.slice(0, 8)}`;
   if (lastVapidSig !== sig) {
-    wp.setVapidDetails(`mailto:${contact ?? "ops@scootering.com.au"}`, pub, priv);
+    wp.setVapidDetails(`mailto:${contact ?? "ops@xpertmoto.com.au"}`, pub, priv);
     lastVapidSig = sig;
   }
   return wp;

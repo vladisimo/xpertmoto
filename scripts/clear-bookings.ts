@@ -17,7 +17,7 @@ function getS3Env(): S3Env {
   return {
     publicUrl: process.env.S3_PUBLIC_URL,
     endpoint: process.env.S3_ENDPOINT,
-    bucket: process.env.S3_BUCKET ?? "scootering",
+    bucket: process.env.S3_BUCKET ?? "xpertmoto",
   };
 }
 

@@ -33,7 +33,7 @@ const STATUS_MAP: Record<string, VehiclePayload["status"]> = {
   "write-off": "WRITTEN_OFF",
 };
 
-const DEPOT_NAME = "Scootering Lewisham";
+const DEPOT_NAME = "XPERT Moto Lewisham";
 const DEFAULT_COLOUR = "Unknown";
 const LAMS = "LAMS Motorcycle";
 const UNRESTRICTED = "Unrestricted Motorcycle";

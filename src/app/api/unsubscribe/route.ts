@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { getBranding } from "@/lib/branding";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { verifyUnsubscribeToken } from "@/lib/unsubscribe";
@@ -29,8 +30,9 @@ export async function GET(req: Request) {
     return new NextResponse("Could not complete unsubscribe", { status: 500 });
   }
 
+  const { siteName } = await getBranding();
   const html = `<!doctype html>
-<html lang="en-AU"><head><meta charset="utf-8"><title>Unsubscribed — Scootering</title>
+<html lang="en-AU"><head><meta charset="utf-8"><title>Unsubscribed — ${siteName}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:6rem auto;padding:0 1rem;color:#0a0a0a}h1{margin-bottom:.5rem}p{color:#525252;line-height:1.5}</style>
 </head><body>

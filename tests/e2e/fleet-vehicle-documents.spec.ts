@@ -8,7 +8,7 @@ import { prisma } from "../../src/lib/prisma";
  * updated to match.
  */
 
-const STAFF = { email: "staff.gold-coast@scootering.com.au", password: "staff1234" };
+const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/login");

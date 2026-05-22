@@ -10,7 +10,7 @@
 Three independent sources of truth must agree, every day, to within zero variance:
 
 ```
-          Scootering DB (Payment rows)
+          XPERT Moto DB (Payment rows)
                    ↕  (match by stripeChargeId)
               Stripe API
          (/v1/balance_transactions)

@@ -36,7 +36,7 @@ export const INTEGRATION_SERVICES: IntegrationService[] = [
       { key: "integration:twilio:accountSid", envFallback: "TWILIO_ACCOUNT_SID", label: "Account SID", secret: false },
       { key: "integration:twilio:authToken", envFallback: "TWILIO_AUTH_TOKEN", label: "Auth token", secret: true },
       { key: "integration:twilio:fromNumber", envFallback: "TWILIO_FROM_NUMBER", label: "From number", secret: false, helperText: "+61412345678" },
-      { key: "integration:app:publicUrl", envFallback: "NEXT_PUBLIC_APP_URL", label: "Public app URL (for StatusCallback)", secret: false, helperText: "https://app.scootering.com.au" },
+      { key: "integration:app:publicUrl", envFallback: "NEXT_PUBLIC_APP_URL", label: "Public app URL (for StatusCallback)", secret: false, helperText: "https://app.xpertmoto.com.au" },
     ],
   },
   {
@@ -45,7 +45,7 @@ export const INTEGRATION_SERVICES: IntegrationService[] = [
     fields: [
       { key: "integration:resend:apiKey", envFallback: "RESEND_API_KEY", label: "API key", secret: true, helperText: "re_…" },
       { key: "integration:resend:webhookSecret", envFallback: "RESEND_WEBHOOK_SECRET", label: "Webhook signing secret", secret: true, helperText: "whsec_…" },
-      { key: "integration:resend:from", envFallback: "EMAIL_FROM", label: "From address", secret: false, helperText: "no-reply@scootering.com.au" },
+      { key: "integration:resend:from", envFallback: "EMAIL_FROM", label: "From address", secret: false, helperText: "no-reply@xpertmoto.com.au" },
     ],
   },
   {
@@ -62,7 +62,7 @@ export const INTEGRATION_SERVICES: IntegrationService[] = [
     fields: [
       { key: "integration:vapid:publicKey", envFallback: "VAPID_PUBLIC_KEY", label: "VAPID public key", secret: false, publiclyExposable: true },
       { key: "integration:vapid:privateKey", envFallback: "VAPID_PRIVATE_KEY", label: "VAPID private key", secret: true },
-      { key: "integration:vapid:contact", envFallback: "VAPID_CONTACT", label: "Contact email", secret: false, helperText: "ops@scootering.com.au" },
+      { key: "integration:vapid:contact", envFallback: "VAPID_CONTACT", label: "Contact email", secret: false, helperText: "ops@xpertmoto.com.au" },
     ],
   },
   {

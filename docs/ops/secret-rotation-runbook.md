@@ -1,6 +1,6 @@
 # Secret rotation runbook
 
-This runbook covers every secret the Scootering platform holds and the
+This runbook covers every secret the XPERT Moto platform holds and the
 procedure for rotating each. Follow the order precisely — some secrets
 depend on others (e.g. rotating `AUTH_SECRET` invalidates every active
 session).
@@ -51,7 +51,7 @@ and surface in `/admin/integrations`. Database-level secrets
 
 ## Procedure — Database password
 
-1. Create the new password in the Postgres instance: `ALTER USER scootering WITH PASSWORD '<new>';`.
+1. Create the new password in the Postgres instance: `ALTER USER xpertmoto WITH PASSWORD '<new>';`.
 2. Update `DATABASE_URL` in the env of every process (web, worker, cron host).
 3. Rolling-restart the web fleet then the worker — connection pool will pick up the new credential on next connect.
 4. Test: health endpoint `GET /api/health` returns `{"status":"ok","checks":{"database":{"ok":true}}}`.

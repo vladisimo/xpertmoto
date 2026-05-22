@@ -28,11 +28,13 @@ export function VehicleCard({
   selected,
   onSelect,
   compact,
+  availableCount,
 }: {
   vehicle: VehicleCardVehicle;
   selected: boolean;
   onSelect: () => void;
   compact?: boolean;
+  availableCount?: number;
 }) {
   const [specOpen, setSpecOpen] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
@@ -59,12 +61,17 @@ export function VehicleCard({
               alt={`${vehicle.make} ${vehicle.model}`}
               fill
               sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 240px"
-              className="object-cover"
+              className="object-contain"
             />
           ) : (
             <div className="flex h-full items-center justify-center">
               <span className="caption">Photo coming soon</span>
             </div>
+          )}
+          {availableCount !== undefined && availableCount > 0 && (
+            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold text-primary-foreground shadow">
+              {availableCount} available
+            </span>
           )}
           {hasMultiplePhotos && (
             <span
@@ -81,7 +88,12 @@ export function VehicleCard({
                   setLightboxOpen(true);
                 }
               }}
-              className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/70 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/85"
+              className={cn(
+                "absolute inline-flex items-center gap-1 rounded-full bg-black/70 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm transition-colors hover:bg-black/85",
+                availableCount !== undefined && availableCount > 0
+                  ? "bottom-2 right-2"
+                  : "right-2 top-2",
+              )}
             >
               <Camera className="h-3 w-3" />
               {vehicle.images.length}

@@ -75,4 +75,15 @@ export default [
       "no-console": "off",
     },
   },
+  {
+    // Playwright fixtures destructure a callback parameter named `use`
+    // (`async ({ ... }, use) => { await use(value); }`). The
+    // react-hooks/rules-of-hooks rule misreads `use(value)` as a React `use()`
+    // hook call. Disable inside the fixtures dir only; product code is
+    // unaffected.
+    files: ["tests/e2e/_fixtures/**/*.{ts,tsx}"],
+    rules: {
+      "react-hooks/rules-of-hooks": "off",
+    },
+  },
 ];

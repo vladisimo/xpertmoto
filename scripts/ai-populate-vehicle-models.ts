@@ -21,8 +21,8 @@ const prisma = new PrismaClient();
 const {
   OPENROUTER_API_KEY,
   OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1",
-  OPENROUTER_HTTP_REFERER = "https://scootering.com.au",
-  OPENROUTER_APP_TITLE = "Scootering",
+  OPENROUTER_HTTP_REFERER = "https://xpertmoto.com.au",
+  OPENROUTER_APP_TITLE = "XPERT Moto",
 } = process.env;
 
 if (!OPENROUTER_API_KEY) {

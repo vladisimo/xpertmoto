@@ -32,7 +32,7 @@ export function BookingStickyActions({
 
   if (status === "DISPUTED") {
     return (
-      <div className="sticky top-14 z-10 -mx-4 border-b border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive backdrop-blur supports-[backdrop-filter]:bg-destructive/10 sm:-mx-6 sm:px-6 lg:top-0 lg:-mx-8 lg:px-8">
+      <div className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-10 -mx-3 border-b border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive backdrop-blur supports-[backdrop-filter]:bg-destructive/10 sm:-mx-6 sm:px-6 lg:top-0 lg:-mx-8 lg:px-8">
         <div className="flex gap-3">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           <p>
@@ -54,7 +54,7 @@ export function BookingStickyActions({
   if (!canCancel && !canExtend) return null;
 
   return (
-    <div className="sticky top-14 z-10 -mx-4 border-b border-border bg-background/95 px-4 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-6 sm:px-6 lg:top-0 lg:-mx-8 lg:px-8">
+    <div className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-10 -mx-3 border-b border-border bg-background/95 px-3 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-6 sm:px-6 lg:top-0 lg:-mx-8 lg:px-8">
       <div className="flex gap-2 sm:justify-end">
         {canExtend && (
           <Button

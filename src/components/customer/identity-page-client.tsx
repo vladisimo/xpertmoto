@@ -14,6 +14,7 @@ import { CheckCircle2, Download, Loader2, Upload, XCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DataTable } from "@/components/ui/data-table";
+import { LicenceDropzonePair } from "@/components/customer/licence-dropzone-pair";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { trpc } from "@/lib/trpc/client";
 import { useDocumentAccessLogger } from "@/hooks/use-document-access-logger";
@@ -69,119 +70,9 @@ function isoDate(d: Date): string {
 }
 
 export function DriversLicenceSection({ initial }: { initial: DriversLicenceInitial }) {
-  const util = trpc.useUtils();
-  const upload = trpc.customer.uploadIdentityDocument.useMutation();
-  const extractLicence = trpc.customer.extractLicenceFromImage.useMutation();
-  const updateProfile = trpc.customer.updateProfile.useMutation();
-
-  const [uploadedFront, setUploadedFront] = React.useState<boolean>(false);
-  const [uploadedBack, setUploadedBack] = React.useState<boolean>(false);
-  const [side, setSide] = React.useState<"front" | "back">(
-    initial.licenceImageFront && !initial.licenceImageBack ? "back" : "front",
-  );
-  const [phase, setPhase] = React.useState<"idle" | "uploading" | "done" | "error">("idle");
-  const [error, setError] = React.useState<string | null>(null);
-  const [toast, setToast] = React.useState<string | null>(null);
-  const inputRef = React.useRef<HTMLInputElement | null>(null);
-
   const expiryTone = expiryStatus(initial.licenceExpiry);
-  const hasFront = !!initial.licenceImageFront || uploadedFront;
-  const hasBack = !!initial.licenceImageBack || uploadedBack;
-  const complete = hasFront && hasBack;
-
-  function openPicker(nextSide: "front" | "back") {
-    setError(null);
-    setToast(null);
-    setSide(nextSide);
-    // Reset the native input so picking the same filename twice still fires onChange.
-    if (inputRef.current) inputRef.current.value = "";
-    inputRef.current?.click();
-  }
-
-  async function handleFilePicked(file: File | null) {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setError("Please pick an image of your licence.");
-      return;
-    }
-    setPhase("uploading");
-    setError(null);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/upload/identity-document", { method: "POST", body: fd });
-      if (!res.ok) {
-        const j = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(j.error ?? `Upload failed (${res.status})`);
-      }
-      const { key } = (await res.json()) as { key: string };
-      await upload.mutateAsync({
-        type: side === "front" ? "LICENCE_FRONT" : "LICENCE_BACK",
-        imageKey: key,
-      });
-
-      if (side === "front") {
-        setUploadedFront(true);
-        try {
-          const r = await extractLicence.mutateAsync({ imageKey: key });
-          if (r.confidence >= 0.7) {
-            const patch: Record<string, string> = {};
-            if (r.licenceNumber) patch.licenceNumber = r.licenceNumber;
-            if (r.state) patch.licenceState = r.state;
-            if (r.licenceClass) patch.licenceClass = r.licenceClass;
-            if (r.expiryDate) patch.licenceExpiry = isoDate(new Date(r.expiryDate));
-            if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
-            if (Object.keys(patch).length > 0) {
-              try {
-                await updateProfile.mutateAsync(
-                  patch as unknown as Parameters<typeof updateProfile.mutateAsync>[0],
-                );
-              } catch {
-                // non-fatal
-              }
-            }
-          }
-        } catch {
-          // OCR is non-fatal.
-        }
-      } else {
-        setUploadedBack(true);
-      }
-
-      await util.customer.identityDocuments.invalidate().catch(() => undefined);
-      await util.customer.me.invalidate().catch(() => undefined);
-
-      if (side === "front") {
-        setToast("Front saved. Now take a photo of the back.");
-        setSide("back");
-        setPhase("idle");
-      } else {
-        setToast("Driver's licence saved.");
-        setPhase("done");
-      }
-    } catch (e) {
-      setPhase("error");
-      setError(e instanceof Error ? e.message : "Upload failed");
-    }
-  }
-
-  const primaryLabel = complete
-    ? "Replace photos of driver's licence"
-    : hasFront
-      ? "Upload photo of back of licence"
-      : "Upload photo of driver's licence";
-
-  function onPrimaryClick() {
-    if (complete) {
-      setUploadedFront(false);
-      setUploadedBack(false);
-      openPicker("front");
-    } else if (hasFront) {
-      openPicker("back");
-    } else {
-      openPicker("front");
-    }
-  }
+  const hasFront = !!initial.licenceImageFront;
+  const hasBack = !!initial.licenceImageBack;
 
   return (
     <div className="space-y-3">
@@ -202,81 +93,18 @@ export function DriversLicenceSection({ initial }: { initial: DriversLicenceInit
           )}
           Back
         </span>
-        {initial.licenceVerifiedAt && (
-          <StatusBadge status="VERIFIED" />
-        )}
+        {initial.licenceVerifiedAt && <StatusBadge status="VERIFIED" />}
         {expiryTone && <StatusBadge status={expiryTone} />}
       </div>
 
-      {(initial.licenceImageFront || initial.licenceImageBack) && (
-        <div className="grid grid-cols-2 gap-2">
-          {initial.licenceImageFront && (
-            <div className="relative aspect-[8/5] overflow-hidden rounded-md border border-border bg-muted/40">
-              <Image
-                src={initial.licenceImageFront}
-                alt="Driver's licence front"
-                fill
-                sizes="(max-width: 768px) 50vw, 200px"
-                className="object-contain"
-                unoptimized
-              />
-            </div>
-          )}
-          {initial.licenceImageBack && (
-            <div className="relative aspect-[8/5] overflow-hidden rounded-md border border-border bg-muted/40">
-              <Image
-                src={initial.licenceImageBack}
-                alt="Driver's licence back"
-                fill
-                sizes="(max-width: 768px) 50vw, 200px"
-                className="object-contain"
-                unoptimized
-              />
-            </div>
-          )}
-        </div>
-      )}
-
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/jpeg,image/png,image/webp"
-        capture="environment"
-        className="hidden"
-        onChange={(e) => handleFilePicked(e.target.files?.[0] ?? null)}
+      <LicenceDropzonePair
+        profile={{
+          licenceImageFront: initial.licenceImageFront,
+          licenceImageBack: initial.licenceImageBack,
+          licenceExpiry: initial.licenceExpiry,
+          licenceVerifiedAt: initial.licenceVerifiedAt,
+        }}
       />
-
-      {error && (
-        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">
-          <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
-      {toast && (
-        <div className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 p-2 text-sm text-foreground">
-          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <span>{toast}</span>
-        </div>
-      )}
-
-      <Button
-        size="sm"
-        onClick={onPrimaryClick}
-        disabled={phase === "uploading"}
-        className="w-full sm:w-auto"
-      >
-        {phase === "uploading" ? (
-          <>
-            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-            Uploading {side === "front" ? "front" : "back"}…
-          </>
-        ) : (
-          <>
-            <Upload className="mr-1.5 h-3.5 w-3.5" />
-            {primaryLabel}
-          </>
-        )}
-      </Button>
     </div>
   );
 }

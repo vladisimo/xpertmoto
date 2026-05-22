@@ -7,7 +7,7 @@
 
 ## 1. Scope
 
-This document maps every code path by which money moves — or fails to move — through Scootering. It is intentionally literal: every arrow corresponds to a function call in the current codebase with file and function references. Gaps (paths the spec demands but the code does not implement) are called out inline with the `[G<n>]` marker that matches the risk register.
+This document maps every code path by which money moves — or fails to move — through XPERT Moto. It is intentionally literal: every arrow corresponds to a function call in the current codebase with file and function references. Gaps (paths the spec demands but the code does not implement) are called out inline with the `[G<n>]` marker that matches the risk register.
 
 ## 2. Top-level actor diagram
 
@@ -31,7 +31,7 @@ flowchart LR
   App -->|"sendNotification"| Twilio
   App -->|"sendNotification"| Resend
 
-  subgraph App[Scootering Next.js app]
+  subgraph App[XPERT Moto Next.js app]
     direction TB
     TRPC[tRPC routers]
     Jobs[BullMQ workers]
@@ -208,7 +208,7 @@ flowchart LR
     Twilio
     Resend
   end
-  subgraph Internal[Scootering VPC]
+  subgraph Internal[XPERT Moto VPC]
     App
     DB[(Postgres)]
     Redis

@@ -106,6 +106,42 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
           </CardContent>
         </Card>
 
+        <Card>
+          <EditableCardHeader title="Pricing" onEdit={() => setEditing("pricing")} />
+          <CardContent>
+            <dl className="space-y-2 text-sm">
+              <Row
+                label="Base rate"
+                value={
+                  v.baseRateOverride != null
+                    ? `${formatCurrency(Number(v.baseRateOverride))} (vehicle override)`
+                    : v.catalogueModel?.baseRate != null
+                      ? `${formatCurrency(Number(v.catalogueModel.baseRate))} (from model)`
+                      : "— (uses category default)"
+                }
+              />
+              <Row
+                label="Base period"
+                value={
+                  v.basePeriodHoursOverride
+                    ? `${v.basePeriodHoursOverride === "H48" ? "48 h" : "24 h"} (vehicle override)`
+                    : v.catalogueModel?.basePeriodHours
+                      ? `${v.catalogueModel.basePeriodHours === "H48" ? "48 h" : "24 h"} (from model)`
+                      : "24 h (default)"
+                }
+              />
+              <Row
+                label="Tier ladder"
+                value={
+                  v.catalogueModel
+                    ? "Inherited from model — edit at /admin/pricing → Models"
+                    : "Inherited from category — edit at /admin/pricing → Rates → Tiered"
+                }
+              />
+            </dl>
+          </CardContent>
+        </Card>
+
         {v.notes && (
           <Card className="md:col-span-2">
             <CardHeader>

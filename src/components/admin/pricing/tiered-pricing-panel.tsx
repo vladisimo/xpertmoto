@@ -18,20 +18,29 @@ export function TieredPricingPanel() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const categoriesQuery = trpc.admin.pricingSummary.useQuery();
+  const modelsQuery = trpc.admin.modelRates.useQuery(undefined, {
+    enabled: scope === "MODEL",
+  });
   const vehiclesQuery = trpc.fleet.listVehicles.useQuery(undefined, {
     enabled: scope === "VEHICLE",
   });
 
   const categories = categoriesQuery.data?.categories ?? [];
+  const models = modelsQuery.data?.models ?? [];
   const vehicles = vehiclesQuery.data ?? [];
 
   const scopeOptions =
     scope === "CATEGORY"
       ? categories.map((c) => ({ id: c.id, label: `${c.name} (${c.engineCapacity}cc)` }))
-      : vehicles.map((v) => ({
-          id: v.id,
-          label: `${v.internalCode} · ${v.make} ${v.model} (${v.rego})`,
-        }));
+      : scope === "MODEL"
+        ? models.map((m) => ({
+            id: m.id,
+            label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
+          }))
+        : vehicles.map((v) => ({
+            id: v.id,
+            label: `${v.internalCode} · ${v.make} ${v.model} (${v.rego})`,
+          }));
 
   const selectedLabel =
     scopeOptions.find((o) => o.id === selectedId)?.label ?? "";
@@ -41,10 +50,13 @@ export function TieredPricingPanel() {
     setSelectedId(null);
   };
 
+  const scopeNoun =
+    scope === "CATEGORY" ? "category" : scope === "MODEL" ? "model" : "vehicle";
+
   return (
     <PageSection
       title="Tiered pricing"
-      description="Progressive, tax-bracket-style rate ladder. Fills cheaper tiers the longer a rental runs. When set, this replaces the flat duration discount."
+      description="Progressive (tax-bracket) or per-week ladder. Vehicle ladders override model ladders, which override category ladders."
     >
       <div className="space-y-6">
         <div className="grid gap-3 md:grid-cols-[12rem_1fr]">
@@ -56,25 +68,25 @@ export function TieredPricingPanel() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="CATEGORY">Vehicle category</SelectItem>
+                <SelectItem value="MODEL">Vehicle model (default per make/model)</SelectItem>
                 <SelectItem value="VEHICLE">Specific vehicle (override)</SelectItem>
               </SelectContent>
             </Select>
           </label>
           <label className="flex flex-col gap-2 text-sm">
             <span className="text-muted-foreground">
-              {scope === "CATEGORY" ? "Category" : "Vehicle"}
+              {scopeNoun[0]!.toUpperCase() + scopeNoun.slice(1)}
             </span>
             <Select
               value={selectedId ?? ""}
               onValueChange={(v) => setSelectedId(v)}
-              disabled={scope === "VEHICLE" && vehiclesQuery.isLoading}
+              disabled={
+                (scope === "VEHICLE" && vehiclesQuery.isLoading) ||
+                (scope === "MODEL" && modelsQuery.isLoading)
+              }
             >
               <SelectTrigger>
-                <SelectValue
-                  placeholder={
-                    scope === "CATEGORY" ? "Pick a category" : "Pick a vehicle"
-                  }
-                />
+                <SelectValue placeholder={`Pick a ${scopeNoun}`} />
               </SelectTrigger>
               <SelectContent>
                 {scopeOptions.map((o) => (
@@ -101,8 +113,7 @@ export function TieredPricingPanel() {
           />
         ) : (
           <p className="text-sm text-muted-foreground">
-            Pick a {scope === "CATEGORY" ? "category" : "vehicle"} to view or
-            edit its tier ladder.
+            Pick a {scopeNoun} to view or edit its tier ladder.
           </p>
         )}
       </div>

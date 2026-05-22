@@ -125,7 +125,7 @@ const emptyCustomer: WizardCustomer = {
  * `/booking/page.tsx` knows to skip one hydration on the post-payment
  * bounce. Consumed + cleared on the next mount of /booking.
  */
-export const POST_BOOKING_RESET_FLAG = "scootering-booking-just-completed";
+export const POST_BOOKING_RESET_FLAG = "xpertmoto-booking-just-completed";
 
 /**
  * Pragmatic check for whether the customer block holds enough data to
@@ -277,7 +277,7 @@ export const useBookingWizard = create<WizardState>()(
         }),
     }),
     {
-      name: "scootering-booking-wizard",
+      name: "xpertmoto-booking-wizard",
       // `stepContinueAction` holds a function — exclude it from persistence
       // so we don't serialise an incomplete record and rehydrate with
       // `onClick` missing.

@@ -53,18 +53,22 @@ export function MobileDetailSheet({
         side={side}
         className={cn(
           "flex flex-col p-0",
-          side === "bottom" && "h-[92vh] rounded-t-xl",
+          // dvh (dynamic viewport height) so the sheet shrinks with the
+          // iOS Safari URL bar and the sticky footer stays visible.
+          side === "bottom" && "h-[92dvh] rounded-t-xl",
           side === "right" && "w-full sm:max-w-md",
           className,
         )}
       >
-        <header
-          className={cn(
-            "shrink-0 border-b border-border px-4 py-3",
-            hideTitle && "sr-only",
-          )}
-        >
-          <SheetTitle className="text-base font-semibold">{title}</SheetTitle>
+        <header className="shrink-0 border-b border-border px-4 py-3">
+          <SheetTitle
+            className={cn(
+              "text-base font-semibold",
+              hideTitle && "sr-only",
+            )}
+          >
+            {title}
+          </SheetTitle>
           {description ? (
             <SheetDescription className="mt-0.5 text-caption text-muted-foreground">
               {description}

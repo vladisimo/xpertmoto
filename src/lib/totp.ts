@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import { encryptSecret, decryptSecret } from "@/lib/crypto";
 import type { EncryptedSecret } from "@/lib/crypto";
 
-const ISSUER = "Scootering";
+const ISSUER = "XPERT Moto";
 const PERIOD_SECONDS = 30;
 const DIGITS = 6;
 const ALGORITHM = "SHA1"; // RFC 6238 recommends SHA1 for max authenticator-app compatibility

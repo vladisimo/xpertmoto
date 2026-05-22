@@ -22,6 +22,7 @@ type Props = {
   pickupDateTime: string;
   returnDateTime: string;
   balanceDue: number;
+  hasSignedReturnAssessment?: boolean;
 };
 
 type PromptKind =
@@ -32,9 +33,17 @@ type PromptKind =
   | "markReturned"
   | "markDisputed"
   | "resolveDispute"
-  | "completeFromReturned";
+  | "completeFromReturned"
+  | "closeOut";
 
-export function StatusActions({ bookingId, status, pickupDateTime, returnDateTime: _returnDateTime, balanceDue }: Props) {
+export function StatusActions({
+  bookingId,
+  status,
+  pickupDateTime,
+  returnDateTime: _returnDateTime,
+  balanceDue,
+  hasSignedReturnAssessment = false,
+}: Props) {
   const router = useRouter();
   const [prompt, setPrompt] = useState<PromptKind | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -59,6 +68,7 @@ export function StatusActions({ bookingId, status, pickupDateTime, returnDateTim
   const markDisputed = trpc.staffBooking.markDisputed.useMutation({ onSuccess: refresh, onError });
   const resolveDispute = trpc.staffBooking.resolveDispute.useMutation({ onSuccess: refresh, onError });
   const completeFromReturned = trpc.staffBooking.completeFromReturned.useMutation({ onSuccess: refresh, onError });
+  const closeOut = trpc.staffBooking.closeOut.useMutation({ onSuccess: refresh, onError });
 
   type Option = { label: string; onSelect: () => void; destructive?: boolean };
   const options: Option[] = [];
@@ -88,8 +98,15 @@ export function StatusActions({ bookingId, status, pickupDateTime, returnDateTim
   if (["ACTIVE", "CHECKED_OUT"].includes(status))
     options.push({ label: "→ Overdue", onSelect: () => setPrompt("markOverdue") });
   if (["ACTIVE", "OVERDUE", "CHECKED_OUT"].includes(status)) {
-    options.push({ label: "→ Check in", onSelect: href(`/staff/bookings/${bookingId}/check-in`) });
-    options.push({ label: "→ Returned (skip settlement)", onSelect: () => setPrompt("markReturned") });
+    if (hasSignedReturnAssessment) {
+      // Check-in wizard is done and the return assessment is signed;
+      // the only meaningful close-out is "→ Completed". Drop the
+      // misleading "skip settlement" path here.
+      options.push({ label: "→ Completed", onSelect: () => setPrompt("closeOut") });
+    } else {
+      options.push({ label: "→ Check in", onSelect: href(`/staff/bookings/${bookingId}/check-in`) });
+      options.push({ label: "→ Returned (skip settlement)", onSelect: () => setPrompt("markReturned") });
+    }
   }
   if (status === "RETURNED") options.push({ label: "→ Completed", onSelect: () => setPrompt("completeFromReturned") });
   if (!["CANCELLED", "DISPUTED", "NO_SHOW"].includes(status))
@@ -155,6 +172,13 @@ export function StatusActions({ bookingId, status, pickupDateTime, returnDateTim
       )}
       {prompt === "completeFromReturned" && (
         <ReasonInline onCancel={() => setPrompt(null)} pending={completeFromReturned.isPending} onSubmit={(r) => completeFromReturned.mutate({ bookingId, notes: r })} placeholder="Settlement notes (optional)" />
+      )}
+      {prompt === "closeOut" && (
+        <ReturnedInline
+          onCancel={() => setPrompt(null)}
+          pending={closeOut.isPending}
+          onSubmit={(v) => closeOut.mutate({ bookingId, ...v })}
+        />
       )}
     </div>
   );

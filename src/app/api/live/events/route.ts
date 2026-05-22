@@ -14,7 +14,7 @@ import {
  *   ?role=staff     → presence feed (every visitor) + all chat channels
  *                     for LIVE_VIEW conversations. Requires staff auth.
  *   (no query)      → visitor feed: chat events for their own conversation
- *                     only. Identity from the `scootering_vid` cookie.
+ *                     only. Identity from the `xpertmoto_vid` cookie.
  *
  * The route owns one Redis subscriber per HTTP connection. On disconnect
  * the subscriber is torn down. A 25-second keep-alive comment frame keeps
@@ -22,7 +22,7 @@ import {
  */
 
 const KEEPALIVE_MS = 25_000;
-const VISITOR_COOKIE = "scootering_vid";
+const VISITOR_COOKIE = "xpertmoto_vid";
 
 type SSEController = ReadableStreamDefaultController<Uint8Array>;
 

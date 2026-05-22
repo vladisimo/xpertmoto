@@ -85,7 +85,7 @@ export const totpRouter = createTRPCRouter({
           message: "2FA is already enabled. Disable it first to re-enrol.",
         });
       }
-      const email = ctx.user.email ?? `user-${ctx.user.id}@scootering.local`;
+      const email = ctx.user.email ?? `user-${ctx.user.id}@xpertmoto.local`;
       const enrolment = generateTotpEnrolment(email);
       await ctx.prisma.userTotp.upsert({
         where: { userId: ctx.user.id },

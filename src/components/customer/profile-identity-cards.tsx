@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Client island for /dashboard/profile. Renders three IdentityUploadCard
- * instances (licence front, licence back, passport) and an "Edit details"
- * form that covers the identity text fields + contact info.
+ * Client island for /dashboard/profile. Renders the read/edit form for
+ * identity text fields and contact info. Image uploads live on
+ * /dashboard/documents (see identity-page-client.tsx).
  */
 
 import { useState } from "react";

@@ -15,7 +15,7 @@ function bookingRef(i: number) {
 }
 
 async function main() {
-  console.log("🌱 Seeding Scootering...");
+  console.log("🌱 Seeding XPERT Moto...");
 
   // Wipe (dev only)
   await prisma.$transaction([
@@ -65,7 +65,7 @@ async function main() {
   // Organisation
   await prisma.organisation.create({
     data: {
-      name: "Scootering Pty Ltd",
+      name: "XPERT Moto Group Pty Ltd",
       abn: "72 629 456 408",
       settings: { currency: "AUD", gstRate: 0.1, acn: "629 456 408" },
     },
@@ -74,14 +74,14 @@ async function main() {
   // Depots
   const lewisham = await prisma.depot.create({
     data: {
-      name: "Scootering Lewisham",
+      name: "XPERT Moto Lewisham",
       slug: "lewisham",
       addressLine1: "798 Parramatta Road",
       suburb: "Lewisham",
       state: "NSW",
       postcode: "2049",
       phone: "+61 433 880 748",
-      email: "book@scootering.com.au",
+      email: "book@xpertmoto.com.au",
       timezone: "Australia/Sydney",
     },
   });
@@ -214,7 +214,7 @@ async function main() {
 
   const admin = await prisma.user.create({
     data: {
-      email: "admin@scootering.com.au",
+      email: "admin@xpertmoto.com.au",
       firstName: "Admin",
       lastName: "User",
       passwordHash: adminPw,
@@ -226,7 +226,7 @@ async function main() {
   for (const [i, d] of depots.entries()) {
     const mgr = await prisma.user.create({
       data: {
-        email: `manager.${d.slug}@scootering.com.au`,
+        email: `manager.${d.slug}@xpertmoto.com.au`,
         firstName: "Manager",
         lastName: d.name.split(" ").pop() ?? "",
         passwordHash: staffPw,
@@ -240,7 +240,7 @@ async function main() {
     });
     const staff = await prisma.user.create({
       data: {
-        email: `staff.${d.slug}@scootering.com.au`,
+        email: `staff.${d.slug}@xpertmoto.com.au`,
         firstName: "Staff",
         lastName: d.name.split(" ").pop() ?? "",
         passwordHash: staffPw,
@@ -1545,9 +1545,9 @@ async function main() {
   }
 
   console.log("✅ Seed complete.");
-  console.log("   Admin:    admin@scootering.com.au / admin1234");
-  console.log("   Manager:  manager.gold-coast@scootering.com.au / staff1234");
-  console.log("   Staff:    staff.gold-coast@scootering.com.au / staff1234");
+  console.log("   Admin:    admin@xpertmoto.com.au / admin1234");
+  console.log("   Manager:  manager.gold-coast@xpertmoto.com.au / staff1234");
+  console.log("   Staff:    staff.gold-coast@xpertmoto.com.au / staff1234");
   console.log("   Customer: sarah.smith@example.com / customer1234");
 }
 

@@ -20,7 +20,7 @@ const MODEL_SLUG: Record<string, string> = {
 const kymcoFetch = (url: string): Promise<Response> =>
   fetch(url, {
     headers: {
-      "User-Agent": "ScooteringFleetEnricher/1.0 (+https://scootering.com.au)",
+      "User-Agent": "XpertMotoFleetEnricher/1.0 (+https://xpertmoto.com.au)",
       Accept: "text/html,application/xhtml+xml,application/pdf",
     },
   });
