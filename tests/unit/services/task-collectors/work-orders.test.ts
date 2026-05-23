@@ -23,7 +23,7 @@ describe("collectWorkOrderTasks", () => {
         scheduledStartAt: null,
         createdAt: new Date(),
         type: "BRAKE_SERVICE",
-        vehicle: { internalCode: "SCT-V1", rego: "123ABC" },
+        vehicle: { id: "veh_1", internalCode: "SCT-V1", rego: "123ABC" },
         assignedTo: null,
       },
       {
@@ -59,5 +59,7 @@ describe("collectWorkOrderTasks", () => {
     expect(byId.get("wo2")?.tier).toBe("MEDIUM"); // HIGH + AWAITING_PARTS → downshift
     expect(byId.get("wo3")?.tier).toBe("LOW");
     expect(byId.get("wo1")?.actionUrl).toBe("/staff/maintenance/wo1");
+    // Work orders link only to the asset — no booking/customer context.
+    expect(byId.get("wo1")?.links).toEqual({ vehicleId: "veh_1" });
   });
 });

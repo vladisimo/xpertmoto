@@ -485,6 +485,21 @@ export const bookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       skipAutoAudit(ctx);
 
+      // A booking's customer must be a CUSTOMER-role account. protectedProcedure
+      // also admits STAFF/MANAGER/ADMIN/SUPER_ADMIN, and this flow sets
+      // customerId to the caller (ctx.user.id) — so without this guard a
+      // logged-in staff member running the booking wizard would attach the
+      // booking to their own non-customer account, which the back-office
+      // customer directory (role === CUSTOMER) then can't resolve. Staff
+      // booking on a customer's behalf must use staffBooking.createWalkIn.
+      if (ctx.user.role !== "CUSTOMER") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Only customer accounts can book online. Use the walk-in tool to book on a customer's behalf.",
+        });
+      }
+
       // Depot hours gate — pickup + return must fall inside the respective
       // depot's published operating hours (timezone + holiday overrides
       // respected). Runs before eligibility so the error surfaces on the

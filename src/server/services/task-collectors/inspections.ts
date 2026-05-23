@@ -34,10 +34,10 @@ export async function collectInspectionTasks(
           bookingReference: true,
           pickupDateTime: true,
           returnDateTime: true,
-          customer: { select: { firstName: true, lastName: true } },
+          customer: { select: { id: true, firstName: true, lastName: true } },
         },
       },
-      vehicle: { select: { internalCode: true, rego: true } },
+      vehicle: { select: { id: true, internalCode: true, rego: true } },
     },
     orderBy: { createdAt: "asc" },
     take: limit,
@@ -73,6 +73,11 @@ export async function collectInspectionTasks(
       actionableSince: i.createdAt,
       dueAt: when ?? null,
       metadata: i.booking ? { bookingId: i.booking.id } : undefined,
+      links: {
+        bookingId: i.booking?.id,
+        customerId: i.booking?.customer.id,
+        vehicleId: i.vehicle?.id,
+      },
     };
   });
 }

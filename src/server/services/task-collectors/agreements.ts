@@ -30,7 +30,7 @@ export async function collectAgreementTasks(
           bookingReference: true,
           pickupDateTime: true,
           depotId: true,
-          customer: { select: { firstName: true, lastName: true } },
+          customer: { select: { id: true, firstName: true, lastName: true } },
         },
       },
     },
@@ -55,6 +55,7 @@ export async function collectAgreementTasks(
       actionableSince: a.createdAt,
       dueAt: pickup,
       metadata: { bookingId: a.booking.id },
+      links: { bookingId: a.booking.id, customerId: a.booking.customer.id },
     };
   });
 }

@@ -36,9 +36,9 @@ export async function collectBookingTasks(
         bookingReference: true,
         pickupDateTime: true,
         depotId: true,
-        customer: { select: { firstName: true, lastName: true } },
+        customer: { select: { id: true, firstName: true, lastName: true } },
         category: { select: { name: true } },
-        vehicle: { select: { internalCode: true, rego: true } },
+        vehicle: { select: { id: true, internalCode: true, rego: true } },
       },
       orderBy: { pickupDateTime: "asc" },
       take: limit,
@@ -55,9 +55,9 @@ export async function collectBookingTasks(
         returnDateTime: true,
         depotId: true,
         returnDepotId: true,
-        customer: { select: { firstName: true, lastName: true } },
+        customer: { select: { id: true, firstName: true, lastName: true } },
         category: { select: { name: true } },
-        vehicle: { select: { internalCode: true, rego: true } },
+        vehicle: { select: { id: true, internalCode: true, rego: true } },
       },
       orderBy: { returnDateTime: "asc" },
       take: limit,
@@ -75,9 +75,9 @@ export async function collectBookingTasks(
         overdueStage: true,
         depotId: true,
         returnDepotId: true,
-        customer: { select: { firstName: true, lastName: true, phone: true } },
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
         category: { select: { name: true } },
-        vehicle: { select: { internalCode: true, rego: true } },
+        vehicle: { select: { id: true, internalCode: true, rego: true } },
       },
       orderBy: { returnDateTime: "asc" },
       take: limit,
@@ -102,6 +102,7 @@ export async function collectBookingTasks(
       actionUrl: `/staff/bookings/${b.id}/check-out`,
       actionableSince: b.pickupDateTime,
       dueAt: b.pickupDateTime,
+      links: { bookingId: b.id, customerId: b.customer.id, vehicleId: b.vehicle?.id },
     });
   }
 
@@ -120,6 +121,7 @@ export async function collectBookingTasks(
       actionUrl: `/staff/bookings/${b.id}/check-in`,
       actionableSince: b.returnDateTime,
       dueAt: b.returnDateTime,
+      links: { bookingId: b.id, customerId: b.customer.id, vehicleId: b.vehicle?.id },
     });
   }
 
@@ -141,6 +143,7 @@ export async function collectBookingTasks(
       actionableSince: b.returnDateTime,
       dueAt: b.returnDateTime,
       metadata: { hoursOverdue, overdueStage: stage },
+      links: { bookingId: b.id, customerId: b.customer.id, vehicleId: b.vehicle?.id },
     });
   }
 

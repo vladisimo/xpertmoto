@@ -2481,8 +2481,22 @@ export const staffBookingRouter = createTRPCRouter({
         method: z.enum(["CARD", "CASH"]),
       }),
     )
-    .meta({ audit: { customerIdPath: "customerId" } })
+    .meta({ audit: { customerIdPath: "customerId", bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
+      // The booking's customer must be a CUSTOMER-role account. Booking.customer
+      // is an unconstrained FK to User, so guard the selected target here —
+      // otherwise a walk-in could be pinned to a staff/admin user the customer
+      // directory (role === CUSTOMER) can't resolve.
+      const customer = await ctx.prisma.user.findUnique({
+        where: { id: input.customerId },
+        select: { role: true },
+      });
+      if (!customer || customer.role !== "CUSTOMER") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Walk-in bookings must be attached to a customer account.",
+        });
+      }
       await enforceBookingTimesWithinHours(ctx.prisma, {
         pickupDepotId: input.pickupDepotId,
         returnDepotId: input.returnDepotId,
