@@ -4,9 +4,12 @@ import { Prisma } from "@prisma/client";
 import { createTRPCRouter, staffProcedure } from "../trpc";
 import { cancelPaymentIntent, refundCharge } from "@/lib/stripe";
 import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
+import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { writePaymentAudit } from "@/server/services/audit-payment";
+import { captureBookingId, readCapturedBookingId } from "@/server/services/audit";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { gstFromInclusive } from "@/lib/money";
+import { trackServer } from "@/lib/analytics";
 
 /**
  * Phase B — booking-settlement router.
@@ -56,6 +59,7 @@ export const bookingSettlementRouter = createTRPCRouter({
         gstInclusive: z.boolean().default(true),
       }),
     )
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -98,11 +102,13 @@ export const bookingSettlementRouter = createTRPCRouter({
         reason: z.string().min(1, "Reason is required"),
       }),
     )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const p = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
         select: { id: true, status: true, amount: true, bookingId: true, reference: true },
       });
+      captureBookingId(ctx, p.bookingId);
       if (p.status !== "PENDING") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -160,6 +166,7 @@ export const bookingSettlementRouter = createTRPCRouter({
 
   captureNow: staffProcedure
     .input(z.object({ paymentId: z.string() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const p = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
@@ -169,10 +176,12 @@ export const bookingSettlementRouter = createTRPCRouter({
           customerId: true,
           bookingId: true,
           status: true,
+          type: true,
           reference: true,
           booking: { select: { bookingReference: true } },
         },
       });
+      captureBookingId(ctx, p.bookingId);
       if (p.status !== "PENDING") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -213,6 +222,15 @@ export const bookingSettlementRouter = createTRPCRouter({
             processedAt: new Date(),
             processedById: ctx.user.id,
           },
+        });
+        // Remove the charge's increment from balanceDue now it's collected
+        // (it was added when the PENDING charge was raised). Shared with the
+        // capture-pending job and the Stripe webhook so they can't drift.
+        await applyCaptureToBalanceDue(ctx.prisma, {
+          bookingId: p.bookingId,
+          type: p.type,
+          amount: p.amount,
+          previousStatus: "PENDING",
         });
         // Keep the Infringement row in sync when staff capture an
         // INFRINGEMENT_RECOVERY payment manually — the Tolls tab and
@@ -273,6 +291,7 @@ export const bookingSettlementRouter = createTRPCRouter({
         reason: z.string().min(1, "Reason is required"),
       }),
     )
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const ledger = await ctx.prisma.bondLedger.findUniqueOrThrow({
         where: { bookingId: input.bookingId },
@@ -328,6 +347,18 @@ export const bookingSettlementRouter = createTRPCRouter({
           },
         });
       });
+      await trackServer({
+        event: "bond.released",
+        distinctId: ledger.customerId,
+        properties: {
+          bookingId: input.bookingId,
+          releasedAud: releaseAmount,
+          fullRelease,
+          status: newStatus,
+          reason: input.reason,
+          actorUserId: ctx.user.id,
+        },
+      });
       return { releasedAmount: releaseAmount, status: newStatus };
     }),
 
@@ -339,6 +370,7 @@ export const bookingSettlementRouter = createTRPCRouter({
         deductionLabel: z.string().min(1, "Label the deduction"),
       }),
     )
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const ledger = await ctx.prisma.bondLedger.findUniqueOrThrow({
         where: { bookingId: input.bookingId },
@@ -423,6 +455,18 @@ export const bookingSettlementRouter = createTRPCRouter({
       } catch {
         // tryIssueAdjustmentForBooking already logs internal failures.
       }
+      await trackServer({
+        event: "bond.captured",
+        distinctId: ledger.customerId,
+        properties: {
+          bookingId: input.bookingId,
+          capturedAud: input.amount,
+          totalCapturedAud: newCaptured,
+          status: newStatus,
+          deductionLabel: input.deductionLabel,
+          actorUserId: ctx.user.id,
+        },
+      });
       return { capturedAmount: newCaptured, status: newStatus };
     }),
 
@@ -431,6 +475,7 @@ export const bookingSettlementRouter = createTRPCRouter({
   // ---------------------------------------------------------------------
   pauseBillingPlan: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string().min(1) }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const plan = await ctx.prisma.bookingBillingPlan.findUniqueOrThrow({
         where: { bookingId: input.bookingId },
@@ -449,6 +494,7 @@ export const bookingSettlementRouter = createTRPCRouter({
 
   resumeBillingPlan: staffProcedure
     .input(z.object({ bookingId: z.string() }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const plan = await ctx.prisma.bookingBillingPlan.findUniqueOrThrow({
         where: { bookingId: input.bookingId },
@@ -467,6 +513,7 @@ export const bookingSettlementRouter = createTRPCRouter({
 
   cancelBillingPlan: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string().min(1) }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       return ctx.prisma.bookingBillingPlan.update({
         where: { bookingId: input.bookingId },
@@ -476,6 +523,7 @@ export const bookingSettlementRouter = createTRPCRouter({
 
   rescheduleNextCharge: staffProcedure
     .input(z.object({ bookingId: z.string(), nextChargeAt: z.date() }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       return ctx.prisma.bookingBillingPlan.update({
         where: { bookingId: input.bookingId },
@@ -495,10 +543,12 @@ export const bookingSettlementRouter = createTRPCRouter({
         reason: z.string().min(1),
       }),
     )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const source = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
       });
+      captureBookingId(ctx, source.bookingId);
       if (source.status !== "SUCCEEDED") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -545,7 +595,7 @@ export const bookingSettlementRouter = createTRPCRouter({
       }
       const newSourceStatus =
         refundAmount >= originalAmount - 0.01 ? "REFUNDED" : "PARTIALLY_REFUNDED";
-      return ctx.prisma.$transaction(async (tx) => {
+      const refundPayment = await ctx.prisma.$transaction(async (tx) => {
         if (status === "SUCCEEDED") {
           await tx.payment.update({
             where: { id: source.id },
@@ -569,5 +619,55 @@ export const bookingSettlementRouter = createTRPCRouter({
           },
         });
       });
+
+      // Mirror the cancellation / swap / bond-capture protocol: a processed
+      // refund produces a GST-compliant adjustment note (DECREASE / REFUND)
+      // which auto-emails the customer the document via the same pipeline.
+      // Gated on SUCCEEDED — a failed or pending refund hasn't moved money,
+      // so issuing a tax credit document would be premature; the retroactive
+      // sweep picks up any that land later. Best-effort and non-blocking: we
+      // never roll back the refund if the note can't be produced.
+      if (status === "SUCCEEDED" && source.bookingId) {
+        try {
+          const { tryIssueAdjustmentForBooking } = await import(
+            "@/server/services/invoice-lifecycle"
+          );
+          await tryIssueAdjustmentForBooking({
+            bookingId: source.bookingId,
+            type: "DECREASE",
+            reason: "REFUND",
+            description: `Refund — ${input.reason}`,
+            lineItems: [
+              {
+                description: `Refund — ${input.reason}`,
+                quantity: 1,
+                unitPrice: refundAmount,
+                totalPrice: refundAmount,
+                gstIncluded: true,
+              },
+            ],
+            paymentId: refundPayment.id,
+            issuedById: ctx.user.id,
+          });
+        } catch {
+          // tryIssueAdjustmentForBooking already logs internal failures.
+        }
+      }
+
+      await trackServer({
+        event: "payment.refunded",
+        distinctId: source.customerId ?? ctx.user.id,
+        properties: {
+          paymentId: source.id,
+          bookingId: source.bookingId,
+          refundAud: refundAmount,
+          originalAud: originalAmount,
+          isPartial: refundAmount < originalAmount,
+          status,
+          actorUserId: ctx.user.id,
+        },
+      });
+
+      return refundPayment;
     }),
 });

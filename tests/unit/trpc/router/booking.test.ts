@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { TRPCError } from "@trpc/server";
 import { bookingRouter } from "../../../../src/server/trpc/router/booking";
+import { buildOnboardingVersion } from "../../../../src/lib/onboarding-status";
+
+const ONBOARDED = { onboardedAt: new Date(), onboardingVersion: buildOnboardingVersion() };
+const BARE = { onboardedAt: null, onboardingVersion: null };
 
 /**
  * Authorization tests for the customer-facing booking router. We exercise
@@ -15,15 +19,29 @@ function makeCtx(overrides: {
   booking?: Record<string, unknown> | null;
   userId?: string;
   role?: "CUSTOMER" | "STAFF" | "MANAGER" | "ADMIN" | "SUPER_ADMIN";
+  customerProfile?: { onboardedAt: Date | null; onboardingVersion: string | null } | null;
 } = {}) {
   const booking = overrides.booking === undefined
     ? { id: "b1", customerId: "cust1", status: "CONFIRMED" }
     : overrides.booking;
 
+  // The booking.create onboarding guard fetches the caller via
+  // user.findUniqueOrThrow. `customerProfile: undefined` means "not set" →
+  // default to an onboarded profile so the guard passes; pass `null` for a
+  // profile-less account and `BARE` for an un-onboarded one.
+  const customerProfile =
+    overrides.customerProfile === undefined ? ONBOARDED : overrides.customerProfile;
+
   const prisma = {
     booking: {
       findUnique: vi.fn().mockResolvedValue(booking),
       findMany: vi.fn().mockResolvedValue([]),
+    },
+    user: {
+      findUniqueOrThrow: vi.fn().mockResolvedValue({
+        dateOfBirth: new Date("1990-01-01"),
+        customerProfile,
+      }),
     },
   };
   const user = {
@@ -70,7 +88,7 @@ describe("booking.byId", () => {
   });
 });
 
-describe("booking.create — customer-only guard", () => {
+describe("booking.create — onboarding guard (profile-based)", () => {
   const validInput = {
     categoryId: "cat1",
     pickupDepotId: "d1",
@@ -80,24 +98,36 @@ describe("booking.create — customer-only guard", () => {
     agreedToTerms: true as const,
   };
 
-  it("rejects a logged-in staff member with FORBIDDEN", async () => {
-    const ctx = makeCtx({ userId: "staff1", role: "STAFF" });
+  it("rejects a staff member with no customer profile (FORBIDDEN)", async () => {
+    const ctx = makeCtx({ userId: "staff1", role: "STAFF", customerProfile: null });
     const c = bookingRouter.createCaller(ctx as never);
     await expect(c.create(validInput)).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("rejects an admin with FORBIDDEN", async () => {
-    const ctx = makeCtx({ userId: "admin1", role: "ADMIN" });
+  it("rejects an admin with no customer profile (FORBIDDEN)", async () => {
+    const ctx = makeCtx({ userId: "admin1", role: "ADMIN", customerProfile: null });
     const c = bookingRouter.createCaller(ctx as never);
     await expect(c.create(validInput)).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("lets a customer past the role guard (fails later for unrelated reasons)", async () => {
-    const ctx = makeCtx({ userId: "cust1", role: "CUSTOMER" });
+  it("rejects an un-onboarded (bare) profile (FORBIDDEN)", async () => {
+    const ctx = makeCtx({ userId: "cust1", role: "CUSTOMER", customerProfile: BARE });
     const c = bookingRouter.createCaller(ctx as never);
-    // The guard passes for a CUSTOMER; the call then proceeds into depot-hours
-    // / pricing logic our minimal mock can't satisfy — so it must reject with
-    // anything *other* than the FORBIDDEN the guard would have raised.
+    await expect(c.create(validInput)).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("lets an onboarded staff member past the guard (fails later for unrelated reasons)", async () => {
+    const ctx = makeCtx({ userId: "staff1", role: "STAFF", customerProfile: ONBOARDED });
+    const c = bookingRouter.createCaller(ctx as never);
+    // Onboarded staff carry a profile and clear the guard; the call then
+    // proceeds into depot-hours logic the minimal mock can't satisfy — so it
+    // must reject with anything *other* than FORBIDDEN.
+    await expect(c.create(validInput)).rejects.not.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("lets an onboarded customer past the guard (fails later for unrelated reasons)", async () => {
+    const ctx = makeCtx({ userId: "cust1", role: "CUSTOMER", customerProfile: ONBOARDED });
+    const c = bookingRouter.createCaller(ctx as never);
     await expect(c.create(validInput)).rejects.not.toMatchObject({ code: "FORBIDDEN" });
   });
 });

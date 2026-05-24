@@ -10,6 +10,7 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { invalidateRevenueCaches } from "@/server/services/revenue-aggregator";
 import { supersedeByTarget } from "@/server/services/staff-tasks";
 import { writeAudit } from "@/server/services/audit";
+import { trackServer } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 import { getBranding } from "@/lib/branding";
 import { formatCurrency } from "@/lib/utils";
@@ -279,6 +280,7 @@ export async function cancel(
     where: { id: input.bookingId },
     include: {
       customer: { select: { id: true, firstName: true } },
+      pickupDepot: { select: { slug: true } },
       bondLedger: true,
       payments: {
         where: { type: "BOOKING_PAYMENT", status: "SUCCEEDED" },
@@ -581,6 +583,23 @@ export async function cancel(
   });
 
   await invalidateRevenueCaches(booking.depotId);
+
+  await trackServer({
+    event: "booking.cancelled",
+    distinctId: booking.customerId,
+    properties: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      source: input.source,
+      refundAud: refundAmount,
+      refundPct,
+      refundStatus,
+      bondReleasedAud: bondReleasedAmount,
+      adminFeeAud: adminFeeCharged,
+      cascadedCount: cascadedBookingIds.length,
+    },
+    groups: booking.pickupDepot ? { depot: booking.pickupDepot.slug } : undefined,
+  });
 
   return {
     bookingId: booking.id,

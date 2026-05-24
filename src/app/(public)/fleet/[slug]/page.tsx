@@ -4,6 +4,7 @@ import type { Metadata } from "next";
 import { FleetUseCase } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { ModelHero } from "@/components/fleet/model-hero";
+import { dedupeModelImages } from "@/components/fleet/model-images";
 import { ModelSpecs, type ModelSpecsInput } from "@/components/fleet/model-specs";
 import { RelatedModels, type RelatedModelEntry } from "@/components/fleet/related-models";
 import { Button } from "@/components/ui/button";
@@ -23,14 +24,15 @@ async function getModel(slug: string) {
           depot: { select: { id: true, name: true, slug: true, state: true } },
           images: {
             orderBy: [{ isPrimary: "desc" }, { displayOrder: "asc" }],
-            select: { id: true, url: true, caption: true, isPrimary: true },
+            select: { id: true, url: true, caption: true, checksum: true, isPrimary: true },
           },
         },
       },
     },
   });
 
-  if (!model || !model.vehicles.length || !model.category) return null;
+  // Internal/service vehicles (isRentable=false) must 404 for consumers.
+  if (!model || !model.isRentable || !model.vehicles.length || !model.category) return null;
 
   // Category-level tier ladder (if configured) powers the RentalEstimate
   // preview. Per-vehicle overrides aren't surfaced on the model page since
@@ -41,15 +43,7 @@ async function getModel(slug: string) {
     select: { minDays: true, maxDays: true, tierTotal: true },
   });
 
-  const imageSeen = new Set<string>();
-  const images: Array<{ id: string; url: string; caption: string | null }> = [];
-  for (const v of model.vehicles) {
-    for (const img of v.images) {
-      if (imageSeen.has(img.url)) continue;
-      imageSeen.add(img.url);
-      images.push({ id: img.id, url: img.url, caption: img.caption ?? null });
-    }
-  }
+  const images = dedupeModelImages(model.vehicles);
 
   const available = model.vehicles.filter((v) => v.status === "AVAILABLE");
   const depotMap = new Map<
@@ -61,6 +55,16 @@ async function getModel(slug: string) {
     const existing = depotMap.get(v.depot.id);
     if (existing) existing.availableCount += 1;
     else depotMap.set(v.depot.id, { ...v.depot, availableCount: 1 });
+  }
+
+  // Depots where this model has ANY active unit (not only AVAILABLE ones) — a
+  // unit on hire today may still be free for a future date range, so the
+  // date-aware booking panel must be able to offer every depot the model
+  // physically lives at, not just the ones with stock right now.
+  const allDepotMap = new Map<string, { id: string; name: string; state: string }>();
+  for (const v of model.vehicles) {
+    if (!v.depot || allDepotMap.has(v.depot.id)) continue;
+    allDepotMap.set(v.depot.id, { id: v.depot.id, name: v.depot.name, state: v.depot.state });
   }
 
   return {
@@ -98,7 +102,14 @@ async function getModel(slug: string) {
     availableCount: available.length,
     inventoryCount: model.vehicles.length,
     firstAvailableVehicleId: available[0]?.id ?? null,
+    // First active unit, used by the booking panel as a pricing-fallback
+    // vehicleId so a quote can still render when nothing is free for the
+    // chosen dates (price preview), and so per-model rate overrides apply.
+    sampleVehicleId: model.vehicles[0]?.id ?? null,
     depotsWithStock: Array.from(depotMap.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    ),
+    modelDepots: Array.from(allDepotMap.values()).sort((a, b) =>
       a.name.localeCompare(b.name),
     ),
     pricingTiers: pricingTiers.map((t) => ({
@@ -164,9 +175,10 @@ export async function generateMetadata({
   const { slug } = await params;
   const model = await prisma.vehicleModel.findUnique({
     where: { slug },
-    select: { make: true, model: true, year: true, tagline: true },
+    select: { make: true, model: true, year: true, tagline: true, isRentable: true },
   });
-  if (!model) return { title: "Fleet" };
+  // Non-rentable service vehicles must not leak a title/description either.
+  if (!model || !model.isRentable) return { title: "Fleet" };
   const title = `${model.year} ${model.make} ${model.model} rental`;
   return {
     title,
@@ -218,9 +230,13 @@ export default async function ModelDetailPage({
         monthlyRate={model.category.baseMonthlyRate}
         bondAmount={model.category.bondAmount}
         availableCount={model.availableCount}
+        inventoryCount={model.inventoryCount}
         categoryId={model.category.id}
+        modelId={model.id}
+        sampleVehicleId={model.sampleVehicleId}
         firstAvailableVehicleId={model.firstAvailableVehicleId}
         depotsWithStock={model.depotsWithStock}
+        modelDepots={model.modelDepots}
         pricingTiers={model.pricingTiers}
       />
 

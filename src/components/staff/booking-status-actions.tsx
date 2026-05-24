@@ -126,7 +126,7 @@ export function StatusActions({
               Change status <ChevronDown className="ml-1 h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-[220px]">
+          <DropdownMenuContent align="end" className="min-w-[220px]">
             {options.map((o, i) => (
               <div key={i}>
                 {i > 0 && o.destructive && <DropdownMenuSeparator />}

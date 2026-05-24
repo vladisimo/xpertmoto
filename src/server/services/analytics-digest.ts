@@ -4,6 +4,8 @@ import { logger } from "@/lib/logger";
 import { sendEmail } from "@/lib/email";
 import { getQueue, registerWorker } from "@/server/jobs/queue";
 import { isNotificationsPaused } from "@/server/services/notification-gate";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 const QUEUE = "analytics-weekly-digest" as const;
 
@@ -211,6 +213,32 @@ export async function runWeeklyDigest(): Promise<{ recipients: number; sent: num
     return { recipients: 0, sent: 0 };
   }
   const digest = await composeWeeklyDigest(prisma);
+
+  // Mirror the weekly aggregates into PostHog so the bounce/conversion/
+  // top-path trends are chartable there, not just emailed once. distinctId
+  // "system" — this is an org-wide rollup, not a per-person event.
+  await trackServer({
+    event: SERVER_EVENTS.analyticsWeeklyDigest,
+    distinctId: "system",
+    properties: {
+      periodStart: digest.periodStart.toISOString(),
+      periodEnd: digest.periodEnd.toISOString(),
+      totalSessions: digest.totalSessions,
+      uniqueVisitors: digest.uniqueVisitors,
+      conversions: digest.conversions,
+      bounces: digest.bounces,
+      abandonedWizard: digest.abandonedWizard,
+      conversionRate: digest.conversionRate,
+      bounceRate: digest.bounceRate,
+      exitIntents: digest.exitIntents,
+      rageClicks: digest.rageClicks,
+      topLandingPath: digest.topLandingPath?.path ?? null,
+      topCountry: digest.topCountry?.country ?? null,
+      vsPrevSessions: digest.vsPrevSessions,
+      vsPrevConversionRate: digest.vsPrevConversionRate,
+    },
+  });
+
   const { subject, text } = renderDigestEmail(digest);
   const recipients = await resolveRecipients(prisma);
   let sent = 0;

@@ -4,9 +4,11 @@ import { buildCustomerListWhere } from "@/server/trpc/router/staff-customer";
 const NOW = new Date("2026-04-17T00:00:00.000Z");
 
 describe("buildCustomerListWhere", () => {
-  test("always constrains to role CUSTOMER", () => {
+  test("always constrains to users with a CustomerProfile (profile-based, not role)", () => {
     const w = buildCustomerListWhere({ status: "ALL" }, NOW);
-    expect(w.role).toBe("CUSTOMER");
+    // Membership is held in AND so status facets can still set customerProfile.
+    expect(w.AND).toEqual([{ customerProfile: { isNot: null } }]);
+    expect(w.role).toBeUndefined();
     expect(w.OR).toBeUndefined();
     expect(w.bookings).toBeUndefined();
   });

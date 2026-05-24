@@ -12,7 +12,10 @@ import {
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { VehicleMakeLogo } from "@/components/booking/vehicle-make-logo";
-import { ModelCard } from "@/components/fleet/model-card";
+import { ModelCard, type ModelCardSpecs } from "@/components/fleet/model-card";
+import { UseCaseTabs } from "@/components/fleet/use-case-tabs";
+import { cn } from "@/lib/utils";
+import type { FleetTab } from "@/lib/fleet-use-cases";
 
 export interface FleetSearchModel {
   id: string;
@@ -25,6 +28,7 @@ export interface FleetSearchModel {
   colours: string[];
   primaryImageUrl: string | null;
   availableCount: number;
+  specs: ModelCardSpecs | null;
   category: {
     id: string;
     licenceRequired: string;
@@ -48,7 +52,13 @@ const DEFAULT_FILTERS: Filters = {
   sort: "available-desc",
 };
 
-export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
+export function FleetSearchGrid({
+  models,
+  activeTab,
+}: {
+  models: FleetSearchModel[];
+  activeTab: FleetTab;
+}) {
   const [filters, setFilters] = React.useState<Filters>(DEFAULT_FILTERS);
 
   const makeOptions = React.useMemo(
@@ -110,15 +120,16 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="flex flex-row items-center gap-2">
+      <div className="sticky top-20 z-20 space-y-3 rounded-md border border-border bg-background/95 p-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <UseCaseTabs active={activeTab} includeAll />
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:items-center">
           <Select
             value={filters.make}
             onValueChange={(value) =>
               setFilters({ ...filters, make: value, model: "all" })
             }
           >
-            <SelectTrigger className="min-w-0 flex-1" aria-label="Filter by make">
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by make">
               <SelectValue>
                 {filters.make === "all" ? (
                   <span className="text-muted-foreground">Make</span>
@@ -147,7 +158,7 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
             value={filters.model}
             onValueChange={(value) => setFilters({ ...filters, model: value })}
           >
-            <SelectTrigger className="min-w-0 flex-1" aria-label="Filter by model">
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by model">
               <SelectValue>
                 {filters.model === "all" ? (
                   <span className="text-muted-foreground">Model</span>
@@ -170,7 +181,7 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
             value={filters.colour}
             onValueChange={(value) => setFilters({ ...filters, colour: value })}
           >
-            <SelectTrigger className="min-w-0 flex-1" aria-label="Filter by colour">
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by colour">
               <SelectValue>
                 {filters.colour === "all" ? (
                   <span className="text-muted-foreground">Colour</span>
@@ -195,7 +206,7 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
               setFilters({ ...filters, sort: value as SortKey })
             }
           >
-            <SelectTrigger className="min-w-0 flex-1" aria-label="Sort fleet">
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Sort fleet">
               <SelectValue>
                 {filters.sort === "available-desc" ? (
                   <span className="text-muted-foreground">Sort</span>
@@ -221,15 +232,15 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
               variant="ghost"
               size="sm"
               onClick={onClear}
-              className="shrink-0"
+              className={cn("shrink-0", "col-span-2 sm:col-auto")}
               aria-label="Clear filters"
             >
               <X className="h-3.5 w-3.5" />
-              <span className="ml-1 hidden sm:inline">Clear</span>
+              <span className="ml-1">Clear filters</span>
             </Button>
           )}
         </div>
-        <div className="mt-1.5 text-xs tabular-nums text-muted-foreground">
+        <div className="text-xs tabular-nums text-muted-foreground">
           {filtered.length === models.length
             ? `${models.length} ${models.length === 1 ? "bike" : "bikes"}`
             : `${filtered.length} of ${models.length} ${
@@ -261,6 +272,7 @@ export function FleetSearchGrid({ models }: { models: FleetSearchModel[] }) {
               useCases={m.useCases}
               dailyRate={m.category.baseDailyRate}
               availableCount={m.availableCount}
+              specs={m.specs}
               bookHref={`/booking?categoryId=${m.category.id}`}
             />
           ))}

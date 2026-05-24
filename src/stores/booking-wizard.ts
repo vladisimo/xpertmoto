@@ -2,6 +2,8 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
+import { BOOKING_RULES } from "@/lib/constants";
+
 export type WizardStep = 1 | 2 | 3 | 4 | 5 | 6;
 
 export type WizardAddon = { addonId: string; quantity: number };
@@ -128,6 +130,30 @@ const emptyCustomer: WizardCustomer = {
 export const POST_BOOKING_RESET_FLAG = "xpertmoto-booking-just-completed";
 
 /**
+ * Set by `resetStaleBookingWizard()` when a *resumed* wizard is wiped because
+ * its pickup time is too late (past or within the booking cut-off) or its
+ * vehicle/category has sold out. Read + cleared by step-search.tsx to show the
+ * "we reset you" notice. Deliberately distinct from `POST_BOOKING_RESET_FLAG`:
+ * this one carries a human reason and must NOT trigger the post-payment
+ * seed-skip path in booking-wizard-client.tsx.
+ */
+export const STALE_RESET_FLAG = "xpertmoto-booking-stale-reset";
+export type StaleResetReason = "PICKUP_PASSED" | "UNAVAILABLE";
+
+/**
+ * True when a persisted pickup is too late to resume against — already past,
+ * or within the booking cut-off (`BOOKING_RULES.cutoffMinutesBeforePickup`)
+ * so there's no realistic chance of completing the booking in time. Pure +
+ * `now`-injectable so it can be unit-tested without faking the clock.
+ */
+export function isPickupTooLate(pickupIso: string | null, now = Date.now()): boolean {
+  if (!pickupIso) return false;
+  const ms = new Date(pickupIso).getTime();
+  if (!Number.isFinite(ms)) return false;
+  return ms - now <= BOOKING_RULES.cutoffMinutesBeforePickup * 60_000;
+}
+
+/**
  * Pragmatic check for whether the customer block holds enough data to
  * progress past step 4 via a URL-driven jump (browser forward, deep
  * link). The form-submit gate inside step-details.tsx still does its
@@ -174,7 +200,12 @@ export function maxReachableStep(state: WizardState): WizardStep {
   // in mid-step).
   const step5Ok = isCustomerComplete(state.customer, state.identityPath);
   if (!step5Ok) return 4;
-  const step6Ok = state.agreedToTerms && !!state.signatureDataUrl;
+  // Step 6 (payment) unlocks once the provisional terms are accepted on
+  // step 5. The customer wizard does NOT capture a signature — the full
+  // rental agreement (incl. signatures) is signed with staff on a tablet
+  // at pickup (see step-review.tsx). `signatureDataUrl` is never set in
+  // this flow, so gating on it here left step 6 permanently unreachable.
+  const step6Ok = state.agreedToTerms;
   if (!step6Ok) return 5;
   return 6;
 }
@@ -311,5 +342,30 @@ export function flushBookingWizard(): void {
       url.searchParams.delete(STEP_PARAM);
       window.history.replaceState({}, "", url);
     }
+  }
+}
+
+/**
+ * Wipe a resumed wizard that's gone stale (pickup too late, or the chosen
+ * vehicle/category sold out) and send the customer back to step 1 from
+ * scratch. Mirrors `flushBookingWizard()` but records a human-readable
+ * `reason` in sessionStorage (for the step-1 notice) and — crucially — does
+ * NOT set `POST_BOOKING_RESET_FLAG`, so this reset isn't mistaken for a
+ * completed booking (which would skip URL-param seeding on the next entry).
+ */
+export function resetStaleBookingWizard(reason: StaleResetReason): void {
+  useBookingWizard.getState().reset();
+  void useBookingWizard.persist.clearStorage();
+  if (typeof window !== "undefined") {
+    try {
+      sessionStorage.setItem(STALE_RESET_FLAG, reason);
+    } catch {
+      // sessionStorage can throw in Safari private mode — safe to ignore.
+    }
+    // Strip any lingering `?step=` and anchor history at step 1 so a
+    // subsequent Back / popstate can't restore the stale deep step.
+    const url = new URL(window.location.href);
+    url.searchParams.delete(STEP_PARAM);
+    window.history.replaceState({ wizardStep: 1 }, "", url);
   }
 }

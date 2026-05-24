@@ -21,6 +21,8 @@ export interface OcrUsage {
   cacheCreationTokens: number;
   /** Optional — OpenRouter exposes the upstream USD cost for an exact match. */
   upstreamCostUsd?: number;
+  /** Wall-clock latency of the vision call, set by document-extract. */
+  latencyMs?: number;
 }
 
 function round6(n: number): number {

@@ -49,7 +49,7 @@ export function ConditionPage({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {inspection.photos.map((p) => (
               <div key={p.id} className="relative aspect-[4/3] overflow-hidden rounded-md border border-border">
-                <Image src={p.url} alt={p.caption ?? "Pre-hire photo"} fill sizes="(max-width: 640px) 50vw, 33vw" className="object-cover" />
+                <Image src={p.url} alt={p.caption ?? "Pre-hire photo"} fill sizes="(max-width: 640px) 50vw, 33vw" className="object-contain" />
                 {p.caption && (
                   <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-2 py-1 text-[10px] uppercase tracking-wide text-white">
                     {p.caption}

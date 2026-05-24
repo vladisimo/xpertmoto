@@ -91,7 +91,7 @@ export function VehicleSpecSheet({
           <div className="mt-6 space-y-6">
             {hero && (
               <div className="relative aspect-[4/3] overflow-hidden rounded-md bg-muted">
-                <Image src={hero.url} alt={`${data.make} ${data.model}`} fill sizes="480px" className="object-cover" />
+                <Image src={hero.url} alt={`${data.make} ${data.model}`} fill sizes="480px" className="object-contain" />
               </div>
             )}
 

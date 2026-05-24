@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Info } from "lucide-react";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 
 /**
@@ -59,10 +68,22 @@ type BillingPlan = {
 type Props = {
   bookingId: string;
   bookingStatus: string;
-  balanceDue: number;
   payments: Payment[];
   bondLedger: BondLedger;
   billingPlan: BillingPlan;
+  /**
+   * Optional card rendered beside the Charges ledger so the Payments tab
+   * can place a read-only panel (e.g. invoices) in line with Charges on
+   * wide screens.
+   */
+  chargesAside?: ReactNode;
+  /**
+   * Optional card rendered as a sibling of the Bond/Billing cards so the
+   * Payments tab can place a read-only panel (e.g. the pricing breakdown)
+   * in line with Bond on wide screens. Flows to the next grid row when the
+   * Bond and Billing slots are both occupied.
+   */
+  bondAside?: ReactNode;
 };
 
 const TERMINAL_BOOKING_STATUSES = ["CANCELLED", "COMPLETED", "NO_SHOW"];
@@ -79,10 +100,11 @@ const MANUAL_TYPES = [
 export function PaymentConsole({
   bookingId,
   bookingStatus,
-  balanceDue,
   payments,
   bondLedger,
   billingPlan,
+  chargesAside,
+  bondAside,
 }: Props) {
   const isBookingTerminal = TERMINAL_BOOKING_STATUSES.includes(bookingStatus);
   const isPlanTerminal =
@@ -147,39 +169,9 @@ export function PaymentConsole({
         </div>
       )}
 
-      {/* Summary row */}
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="rounded-md border bg-muted/30 p-3">
-          <div className="caption">Balance due</div>
-          <div className="h2 tabular-nums">{formatCurrency(balanceDue)}</div>
-        </div>
-        <div className="rounded-md border bg-muted/30 p-3">
-          <div className="caption">Bond held</div>
-          <div className="h2 tabular-nums">{formatCurrency(bondHeld)}</div>
-          {bondLedger && (
-            <div className="caption mt-1">
-              Captured {formatCurrency(bondCaptured)} · Released {formatCurrency(bondReleased)}
-            </div>
-          )}
-        </div>
-        <div className="rounded-md border bg-muted/30 p-3">
-          <div className="caption">Next recurring charge</div>
-          <div className="h3 tabular-nums">
-            {!billingPlan || isPlanTerminal
-              ? "—"
-              : formatDateTime(billingPlan.nextChargeAt)}
-          </div>
-          {billingPlan && (
-            <div className="caption mt-1">
-              {isPlanTerminal
-                ? `Plan ${billingPlan.status.toLowerCase()}`
-                : `${formatCurrency(Number(billingPlan.amountPerPeriod))} · ${billingPlan.frequency.toLowerCase()}`}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Charges ledger */}
+      {/* Charges ledger — paired with the optional chargesAside slot so the
+          Payments tab can sit Invoices beside Charges on wide screens. */}
+      <div className="grid items-start gap-6 xl:grid-cols-2">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="h3">Charges</CardTitle>
@@ -206,7 +198,7 @@ export function PaymentConsole({
                   <div className="font-medium">
                     {p.type.replace(/_/g, " ")} · {p.method}
                   </div>
-                  {p.notes && <div className="caption">{p.notes}</div>}
+                  {p.notes && <PaymentNotes notes={p.notes} />}
                   <div className="caption">Ref: {p.reference}</div>
                   {asyncRefundFailure && (
                     <div className="caption text-destructive mt-1">
@@ -281,6 +273,9 @@ export function PaymentConsole({
           })}
         </CardContent>
       </Card>
+
+      {chargesAside}
+      </div>
 
       {/* Add-charge modal (inline panel to match existing styling). */}
       {addOpen && (
@@ -398,7 +393,7 @@ export function PaymentConsole({
 
       {/* Bond + Billing plan sit side-by-side at xl: so the tab feels denser
           on wide screens. Either may be absent — the grid still flows. */}
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid items-start gap-6 xl:grid-cols-2">
       {/* Bond controls */}
       {bondLedger && (
         <Card>
@@ -587,6 +582,8 @@ export function PaymentConsole({
           </CardContent>
         </Card>
       )}
+
+      {bondAside}
       </div>
     </div>
   );
@@ -597,6 +594,53 @@ function Row({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between">
       <span className="text-muted-foreground">{label}</span>
       <span className="tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Payment notes can accumulate many stamped lines (job retries, capture
+ * attempts). Show the latest entry inline; when there's more than one,
+ * surface the rest behind an (i) button that opens a scrollable history
+ * dialog instead of dumping every line into the row.
+ */
+function PaymentNotes({ notes }: { notes: string }) {
+  const lines = notes.split("\n").filter((l) => l.trim().length > 0);
+  if (lines.length <= 1) {
+    return <div className="caption">{notes}</div>;
+  }
+  const latest = lines[lines.length - 1];
+  return (
+    <div className="caption flex items-center gap-1.5">
+      <span className="truncate">{latest}</span>
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 shrink-0 text-muted-foreground"
+            aria-label={`View all ${lines.length} note entries`}
+          >
+            <Info className="h-3.5 w-3.5" />
+          </Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Charge history</DialogTitle>
+            <DialogDescription>{lines.length} entries</DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] space-y-1 overflow-y-auto pr-2">
+            {lines
+              .slice()
+              .reverse()
+              .map((line, i) => (
+                <div key={i} className="caption border-b py-1 last:border-0">
+                  {line}
+                </div>
+              ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

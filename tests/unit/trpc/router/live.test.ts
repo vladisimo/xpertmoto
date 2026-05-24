@@ -1,9 +1,18 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi, beforeEach } from "vitest";
+
+const posthogServerEnabled = vi.fn();
+const trackServerBatch = vi.fn();
+vi.mock("@/lib/analytics", () => ({
+  posthogServerEnabled: (...a: unknown[]) => posthogServerEnabled(...a),
+  trackServerBatch: (...a: unknown[]) => trackServerBatch(...a),
+}));
+
 import {
   readVisitorCookie,
   hashUA,
   displayNameFor,
   toPresenceEvent,
+  fanOutVisitorEvents,
 } from "@/server/trpc/router/live";
 
 function h(cookieValue: string | null): { headers: Headers } {
@@ -112,5 +121,59 @@ describe("toPresenceEvent", () => {
     const event = toPresenceEvent({ ...row, wizardStep: null, currentPath: "/" });
     expect(event.wizardStep).toBeNull();
     expect(event.currentPath).toBe("/");
+  });
+});
+
+describe("fanOutVisitorEvents", () => {
+  const depotFindUnique = vi.fn();
+  const prisma = { depot: { findUnique: depotFindUnique } };
+
+  beforeEach(() => {
+    posthogServerEnabled.mockReset().mockResolvedValue(true);
+    trackServerBatch.mockReset().mockResolvedValue(undefined);
+    depotFindUnique.mockReset().mockResolvedValue({ slug: "brisbane-cbd" });
+  });
+
+  test("maps kinds to visitor.* names and attaches the depot group", async () => {
+    await fanOutVisitorEvents(
+      prisma,
+      [
+        { kind: "CTA_CLICK", path: "/booking", target: "hero-book", wizardStep: 2 },
+        { kind: "SCROLL_DEPTH", path: "/", numericValue: 75 },
+      ],
+      "v_abc",
+      "depot_1",
+    );
+
+    expect(trackServerBatch).toHaveBeenCalledTimes(1);
+    const batch = trackServerBatch.mock.calls[0]![0] as Array<Record<string, unknown>>;
+    expect(batch).toHaveLength(2);
+    expect(batch[0]!.event).toBe("visitor.cta_click");
+    expect(batch[0]!.distinctId).toBe("v_abc");
+    expect(batch[0]!.groups).toEqual({ depot: "brisbane-cbd" });
+    expect((batch[0]!.properties as Record<string, unknown>).target).toBe("hero-book");
+    expect((batch[0]!.properties as Record<string, unknown>).wizardStep).toBe(2);
+    expect(batch[1]!.event).toBe("visitor.scroll_depth");
+    expect((batch[1]!.properties as Record<string, unknown>).numericValue).toBe(75);
+  });
+
+  test("omits groups when no depot is on the session", async () => {
+    await fanOutVisitorEvents(prisma, [{ kind: "CLICK", path: "/" }], "v_abc", null);
+    expect(depotFindUnique).not.toHaveBeenCalled();
+    const batch = trackServerBatch.mock.calls[0]![0] as Array<Record<string, unknown>>;
+    expect(batch[0]!.groups).toBeUndefined();
+  });
+
+  test("no-ops when PostHog is disabled", async () => {
+    posthogServerEnabled.mockResolvedValue(false);
+    await fanOutVisitorEvents(prisma, [{ kind: "CLICK", path: "/" }], "v_abc", "depot_1");
+    expect(trackServerBatch).not.toHaveBeenCalled();
+  });
+
+  test("never throws when the batch send fails", async () => {
+    trackServerBatch.mockRejectedValue(new Error("boom"));
+    await expect(
+      fanOutVisitorEvents(prisma, [{ kind: "CLICK", path: "/" }], "v_abc", "depot_1"),
+    ).resolves.toBeUndefined();
   });
 });

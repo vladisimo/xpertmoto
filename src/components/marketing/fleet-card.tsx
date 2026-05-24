@@ -82,7 +82,7 @@ export function FleetCard({
     >
       <div className="relative aspect-[4/3] bg-muted">
         {imageSrc ? (
-          <Image src={imageSrc} alt={name} fill sizes="(max-width: 768px) 100vw, 33vw" className="object-cover" />
+          <Image src={imageSrc} alt={name} fill sizes="(max-width: 768px) 100vw, 33vw" className="object-contain" />
         ) : (
           <div className="flex h-full items-center justify-center">
             <span className="caption">Photo coming soon</span>

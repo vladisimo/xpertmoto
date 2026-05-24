@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -15,6 +15,7 @@ import {
 import {
   BACK_OFFICE_NAV,
   canAccess,
+  type BackOfficeNavItem,
   type PortalSection,
   type UserRole,
 } from "@/lib/nav";
@@ -35,6 +36,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { useBranding } from "@/components/shared/branding-provider";
@@ -102,13 +108,95 @@ function getInitials(name?: string | null, email?: string | null): string {
   return (email?.[0] ?? "U").toUpperCase();
 }
 
-function getHomePath(role?: string): string {
-  if (role === "ADMIN" || role === "SUPER_ADMIN") return "/admin/dashboard";
-  return "/staff/dashboard";
-}
-
 function getProfilePath(accent: ShellAccent): string {
   return accent === "admin" ? "/admin/profile" : "/staff/profile";
+}
+
+/**
+ * Picks the child whose href best matches the current location. Tab children
+ * (`?tab=…`) win on an exact tab match; sibling-route children win by longest
+ * matching path prefix. Returns `null` when nothing matches.
+ */
+function activeChildHref(
+  item: BackOfficeNavItem,
+  pathname: string,
+  currentTab: string | null,
+): string | null {
+  let best = -1;
+  let href: string | null = null;
+  for (const child of item.children ?? []) {
+    const [path = child.href, query] = child.href.split("?");
+    const childTab = query ? new URLSearchParams(query).get("tab") : null;
+    const matchesPath = pathname === path || pathname.startsWith(path + "/");
+    if (!matchesPath) continue;
+    const score = childTab
+      ? currentTab === childTab
+        ? path.length + 1000
+        : -1
+      : path.length;
+    if (score > best) {
+      best = score;
+      href = child.href;
+    }
+  }
+  return href;
+}
+
+/**
+ * A nav item whose destination page has tabs. Hovering reveals a flyout that
+ * deep-links to each tab; clicking the item itself still navigates to the
+ * default tab. HoverCard is hover-only, so a tap on touch follows the link.
+ */
+function FlyoutNavItem({
+  item,
+  link,
+  collapsed,
+  pathname,
+  currentTab,
+}: {
+  item: BackOfficeNavItem;
+  link: React.ReactNode;
+  collapsed: boolean;
+  pathname: string;
+  currentTab: string | null;
+}) {
+  const activeHref = activeChildHref(item, pathname, currentTab);
+
+  return (
+    <HoverCard openDelay={80} closeDelay={120}>
+      <HoverCardTrigger asChild>{link}</HoverCardTrigger>
+      <HoverCardContent
+        side="right"
+        align="start"
+        sideOffset={collapsed ? 12 : 8}
+        className="w-56 max-h-[70vh] overflow-y-auto border-slate-700 bg-slate-800 p-1.5 text-white"
+      >
+        <p className="px-2 py-1.5 text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+          {item.label}
+        </p>
+        <ul className="space-y-0.5">
+          {item.children?.map((child) => {
+            const childActive = child.href === activeHref;
+            return (
+              <li key={child.href}>
+                <Link
+                  href={child.href}
+                  className={cn(
+                    "block rounded-md px-2 py-1.5 text-sm transition-colors",
+                    childActive
+                      ? "bg-white/10 font-medium text-white"
+                      : "text-slate-300 hover:bg-white/5 hover:text-white",
+                  )}
+                >
+                  {child.label}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 function SidebarNav({
@@ -121,6 +209,8 @@ function SidebarNav({
   accent: ShellAccent;
 }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const currentTab = searchParams.get("tab");
 
   return (
     <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-3 lg:py-4 lg:space-y-6">
@@ -175,8 +265,25 @@ function SidebarNav({
                     {!collapsed && (
                       <span className="truncate">{item.label}</span>
                     )}
+                    {!collapsed && item.children && item.children.length > 0 && (
+                      <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" />
+                    )}
                   </Link>
                 );
+
+                if (item.children && item.children.length > 0) {
+                  return (
+                    <li key={item.href}>
+                      <FlyoutNavItem
+                        item={item}
+                        link={link}
+                        collapsed={collapsed}
+                        pathname={pathname}
+                        currentTab={currentTab}
+                      />
+                    </li>
+                  );
+                }
 
                 if (collapsed) {
                   return (
@@ -218,7 +325,6 @@ function SidebarContent({
   accent: ShellAccent;
 }) {
   const initials = getInitials(user.name, user.email);
-  const homePath = getHomePath(user.role);
   const badge = ROLE_BADGE[user.role ?? "STAFF"] ?? { bg: "bg-slate-500/20", text: "text-slate-300", label: "Staff" };
   const accentStyle = ACCENT[accent];
   const branding = useBranding();
@@ -235,7 +341,7 @@ function SidebarContent({
         )}
       >
         {!collapsed && (
-          <Link href={homePath} className="flex items-center gap-2.5">
+          <Link href="/" className="flex items-center gap-2.5">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={wideLogoSrc}
@@ -246,7 +352,7 @@ function SidebarContent({
           </Link>
         )}
         {collapsed && (
-          <Link href={homePath}>
+          <Link href="/">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={squareLogoSrc}

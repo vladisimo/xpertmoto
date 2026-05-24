@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   S3Client,
   PutObjectCommand,
@@ -65,7 +65,30 @@ export type UploadArgs = {
 export type UploadResult = {
   key: string;
   url: string;
+  /** sha256 hex of the uploaded bytes — used to dedupe identical files. */
+  checksum: string;
 };
+
+/** sha256 hex digest of a file's bytes. */
+export function checksumOf(body: Buffer | Uint8Array): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+
+/**
+ * Invert the URL construction in `uploadFile` to recover the object key.
+ * Handles the local-dev `/uploads/<key>` form and the S3/MinIO
+ * `<publicUrl|endpoint/bucket>/<key>` form. Returns null if the URL doesn't
+ * match the configured storage base (e.g. a stale absolute URL).
+ */
+export function urlToKey(url: string): string | null {
+  if (url.startsWith("/uploads/")) return url.slice("/uploads/".length);
+  const env = getEnv();
+  const base = env.publicUrl ?? (env.endpoint ? `${env.endpoint.replace(/\/$/, "")}/${env.bucket}` : null);
+  if (base && url.startsWith(base)) {
+    return url.slice(base.replace(/\/$/, "").length + 1);
+  }
+  return null;
+}
 
 /**
  * Upload a file to S3/MinIO. Falls back to writing under /public/uploads
@@ -82,6 +105,7 @@ export async function uploadFile(args: UploadArgs): Promise<UploadResult> {
   const key = `${args.folder.replace(/^\/|\/$/g, "")}/${name}`;
 
   const size = args.body instanceof Buffer ? args.body.length : args.body.byteLength;
+  const checksum = checksumOf(args.body);
 
   const s3 = getClient();
   if (!s3) {
@@ -97,7 +121,7 @@ export async function uploadFile(args: UploadArgs): Promise<UploadResult> {
       contentType: args.contentType,
       ctx: args.log,
     });
-    return result;
+    return { ...result, checksum };
   }
 
   const env = getEnv();
@@ -118,10 +142,13 @@ export async function uploadFile(args: UploadArgs): Promise<UploadResult> {
   });
 
   const base = env.publicUrl ?? `${env.endpoint?.replace(/\/$/, "")}/${env.bucket}`;
-  return { key, url: `${base}/${key}` };
+  return { key, url: `${base}/${key}`, checksum };
 }
 
-async function uploadFileLocal(key: string, args: UploadArgs): Promise<UploadResult> {
+async function uploadFileLocal(
+  key: string,
+  args: UploadArgs,
+): Promise<{ key: string; url: string }> {
   const { mkdir, writeFile } = await import("fs/promises");
   const path = await import("path");
   const abs = path.join(process.cwd(), "public", "uploads", key);

@@ -1,10 +1,9 @@
 "use client";
 
-import Link from "next/link";
-import { Download, FileWarning } from "lucide-react";
+import { FileText, FileWarning } from "lucide-react";
 
 import { trpc } from "@/lib/trpc/client";
-import { Button } from "@/components/ui/button";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { LoadingBlock } from "@/components/ui/spinner";
@@ -110,12 +109,17 @@ export function BookingDocumentsSection({
       width: "9rem",
       cell: (r) =>
         r.pdfUrl ? (
-          <Button asChild variant="ghost" size="sm">
-            <Link href={r.pdfUrl} target="_blank" rel="noopener noreferrer">
-              <Download className="h-4 w-4" />
-              PDF
-            </Link>
-          </Button>
+          <DocumentViewerButton
+            fileUrl={r.pdfUrl}
+            title={r.title}
+            description={r.number ?? undefined}
+            kind="pdf"
+            variant="ghost"
+            size="sm"
+          >
+            <FileText className="h-4 w-4" />
+            PDF
+          </DocumentViewerButton>
         ) : (
           <span className="caption text-muted-foreground">Pending</span>
         ),

@@ -5,6 +5,8 @@ import { logger } from "@/lib/logger";
 import { getSecret } from "@/lib/integration-config";
 import { withAudit } from "@/lib/with-audit";
 import { updateEmailStatus } from "@/server/services/email-cost";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 const DELIVERED_TYPES = new Set(["email.delivered"]);
 const FAILED_TYPES = new Set(["email.bounced", "email.complained", "email.failed"]);
@@ -90,6 +92,30 @@ async function handlePost(req: Request) {
     await updateEmailStatus(prisma, emailId, { status: "failed" });
   } else if (type === "email.opened") {
     await updateEmailStatus(prisma, emailId, { openedAt: now });
+  }
+
+  // Gated: only bounces + spam complaints reach PostHog (sender-reputation
+  // signals). `delivered`/`opened`/`failed` are intentionally NOT sent —
+  // they're high-volume and low-signal. distinctId is the recipient resolved
+  // via the resendId linkage.
+  const commsEvent =
+    type === "email.bounced"
+      ? SERVER_EVENTS.commsEmailBounced
+      : type === "email.complained"
+        ? SERVER_EVENTS.commsEmailComplained
+        : null;
+  if (commsEvent) {
+    const notif = await prisma.notification.findFirst({
+      where: { channel: "EMAIL", data: { path: ["resendId"], equals: emailId } },
+      select: { userId: true },
+    });
+    if (notif?.userId) {
+      await trackServer({
+        event: commsEvent,
+        distinctId: notif.userId,
+        properties: { type },
+      });
+    }
   }
 
   return NextResponse.json({ ok: true });

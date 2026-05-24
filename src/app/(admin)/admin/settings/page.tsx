@@ -255,7 +255,7 @@ export default function SettingsPage() {
             />
           ) : (
             <div className="space-y-8">
-              <FormGrid cols={2}>
+              <FormGrid cols={3}>
                 {active.fields!.map((f) => (
                   <SettingField
                     key={f.key}

@@ -54,7 +54,7 @@ const LIGHT_BG_ROUTES = ["/booking"];
 // Every other route gets the solid dark header by default — otherwise the
 // white-on-transparent navbar disappears over a light page background until
 // the user scrolls.
-const TRANSPARENT_BG_ROUTES = ["/", "/tours"];
+const TRANSPARENT_BG_ROUTES = ["/", "/tours", "/fleet"];
 
 type HeaderUser = {
   name: string | null;

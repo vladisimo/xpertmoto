@@ -5,6 +5,9 @@ import { logger } from "@/lib/logger";
 import { getSettings } from "@/lib/settings";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
+import { recomputeCustomerRewards } from "@/server/services/customer-rewards";
 import { getQueue, registerWorker } from "./queue";
 
 /**
@@ -61,6 +64,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
       vehicleId: true,
       pickupDateTime: true,
       bondAmount: true,
+      pickupDepot: { select: { slug: true } },
       bondLedger: {
         select: {
           id: true,
@@ -183,8 +187,33 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
             fallbackFeeAud: canForfeitBond ? 0 : feeAud,
           },
         });
+        await trackServer({
+          event: SERVER_EVENTS.bookingNoShowDetected,
+          distinctId: b.customerId,
+          properties: {
+            bookingId: b.id,
+            reference: b.bookingReference,
+            graceHours,
+            bondForfeitedAud: canForfeitBond ? forfeitedAmount : 0,
+            noShowFeeAud: canForfeitBond ? 0 : feeAud,
+          },
+          groups: { depot: b.pickupDepot.slug },
+        });
       }
       marked += 1;
+
+      // Reflect any forfeited/retained money in the rewards counters
+      // promptly. Best-effort — the nightly recompute is the backstop.
+      if (b.customerId) {
+        try {
+          await recomputeCustomerRewards(prisma, b.customerId);
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
+            "no-show-detector: rewards recompute failed",
+          );
+        }
+      }
     } catch (err) {
       logger.warn(
         { err: err instanceof Error ? err.message : String(err), bookingId: b.id },

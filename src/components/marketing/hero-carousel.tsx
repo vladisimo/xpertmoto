@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { HeroVideoBackground } from "@/components/marketing/hero-video-background";
 import { cn } from "@/lib/utils";
 
 export interface HeroSlide {
@@ -20,6 +21,12 @@ export interface HeroCarouselProps {
   children?: React.ReactNode;
   /** ms between slide transitions. Defaults to 6500. Set 0 to disable auto-rotate. */
   intervalMs?: number;
+  /**
+   * Optional background video. When `videoMp4` is set it replaces the image
+   * crossfade; the first slide's image is used as the poster / fallback.
+   */
+  videoMp4?: string;
+  videoWebm?: string;
   className?: string;
 }
 
@@ -37,13 +44,16 @@ export function HeroCarousel({
   secondaryCta,
   children,
   intervalMs = 9500,
+  videoMp4,
+  videoWebm,
   className,
 }: HeroCarouselProps) {
   const [active, setActive] = useState(0);
   const pausedRef = useRef(false);
+  const useVideo = Boolean(videoMp4);
 
   useEffect(() => {
-    if (slides.length <= 1 || intervalMs <= 0) return;
+    if (useVideo || slides.length <= 1 || intervalMs <= 0) return;
     const reduced = typeof window !== "undefined"
       && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     if (reduced) return;
@@ -52,7 +62,7 @@ export function HeroCarousel({
       setActive((i) => (i + 1) % slides.length);
     }, intervalMs);
     return () => window.clearInterval(id);
-  }, [slides.length, intervalMs]);
+  }, [slides.length, intervalMs, useVideo]);
 
   return (
     <section
@@ -60,26 +70,35 @@ export function HeroCarousel({
       onMouseEnter={() => { pausedRef.current = true; }}
       onMouseLeave={() => { pausedRef.current = false; }}
     >
-      {slides.map((s, i) => (
-        <div
-          key={s.imageSrc}
-          aria-hidden={i !== active}
-          className={cn(
-            "absolute inset-0 transition-opacity duration-[1200ms] ease-in-out",
-            i === active ? "opacity-100" : "opacity-0",
-          )}
-        >
-          <Image
-            src={s.imageSrc}
-            alt={s.imageAlt ?? ""}
-            fill
-            priority={i === 0}
-            loading={i === 0 ? undefined : "eager"}
-            sizes="100vw"
-            className="object-cover"
-          />
-        </div>
-      ))}
+      {useVideo ? (
+        <HeroVideoBackground
+          mp4Src={videoMp4!}
+          webmSrc={videoWebm}
+          posterSrc={slides[0]?.imageSrc ?? ""}
+          posterAlt={slides[0]?.imageAlt}
+        />
+      ) : (
+        slides.map((s, i) => (
+          <div
+            key={s.imageSrc}
+            aria-hidden={i !== active}
+            className={cn(
+              "absolute inset-0 transition-opacity duration-[1200ms] ease-in-out",
+              i === active ? "opacity-100" : "opacity-0",
+            )}
+          >
+            <Image
+              src={s.imageSrc}
+              alt={s.imageAlt ?? ""}
+              fill
+              priority={i === 0}
+              loading={i === 0 ? undefined : "eager"}
+              sizes="100vw"
+              className="object-contain"
+            />
+          </div>
+        ))
+      )}
       <div className="relative container flex h-full flex-col justify-end pb-32 pt-28 md:justify-center md:py-20">
         <div className="max-w-2xl text-background">
           {eyebrow && <p className="caption text-background/75 uppercase tracking-[0.14em]">{eyebrow}</p>}
@@ -130,7 +149,7 @@ export function HeroCarousel({
           {children && <div className="mt-8">{children}</div>}
         </div>
 
-        {slides.length > 1 && (
+        {!useVideo && slides.length > 1 && (
           <div
             role="tablist"
             aria-label="Hero slides"

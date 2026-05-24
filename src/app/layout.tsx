@@ -5,6 +5,7 @@ import "./globals.css";
 import { TRPCProvider } from "@/lib/trpc/provider";
 import { SilenceExtensionHydrationWarning } from "@/components/shared/silence-extension-hydration-warning";
 import { PostHogProvider } from "@/components/shared/posthog-provider";
+import { PostHogIdentify } from "@/components/shared/posthog-identify";
 import { getPostHogPublic } from "@/lib/analytics";
 import { SupportWidgetGate } from "@/components/support/support-widget-gate";
 import { ImpersonationBannerGate } from "@/components/layout/impersonation-banner-gate";
@@ -67,6 +68,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         <MobileDebug />
         <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
         <TRPCProvider>
+          {posthog.browserKey ? <PostHogIdentify /> : null}
           <BrandingProvider value={branding}>
             <Suspense fallback={null}>
               <ImpersonationBannerGate />

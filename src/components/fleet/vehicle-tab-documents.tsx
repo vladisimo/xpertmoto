@@ -45,7 +45,7 @@ function PreviewThumb({ doc, onOpen }: { doc: Doc; onOpen: () => void }) {
           src={doc.thumbnailUrl}
           alt=""
           loading="lazy"
-          className="h-full w-full object-cover"
+          className="h-full w-full object-contain"
         />
       ) : (
         <span className="flex h-full w-full items-center justify-center text-muted-foreground">

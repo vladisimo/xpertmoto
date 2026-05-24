@@ -49,7 +49,7 @@ export function FleetVehiclesTable({ data }: { data: FleetVehicleRow[] }) {
               alt={`${v.make} ${v.model}`}
               fill
               sizes="56px"
-              className="object-cover"
+              className="object-contain"
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-muted-foreground">

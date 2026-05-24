@@ -4,10 +4,13 @@ import { Suspense, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   POST_BOOKING_RESET_FLAG,
+  isPickupTooLate,
   maxReachableStep,
+  resetStaleBookingWizard,
   useBookingWizard,
   type WizardStep,
 } from "@/stores/booking-wizard";
+import { useResumeStalenessGuard } from "@/hooks/use-resume-staleness-guard";
 import { StepSearch } from "@/components/booking/step-search";
 import { StepVehicle } from "@/components/booking/step-vehicle";
 import { StepExtras } from "@/components/booking/step-extras";
@@ -28,6 +31,10 @@ function BookingWizardInner({ flags }: { flags: BookingFlags }) {
   const w = useBookingWizard();
   const params = useSearchParams();
   const isMobile = useIsMobile();
+
+  // Re-validate availability on resume past step 1; resets the wizard if the
+  // chosen depot/category has sold out since the customer left.
+  useResumeStalenessGuard();
 
   useEffect(() => {
     // The post-payment redirect lands on /booking/confirmation, which sets
@@ -81,6 +88,18 @@ function BookingWizardInner({ flags }: { flags: BookingFlags }) {
       cat && depot && vehicleId && pickup && ret ? (2 as WizardStep) : null;
     const target =
       stepFromUrl ?? handoffStep ?? useBookingWizard.getState().step;
+
+    // Synchronous staleness: a resume past step 1 whose pickup time is now too
+    // late (past, or within the booking cut-off) can't be completed — wipe it
+    // and start over at step 1 with a notice. Only meaningful past step 1
+    // (step 1 IS the date picker). A fresh deep-link with a future pickup
+    // passes this and seeds normally. Short-circuit before step resolution so
+    // the lingering `?pickup=`/`?step=` can't re-anchor the stale deep step.
+    if (target >= 2 && isPickupTooLate(useBookingWizard.getState().pickupDateTime)) {
+      resetStaleBookingWizard("PICKUP_PASSED");
+      return;
+    }
+
     const clamped = Math.min(
       target,
       maxReachableStep(useBookingWizard.getState()),

@@ -198,7 +198,7 @@ export function StepReview() {
           <Button variant="outline" onClick={() => w.back()} disabled={acceptPlatformConsent.isPending}>
             Back
           </Button>
-          <Button onClick={handleContinue} disabled={acceptPlatformConsent.isPending}>
+          <Button variant="cta" onClick={handleContinue} disabled={acceptPlatformConsent.isPending}>
             Continue to payment
           </Button>
         </div>

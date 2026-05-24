@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { getByPath, resolveCustomerId } from "@/server/trpc/trpc";
+import { getByPath, resolveBookingId, resolveCustomerId } from "@/server/trpc/trpc";
 import type { Context } from "@/server/trpc/context";
 
 const stubCtx = { session: { user: { id: "session-user-1" } } } as unknown as Context;
@@ -63,5 +63,47 @@ describe("resolveCustomerId", () => {
       stubCtx,
     );
     expect(id).toBeUndefined();
+  });
+});
+
+describe("resolveBookingId", () => {
+  test("returns undefined when meta is true or absent", () => {
+    expect(resolveBookingId(true, {}, stubCtx)).toBeUndefined();
+    expect(resolveBookingId(undefined, {}, stubCtx)).toBeUndefined();
+  });
+
+  test("returns undefined when bookingIdPath is absent", () => {
+    expect(resolveBookingId({}, {}, stubCtx)).toBeUndefined();
+    expect(resolveBookingId({ customerIdPath: "customerId" }, {}, stubCtx)).toBeUndefined();
+  });
+
+  test("string path resolves against input", () => {
+    const id = resolveBookingId(
+      { bookingIdPath: "bookingId" },
+      { bookingId: "bk-1" },
+      stubCtx,
+    );
+    expect(id).toBe("bk-1");
+  });
+
+  test("function path receives input and ctx", () => {
+    const id = resolveBookingId(
+      {
+        bookingIdPath: (_i, c) =>
+          (c as { capturedBookingId?: string }).capturedBookingId,
+      },
+      {},
+      { capturedBookingId: "bk-captured" } as unknown as Context,
+    );
+    expect(id).toBe("bk-captured");
+  });
+
+  test("returns undefined when resolver yields non-string or empty", () => {
+    expect(
+      resolveBookingId({ bookingIdPath: "bookingId" }, { bookingId: null }, stubCtx),
+    ).toBeUndefined();
+    expect(
+      resolveBookingId({ bookingIdPath: "bookingId" }, { bookingId: "" }, stubCtx),
+    ).toBeUndefined();
   });
 });

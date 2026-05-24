@@ -11,6 +11,7 @@ import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { StatusActions } from "@/components/staff/booking-status-actions";
 import { BookingNotes } from "@/components/staff/booking-notes";
+import { BookingTabActivity } from "@/components/staff/booking-tab-activity";
 import { UnallocatedVehicleBanner } from "@/components/staff/unallocated-vehicle-banner";
 import { PaymentConsole } from "@/components/staff/payment-console";
 import { SwapVehicleButton } from "@/components/staff/swap-vehicle-button";
@@ -21,6 +22,7 @@ import { EarlyReturnRefundBanner } from "@/components/staff/early-return-refund-
 import { BondAgeBanner } from "@/components/staff/bond-age-banner";
 import { BookingDocumentsSection } from "@/components/booking/booking-documents-section";
 import { DisputePanel } from "@/components/staff/dispute-panel";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import type { StatusKey } from "@/components/ui/status-badge";
 
 const VALID_TABS = ["overview", "payments", "agreements", "activity", "notes"] as const;
@@ -73,7 +75,6 @@ export default async function StaffBookingDetail({
         orderBy: { createdAt: "desc" },
         include: { user: { select: { firstName: true, lastName: true, role: true } } },
       },
-      statusLog: { orderBy: { timestamp: "desc" } },
       rentalAgreements: { orderBy: { version: "desc" }, include: { staff: { select: { firstName: true, lastName: true } } } },
       returnAssessments: { orderBy: { version: "desc" }, include: { damageCharges: true } },
       bondLedger: true,
@@ -113,6 +114,35 @@ export default async function StaffBookingDetail({
   const paymentsCount = b.payments.length + b.invoices.length;
   const agreementsCount = b.rentalAgreements.length + b.returnAssessments.length;
 
+  // Money summary — always visible above the tabs so the booking's financial
+  // status reads at a glance regardless of which tab is active.
+  const balanceDue = Number(b.balanceDue);
+  const bondHeld = b.bondLedger ? Number(b.bondLedger.heldAmount) : 0;
+  const bondCaptured = b.bondLedger ? Number(b.bondLedger.capturedAmount) : 0;
+  const bondReleased = b.bondLedger ? Number(b.bondLedger.releasedAmount) : 0;
+  // What's still actually held on the customer's card — once captures and
+  // releases net out the original authorisation, nothing remains held.
+  const bondRemaining = Math.max(0, bondHeld - bondCaptured - bondReleased);
+  const isPlanTerminal =
+    b.billingPlan?.status === "CANCELLED" || b.billingPlan?.status === "COMPLETED";
+
+  // Tolls are Infringement rows of type TOLL; everything else is a fine.
+  // "Open" = not yet PAID or WRITTEN_OFF, i.e. still needs staff attention.
+  const isInfringementOpen = (s: string) => s !== "PAID" && s !== "WRITTEN_OFF";
+  const tollItems = b.infringements.filter((i) => i.type === "TOLL");
+  const fineItems = b.infringements.filter((i) => i.type !== "TOLL");
+  const tollsTotal = tollItems.reduce((acc, i) => acc + Number(i.amount), 0);
+  const tollsOpen = tollItems.filter((i) => isInfringementOpen(i.status)).length;
+  const finesTotal = fineItems.reduce((acc, i) => acc + Number(i.amount), 0);
+  const finesOpen = fineItems.filter((i) => isInfringementOpen(i.status)).length;
+  const incidentsOpen = b.incidents.filter(
+    (i) => i.status !== "RESOLVED" && i.status !== "CLOSED",
+  ).length;
+  const incidentsExposure = b.incidents.reduce(
+    (acc, i) => acc + Number(i.customerChargeAmount ?? i.estimatedDamageCost ?? 0),
+    0,
+  );
+
   return (
     <PageShell>
       <PageHeader
@@ -128,6 +158,17 @@ export default async function StaffBookingDetail({
             <Badge variant="outline">{b.source.replace(/_/g, " ")}</Badge>
             {b.isDelivery && <Badge variant="outline">Delivery</Badge>}
             {b.extensionOfId && <Badge variant="outline">Extension</Badge>}
+            <StatusActions
+              bookingId={b.id}
+              status={b.status}
+              hasVehicle={!!b.vehicleId}
+              pickupDateTime={b.pickupDateTime.toISOString()}
+              returnDateTime={b.returnDateTime.toISOString()}
+              balanceDue={Number(b.balanceDue)}
+              hasSignedReturnAssessment={b.returnAssessments.some(
+                (a) => a.status === "SIGNED" || a.status === "FINALISED",
+              )}
+            />
           </>
         }
       />
@@ -137,17 +178,6 @@ export default async function StaffBookingDetail({
       )}
 
       <div className="flex flex-wrap items-start gap-3">
-        <StatusActions
-          bookingId={b.id}
-          status={b.status}
-          hasVehicle={!!b.vehicleId}
-          pickupDateTime={b.pickupDateTime.toISOString()}
-          returnDateTime={b.returnDateTime.toISOString()}
-          balanceDue={Number(b.balanceDue)}
-          hasSignedReturnAssessment={b.returnAssessments.some(
-            (a) => a.status === "SIGNED" || a.status === "FINALISED",
-          )}
-        />
         <BookingHeaderActions
           bookingId={b.id}
           status={b.status}
@@ -160,6 +190,72 @@ export default async function StaffBookingDetail({
           status={b.status}
           hasVehicle={!!b.vehicleId}
         />
+      </div>
+
+      {/* Always-visible money summary — mirrors the cards previously inside
+          the Payments tab so booking status reads at a glance. */}
+      <div className="-mt-2 grid grid-cols-2 gap-3 sm:-mt-3 sm:grid-cols-3 lg:-mt-4 lg:grid-cols-6">
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Balance due</div>
+          <div className="h2 tabular-nums">{formatCurrency(balanceDue)}</div>
+        </div>
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Bond held</div>
+          <div className="h2 tabular-nums">{formatCurrency(bondRemaining)}</div>
+          {b.bondLedger && (
+            <div className="caption mt-1">
+              Captured {formatCurrency(bondCaptured)} · Released {formatCurrency(bondReleased)}
+            </div>
+          )}
+        </div>
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Next recurring charge</div>
+          <div className="h3 tabular-nums">
+            {!b.billingPlan || isPlanTerminal
+              ? "—"
+              : formatDateTime(b.billingPlan.nextChargeAt)}
+          </div>
+          {b.billingPlan && (
+            <div className="caption mt-1">
+              {isPlanTerminal
+                ? `Plan ${b.billingPlan.status.toLowerCase()}`
+                : `${formatCurrency(Number(b.billingPlan.amountPerPeriod))} · ${b.billingPlan.frequency.toLowerCase()}`}
+            </div>
+          )}
+        </div>
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Tolls</div>
+          <div className={`h2 tabular-nums ${tollsOpen > 0 ? "text-destructive" : ""}`}>
+            {tollItems.length === 0 ? "—" : formatCurrency(tollsTotal)}
+          </div>
+          <div className="caption mt-1">
+            {tollItems.length === 0
+              ? "None recorded"
+              : `${tollItems.length} toll${tollItems.length === 1 ? "" : "s"} · ${tollsOpen} unrecovered`}
+          </div>
+        </div>
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Infringements</div>
+          <div className={`h2 tabular-nums ${finesOpen > 0 ? "text-destructive" : ""}`}>
+            {fineItems.length === 0 ? "—" : formatCurrency(finesTotal)}
+          </div>
+          <div className="caption mt-1">
+            {fineItems.length === 0
+              ? "None recorded"
+              : `${fineItems.length} fine${fineItems.length === 1 ? "" : "s"} · ${finesOpen} open`}
+          </div>
+        </div>
+        <div className="rounded-md border bg-muted/30 p-3">
+          <div className="caption">Incidents</div>
+          <div className={`h2 tabular-nums ${incidentsOpen > 0 ? "text-destructive" : ""}`}>
+            {b.incidents.length === 0 ? "—" : b.incidents.length}
+          </div>
+          <div className="caption mt-1">
+            {b.incidents.length === 0
+              ? "None reported"
+              : `${incidentsOpen} open${incidentsExposure > 0 ? ` · ${formatCurrency(incidentsExposure)} exposure` : ""}`}
+          </div>
+        </div>
       </div>
 
       <Tabs defaultValue={initialTab}>
@@ -366,7 +462,6 @@ export default async function StaffBookingDetail({
           <PaymentConsole
             bookingId={b.id}
             bookingStatus={b.status}
-            balanceDue={Number(b.balanceDue)}
             payments={b.payments.map((p) => ({
               id: p.id,
               reference: p.reference,
@@ -403,102 +498,99 @@ export default async function StaffBookingDetail({
                   }
                 : null
             }
-          />
-
-          {/* Invoices + Pricing breakdown sit side-by-side at xl: so the
-              tab fits more without scrolling on wide screens. */}
-          <div className="grid gap-6 xl:grid-cols-2">
-          {/* Invoices remain as a read-only reference panel. */}
-          <Card>
-            <CardHeader><CardTitle className="h3">Invoices &amp; adjustment notes</CardTitle></CardHeader>
-            <CardContent className="space-y-1 text-sm">
-              {b.invoices.length === 0 && b.adjustmentNotes.length === 0 && (
-                <p className="text-muted-foreground">No invoices yet.</p>
-              )}
-              {b.invoices.map((inv) => (
-                <div key={inv.id} className="flex justify-between border-b py-1 last:border-0">
-                  <span>{inv.invoiceNumber}</span>
-                  <div className="flex items-center gap-2 text-right">
-                    <span>{formatCurrency(Number(inv.totalAmount))}</span>
-                    <StatusBadge status={inv.status as StatusKey} />
-                    <InvoiceResendButton invoiceId={inv.id} />
-                  </div>
-                </div>
-              ))}
-              {b.adjustmentNotes.map((adj) => {
-                const signed =
-                  adj.type === "DECREASE"
-                    ? -Number(adj.totalAmount)
-                    : Number(adj.totalAmount);
-                return (
-                  <div key={adj.id} className="flex justify-between border-b py-1 last:border-0">
-                    <span>
-                      {adj.adjustmentNumber}
-                      <span className="caption ml-2">
-                        {adj.type === "DECREASE" ? "Credit" : "Debit"} · {adj.reason.replace(/_/g, " ").toLowerCase()}
-                      </span>
-                    </span>
-                    <div className="flex items-center gap-2 text-right">
-                      <span className="tabular-nums">{formatCurrency(signed)}</span>
-                      <StatusBadge status={adj.status as StatusKey} />
+            chargesAside={
+              <Card>
+                <CardHeader><CardTitle className="h3">Invoices &amp; adjustment notes</CardTitle></CardHeader>
+                <CardContent className="space-y-1 text-sm">
+                  {b.invoices.length === 0 && b.adjustmentNotes.length === 0 && (
+                    <p className="text-muted-foreground">No invoices yet.</p>
+                  )}
+                  {b.invoices.map((inv) => (
+                    <div key={inv.id} className="flex justify-between border-b py-1 last:border-0">
+                      <span>{inv.invoiceNumber}</span>
+                      <div className="flex items-center gap-2 text-right">
+                        <span>{formatCurrency(Number(inv.totalAmount))}</span>
+                        <StatusBadge status={inv.status as StatusKey} />
+                        <InvoiceResendButton invoiceId={inv.id} />
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </CardContent>
-          </Card>
-
-          {hasSnapshot && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="h3">Pricing breakdown</CardTitle>
-                <p className="caption">Snapshot taken when booking was created — source of truth for this rental.</p>
-              </CardHeader>
-              <CardContent className="space-y-4 text-sm">
-                {snap.lineItems && snap.lineItems.length > 0 && (
-                  <div>
-                    <div className="eyebrow mb-1">Line items</div>
-                    <div className="divide-y">
-                      {snap.lineItems.map((li, i) => (
-                        <div key={i} className="flex justify-between py-1">
-                          <span>
-                            {li.label}
-                            {li.qty !== undefined && li.unit !== undefined && (
-                              <span className="text-xs text-muted-foreground"> · {li.qty} × {formatCurrency(li.unit)}</span>
-                            )}
+                  ))}
+                  {b.adjustmentNotes.map((adj) => {
+                    const signed =
+                      adj.type === "DECREASE"
+                        ? -Number(adj.totalAmount)
+                        : Number(adj.totalAmount);
+                    return (
+                      <div key={adj.id} className="flex justify-between border-b py-1 last:border-0">
+                        <span>
+                          {adj.adjustmentNumber}
+                          <span className="caption ml-2">
+                            {adj.type === "DECREASE" ? "Credit" : "Debit"} · {adj.reason.replace(/_/g, " ").toLowerCase()}
                           </span>
-                          <span>{formatCurrency(Number(li.amount))}</span>
+                        </span>
+                        <div className="flex items-center gap-2 text-right">
+                          <span className="tabular-nums">{formatCurrency(signed)}</span>
+                          <StatusBadge status={adj.status as StatusKey} />
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                      </div>
+                    );
+                  })}
+                </CardContent>
+              </Card>
+            }
+            bondAside={
+              hasSnapshot ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="h3">Pricing breakdown</CardTitle>
+                    <p className="caption">Snapshot taken when booking was created — source of truth for this rental.</p>
+                  </CardHeader>
+                  <CardContent className="space-y-4 text-sm">
+                    {snap.lineItems && snap.lineItems.length > 0 && (
+                      <div>
+                        <div className="eyebrow mb-1">Line items</div>
+                        <div className="divide-y">
+                          {snap.lineItems.map((li, i) => (
+                            <div key={i} className="flex justify-between py-1">
+                              <span>
+                                {li.label}
+                                {li.qty !== undefined && li.unit !== undefined && (
+                                  <span className="text-xs text-muted-foreground"> · {li.qty} × {formatCurrency(li.unit)}</span>
+                                )}
+                              </span>
+                              <span>{formatCurrency(Number(li.amount))}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
-                <div className="grid gap-x-8 gap-y-1 sm:grid-cols-2">
-                  {snap.baseRate !== undefined && <Row label="Base daily rate" value={formatCurrency(snap.baseRate)} />}
-                  {snap.durationDays !== undefined && <Row label="Duration" value={`${snap.durationDays} day${snap.durationDays === 1 ? "" : "s"}`} />}
-                  {snap.seasonMultiplier !== undefined && snap.seasonMultiplier !== 1 && (
-                    <Row label="Season multiplier" value={`× ${snap.seasonMultiplier}`} />
-                  )}
-                  {snap.durationDiscountPct !== undefined && snap.durationDiscountPct !== 0 && (
-                    <Row label="Duration discount" value={`${Math.round(snap.durationDiscountPct * 100)}%`} />
-                  )}
-                  {snap.baseSubtotal !== undefined && <Row label="Base subtotal" value={formatCurrency(snap.baseSubtotal)} />}
-                  {snap.addonTotal !== undefined && snap.addonTotal > 0 && <Row label="Add-ons" value={formatCurrency(snap.addonTotal)} />}
-                  {snap.insuranceTotal !== undefined && snap.insuranceTotal > 0 && <Row label="Insurance" value={formatCurrency(snap.insuranceTotal)} />}
-                  {snap.deliveryFee !== undefined && snap.deliveryFee > 0 && <Row label="Delivery fee" value={formatCurrency(snap.deliveryFee)} />}
-                  {snap.discountAmount !== undefined && snap.discountAmount > 0 && (
-                    <Row label="Discount" value={`-${formatCurrency(snap.discountAmount)}`} />
-                  )}
-                  {snap.subtotalExGst !== undefined && <Row label="Subtotal ex GST" value={formatCurrency(snap.subtotalExGst)} />}
-                  {snap.gstAmount !== undefined && <Row label="GST (10%)" value={formatCurrency(snap.gstAmount)} />}
-                  {snap.bondAmount !== undefined && <Row label="Bond" value={formatCurrency(snap.bondAmount)} />}
-                  {snap.totalAmount !== undefined && <Row label="Total (GST incl.)" value={formatCurrency(snap.totalAmount)} bold />}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-          </div>
+                    <div className="grid gap-x-8 gap-y-1 sm:grid-cols-2">
+                      {snap.baseRate !== undefined && <Row label="Base daily rate" value={formatCurrency(snap.baseRate)} />}
+                      {snap.durationDays !== undefined && <Row label="Duration" value={`${snap.durationDays} day${snap.durationDays === 1 ? "" : "s"}`} />}
+                      {snap.seasonMultiplier !== undefined && snap.seasonMultiplier !== 1 && (
+                        <Row label="Season multiplier" value={`× ${snap.seasonMultiplier}`} />
+                      )}
+                      {snap.durationDiscountPct !== undefined && snap.durationDiscountPct !== 0 && (
+                        <Row label="Duration discount" value={`${Math.round(snap.durationDiscountPct * 100)}%`} />
+                      )}
+                      {snap.baseSubtotal !== undefined && <Row label="Base subtotal" value={formatCurrency(snap.baseSubtotal)} />}
+                      {snap.addonTotal !== undefined && snap.addonTotal > 0 && <Row label="Add-ons" value={formatCurrency(snap.addonTotal)} />}
+                      {snap.insuranceTotal !== undefined && snap.insuranceTotal > 0 && <Row label="Insurance" value={formatCurrency(snap.insuranceTotal)} />}
+                      {snap.deliveryFee !== undefined && snap.deliveryFee > 0 && <Row label="Delivery fee" value={formatCurrency(snap.deliveryFee)} />}
+                      {snap.discountAmount !== undefined && snap.discountAmount > 0 && (
+                        <Row label="Discount" value={`-${formatCurrency(snap.discountAmount)}`} />
+                      )}
+                      {snap.subtotalExGst !== undefined && <Row label="Subtotal ex GST" value={formatCurrency(snap.subtotalExGst)} />}
+                      {snap.gstAmount !== undefined && <Row label="GST (10%)" value={formatCurrency(snap.gstAmount)} />}
+                      {snap.bondAmount !== undefined && <Row label="Bond" value={formatCurrency(snap.bondAmount)} />}
+                      {snap.totalAmount !== undefined && <Row label="Total (GST incl.)" value={formatCurrency(snap.totalAmount)} bold />}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : null
+            }
+          />
         </TabsContent>
 
         <TabsContent value="agreements" className="space-y-6">
@@ -540,12 +632,17 @@ export default async function StaffBookingDetail({
                         <div className="text-xs text-destructive">Timestamping failed</div>
                       )}
                       {a.pdfUrl && (
-                        <Link
-                          href={`/api/bookings/${id}/rental-agreement?version=${a.version}`}
-                          className="text-xs text-primary underline"
+                        <DocumentViewerButton
+                          fileUrl={`/api/bookings/${id}/rental-agreement?version=${a.version}`}
+                          title={`Rental agreement ${a.agreementNumber}`}
+                          description={`v${a.version}`}
+                          kind="pdf"
+                          variant="link"
+                          size="sm"
+                          className="h-auto px-0"
                         >
-                          Download PDF
-                        </Link>
+                          View PDF
+                        </DocumentViewerButton>
                       )}
                     </div>
                   ))
@@ -580,12 +677,17 @@ export default async function StaffBookingDetail({
                         <div className="text-xs text-primary">RFC3161 timestamped {formatDateTime(a.timestampedAt)}</div>
                       )}
                       {a.pdfUrl && (
-                        <Link
-                          href={`/api/bookings/${id}/return-assessment`}
-                          className="text-xs text-primary underline"
+                        <DocumentViewerButton
+                          fileUrl={`/api/bookings/${id}/return-assessment`}
+                          title={`Return assessment ${a.assessmentNumber}`}
+                          description={`v${a.version}`}
+                          kind="pdf"
+                          variant="link"
+                          size="sm"
+                          className="h-auto px-0"
                         >
-                          Download PDF
-                        </Link>
+                          View PDF
+                        </DocumentViewerButton>
                       )}
                     </div>
                   ))
@@ -676,33 +778,21 @@ export default async function StaffBookingDetail({
         </TabsContent>
 
         <TabsContent value="notes" className="space-y-6">
-          <div className="grid gap-6 md:grid-cols-2">
-            <BookingNotes
-              bookingId={b.id}
-              initialNotes={b.bookingNotes.map((n) => ({
-                id: n.id,
-                note: n.note,
-                isInternal: n.isInternal,
-                createdAt: n.createdAt.toISOString(),
-                user: n.user,
-              }))}
-            />
+          <div className="space-y-6">
+            <div className="md:max-w-2xl">
+              <BookingNotes
+                bookingId={b.id}
+                initialNotes={b.bookingNotes.map((n) => ({
+                  id: n.id,
+                  note: n.note,
+                  isInternal: n.isInternal,
+                  createdAt: n.createdAt.toISOString(),
+                  user: n.user,
+                }))}
+              />
+            </div>
 
-            <Card>
-              <CardHeader><CardTitle className="h3">Status history</CardTitle></CardHeader>
-              <CardContent className="space-y-1 text-sm">
-                {b.statusLog.length === 0 ? (
-                  <p className="text-muted-foreground">No status changes yet.</p>
-                ) : (
-                  b.statusLog.map((s) => (
-                    <div key={s.id} className="flex justify-between border-b pb-1 last:border-0">
-                      <span>{s.previousStatus ?? "—"} → <span className="font-medium">{s.newStatus}</span></span>
-                      <span className="text-xs text-muted-foreground">{formatDateTime(s.timestamp)}{s.reason ? ` · ${s.reason}` : ""}</span>
-                    </div>
-                  ))
-                )}
-              </CardContent>
-            </Card>
+            <BookingTabActivity bookingId={b.id} />
           </div>
         </TabsContent>
       </Tabs>

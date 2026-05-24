@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
 import { LoadingBlock } from "@/components/ui/spinner";
@@ -69,11 +70,14 @@ export default function CheckInSignPage(props: { params: Promise<{ id: string }>
             <Link href={`/staff/bookings/${id}/check-in/settle`}>Continue to settle →</Link>
           </Button>
           {assessment.pdfUrl && (
-            <Button variant="secondary" asChild>
-              <Link href={assessment.pdfUrl} target="_blank">
-                View signed PDF
-              </Link>
-            </Button>
+            <DocumentViewerButton
+              variant="secondary"
+              fileUrl={assessment.pdfUrl}
+              title={`Return assessment ${assessment.assessmentNumber}`}
+              kind="pdf"
+            >
+              View signed PDF
+            </DocumentViewerButton>
           )}
         </div>
       </PageShell>

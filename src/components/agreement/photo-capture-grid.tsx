@@ -113,7 +113,7 @@ export function PhotoCaptureGrid({
               {existing ? (
                 <>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={existing.url} alt={slot} className="h-full w-full object-cover" />
+                  <img src={existing.url} alt={slot} className="h-full w-full object-contain" />
                   <span className="absolute bottom-0 left-0 right-0 bg-black/60 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white">
                     {slot}
                   </span>
@@ -137,7 +137,7 @@ export function PhotoCaptureGrid({
               .map((p) => (
                 <div key={p.id} className="relative aspect-square overflow-hidden rounded-md border border-input">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.url} alt={p.caption ?? "extra"} className="h-full w-full object-cover" />
+                  <img src={p.url} alt={p.caption ?? "extra"} className="h-full w-full object-contain" />
                   <Button
                     type="button"
                     size="sm"

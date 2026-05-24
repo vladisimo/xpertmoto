@@ -13,6 +13,7 @@ import {
   readCapturedCustomerId,
 } from "@/server/services/audit";
 import { geocodeAddress } from "@/lib/geo";
+import { trackServerGroupIdentify } from "@/lib/analytics";
 import { revalidateTag } from "next/cache";
 import { invalidateTag } from "@/lib/cache";
 import { CACHE_TAGS } from "@/lib/cache-tags";
@@ -72,6 +73,33 @@ function tierScopeWhere(scope: PricingTierScope, scopeId: string) {
   }
 }
 import { reassignFutureBookings } from "@/server/services/fleet-reassign";
+
+/**
+ * Register/update the depot's properties on its PostHog group so events
+ * tagged `$groups: { depot: slug }` can be sliced by depot attributes.
+ * Keyed on the depot slug to match the group key used on every event.
+ * Best-effort — fired on depot create/update only, never per event.
+ */
+async function identifyDepotGroup(depot: {
+  slug: string;
+  name: string;
+  state: string;
+  timezone: string;
+  isActive: boolean;
+  maxCapacity: number;
+}): Promise<void> {
+  await trackServerGroupIdentify({
+    groupType: "depot",
+    groupKey: depot.slug,
+    set: {
+      name: depot.name,
+      state: depot.state,
+      timezone: depot.timezone,
+      isActive: depot.isActive,
+      maxCapacity: depot.maxCapacity,
+    },
+  });
+}
 
 export const adminRouter = createTRPCRouter({
   // ----- KPIs -----
@@ -349,6 +377,11 @@ export const adminRouter = createTRPCRouter({
               position: input.position,
             },
           },
+          // Back-office users also get a CustomerProfile so they can rent
+          // personally. Bare on creation (only userId via the relation) —
+          // onboarding collects consent + licence before they can book, so
+          // we deliberately leave onboardedAt/consent/licence null here.
+          customerProfile: { create: {} },
         },
       });
       captureCustomerId(ctx, user.id);
@@ -550,6 +583,7 @@ export const adminRouter = createTRPCRouter({
         },
       });
       await invalidateTag(CACHE_TAGS.DEPOTS);
+      await identifyDepotGroup(depot);
       return depot;
     }),
 
@@ -591,6 +625,7 @@ export const adminRouter = createTRPCRouter({
       }
       const depot = await ctx.prisma.depot.update({ where: { id }, data });
       await invalidateTag(CACHE_TAGS.DEPOTS);
+      await identifyDepotGroup(depot);
       return depot;
     }),
 

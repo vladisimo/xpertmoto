@@ -33,7 +33,7 @@ export function LoginImageCarousel() {
           fill
           sizes="(min-width: 768px) 50vw, 100vw"
           priority
-          className="object-cover"
+          className="object-contain"
           style={{
             opacity: index === activeIndex ? 1 : 0,
             transition: `opacity ${FADE_MS}ms ease-in-out`,

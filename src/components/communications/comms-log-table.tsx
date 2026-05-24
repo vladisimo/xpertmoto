@@ -4,6 +4,7 @@ import * as React from "react";
 import { Mail, MessageCircle, Phone, Smartphone } from "lucide-react";
 
 import { CommsLogDetailDrawer } from "@/components/communications/comms-log-detail-drawer";
+import { isSuppressed } from "@/components/communications/delivery-status";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 
@@ -14,6 +15,7 @@ export type CommsLogRow = {
   category: string;
   channel: "EMAIL" | "SMS" | "IN_APP" | "PUSH";
   status: string;
+  errorMessage: string | null;
   subject: string | null;
   customer: { id: string; name: string; email: string | null; phone: string | null } | null;
   campaign: { id: string; name: string } | null;
@@ -103,7 +105,11 @@ export function CommsLogTable({ data }: { data: CommsLogRow[] }) {
     {
       id: "status",
       header: "Status",
-      cell: (r) => <StatusBadge status={r.status as StatusKey} />,
+      cell: (r) => (
+        <StatusBadge
+          status={(isSuppressed(r.errorMessage) ? "SUPPRESSED" : r.status) as StatusKey}
+        />
+      ),
     },
   ];
 

@@ -50,6 +50,7 @@ vi.mock("@/lib/customer-pii", () => ({
 }));
 
 import { onboardingRouter } from "@/server/trpc/router/onboarding";
+import { buildOnboardingVersion } from "@/lib/onboarding-status";
 import { TRPCError } from "@trpc/server";
 
 type Caller = ReturnType<typeof onboardingRouter.createCaller>;
@@ -187,6 +188,27 @@ function caller(ctx: unknown): Caller {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("onboardingProcedure gate (profile-based, not role-based)", () => {
+  it("admits a back-office user whose profile still needs onboarding", async () => {
+    const { ctx } = makeCtx(); // bare profile → needs onboarding
+    // Flip the session/user to a back-office role; the gate must admit them
+    // based on the profile state, not the role.
+    ctx.session.user.role = "STAFF" as never;
+    ctx.user.role = "STAFF" as never;
+    await expect(caller(ctx).bootstrap()).resolves.toBeDefined();
+  });
+
+  it("rejects a fully-onboarded user of any role with FORBIDDEN", async () => {
+    const { ctx } = makeCtx({
+      onboardedAt: new Date(),
+      onboardingVersion: buildOnboardingVersion(),
+    });
+    await expect(caller(ctx).bootstrap()).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    } satisfies Partial<TRPCError>);
+  });
 });
 
 describe("onboarding.bootstrap", () => {

@@ -86,6 +86,25 @@ export function readCapturedCustomerId(_input: unknown, ctx: unknown): string | 
 }
 
 /**
+ * Record the booking this resolver is acting on. Mirror of
+ * `captureCustomerId` for booking-scoped audit. Used when `bookingId` isn't a
+ * top-level input field (e.g. an action keyed by paymentId / assessmentId /
+ * swapId) but the resolver can look it up. The auto-audit middleware reads
+ * this via `.meta({ audit: { bookingIdPath: readCapturedBookingId } })` and
+ * tags a companion row `entity='Booking', entityId=<bookingId>` so the event
+ * appears on that booking's Activity tab.
+ */
+export function captureBookingId(ctx: unknown, bookingId: string | null | undefined): void {
+  if (bookingId) {
+    (ctx as { capturedBookingId?: string }).capturedBookingId = bookingId;
+  }
+}
+
+export function readCapturedBookingId(_input: unknown, ctx: unknown): string | undefined {
+  return (ctx as { capturedBookingId?: string }).capturedBookingId;
+}
+
+/**
  * Fire-and-forget wrapper. Queues the write on the microtask queue so it
  * doesn't block the caller's response path.
  */
@@ -109,6 +128,24 @@ export function writeCustomerAuditAsync(
 ): void {
   if (!customerId) return;
   writeAuditAsync(prisma, { ...entry, entity: "User", entityId: customerId });
+}
+
+/**
+ * Write a companion audit row keyed to a booking (entity='Booking'). Use in
+ * resolvers that call `skipAutoAudit()` and emit a rich primary row tagged
+ * with a *different* entity (e.g. 'BookingSwap', 'ReturnAssessment',
+ * 'DamageCharge') or no Booking row at all — this second row surfaces the
+ * event on that booking's Activity tab. Both rows share `reqId` so they can
+ * be correlated. Do NOT use it where the primary row is already
+ * entity='Booking' for the same id — that would duplicate.
+ */
+export function writeBookingAuditAsync(
+  prisma: PrismaClient,
+  bookingId: string | null | undefined,
+  entry: Omit<AuditEntry, "entity" | "entityId">,
+): void {
+  if (!bookingId) return;
+  writeAuditAsync(prisma, { ...entry, entity: "Booking", entityId: bookingId });
 }
 
 /**

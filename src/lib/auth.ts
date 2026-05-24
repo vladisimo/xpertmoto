@@ -714,19 +714,28 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const exists = await prisma.user.findUnique({ where: { id }, select: { id: true } });
         if (!exists) return null;
       }
-      // Re-read CUSTOMER onboarding state on `useSession().update()` so
-      // the requiresOnboarding flag drops the moment the wizard's
-      // `onboarding.complete` mutation lands. Mirrors the pending2fa
+      // Re-read onboarding state on `useSession().update()` so the session
+      // reflects a just-completed onboarding wizard. Mirrors the pending2fa
       // clearing pattern above.
-      if (id && trigger === "update" && t.role === "CUSTOMER") {
+      //
+      // For CUSTOMER, drive the requiresOnboarding flag (the global gate).
+      // For back-office roles we NEVER set requiresOnboarding (it would lock
+      // them out of the back office via protectedProcedure) — instead we
+      // refresh hasCustomerProfile so /portal-select starts offering the
+      // Customer tile the instant onboarding completes.
+      if (id && trigger === "update") {
         const profile = await prisma.customerProfile.findUnique({
           where: { userId: id },
-          select: { onboardedAt: true, onboardingVersion: true },
+          select: { id: true, onboardedAt: true, onboardingVersion: true },
         });
-        if (needsOnboarding(profile)) {
-          t.requiresOnboarding = true;
-        } else {
-          delete t.requiresOnboarding;
+        if (t.role === "CUSTOMER") {
+          if (needsOnboarding(profile)) {
+            t.requiresOnboarding = true;
+          } else {
+            delete t.requiresOnboarding;
+          }
+        } else if (profile) {
+          t.hasCustomerProfile = true;
         }
       }
       return token;

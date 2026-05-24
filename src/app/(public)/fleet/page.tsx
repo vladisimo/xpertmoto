@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { FleetSearchGrid, type FleetSearchModel } from "@/components/fleet/fleet-search-grid";
-import { UseCaseTabs } from "@/components/fleet/use-case-tabs";
+import { FleetHero } from "@/components/fleet/fleet-hero";
+import { RENTABLE_MODEL_WHERE } from "@/lib/fleet/consumer-visibility";
 import {
   ALL_TAB,
   DEFAULT_FLEET_TAB,
@@ -9,10 +10,32 @@ import {
   type FleetTab,
 } from "@/lib/fleet-use-cases";
 
+/** Number of cards in the "high-performance picks" featured strip. */
+const FEATURED_COUNT = 3;
+/** Below this count the featured strip would just mirror a thin grid — skip it. */
+const FEATURED_MIN_MODELS = 6;
+
+/**
+ * Pick the highest-spec bikes for the featured strip. Engine capacity is the
+ * headline performance proxy in this fleet; daily rate breaks ties (premium
+ * machines cost more). Models with no engine spec are excluded so the strip
+ * never features a bike we can't rank.
+ */
+function pickFeatured(models: FleetSearchModel[]): FleetSearchModel[] {
+  if (models.length < FEATURED_MIN_MODELS) return [];
+  const ranked = models
+    .filter((m) => m.specs?.engineCapacityCc != null)
+    .sort(
+      (a, b) =>
+        (b.specs?.engineCapacityCc ?? 0) - (a.specs?.engineCapacityCc ?? 0) ||
+        b.category.baseDailyRate - a.category.baseDailyRate,
+    )
+    .slice(0, FEATURED_COUNT);
+  return ranked.length === FEATURED_COUNT ? ranked : [];
+}
+
 async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
-  const where: Prisma.VehicleModelWhereInput = {
-    vehicles: { some: { isActive: true } },
-  };
+  const where: Prisma.VehicleModelWhereInput = { ...RENTABLE_MODEL_WHERE };
   if (tab !== ALL_TAB) {
     where.useCases = { has: tab };
   }
@@ -27,6 +50,9 @@ async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
       year: true,
       tagline: true,
       useCases: true,
+      engineCapacityCc: true,
+      dryWeightKg: true,
+      seatHeightMm: true,
       category: {
         select: {
           id: true,
@@ -72,6 +98,11 @@ async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
         tagline: m.tagline,
         useCases: m.useCases,
         colours,
+        specs: {
+          engineCapacityCc: m.engineCapacityCc,
+          dryWeightKg: m.dryWeightKg ? m.dryWeightKg.toNumber() : null,
+          seatHeightMm: m.seatHeightMm,
+        },
         category: {
           id: m.category?.id ?? "",
           licenceRequired: m.category?.licenceRequired ?? "",
@@ -97,29 +128,27 @@ export default async function FleetPage({
   const tab = slugToTab(resolvedSearch?.use) ?? DEFAULT_FLEET_TAB;
   const models = await getModels(tab);
 
+  const featured = pickFeatured(models);
+
   return (
-    <div className="container space-y-10 py-12">
-      <div className="space-y-2">
-        <p className="caption uppercase tracking-[0.14em]">Our fleet</p>
-        <h1 className="h-display">Pick your ride</h1>
-        <p className="max-w-2xl text-muted-foreground">
-          From lightweight learner scooters to unrestricted adventure tourers. Filter by how
-          you plan to ride — every bike is meticulously maintained and ready to roll.
-        </p>
+    <>
+      {/* Pulled up behind the transparent navbar — see TRANSPARENT_BG_ROUTES. */}
+      <div className="-mt-20">
+        <FleetHero featured={featured} />
       </div>
 
-      <UseCaseTabs active={tab} includeAll />
-
-      {models.length === 0 ? (
-        <div className="flex flex-col items-center gap-4 rounded-md border border-dashed border-border bg-muted/40 p-10 text-center">
-          <p className="text-lg font-medium">No bikes available right now.</p>
-          <p className="max-w-md text-sm text-muted-foreground">
-            We&rsquo;re adding more bikes to our fleet all the time — check back soon.
-          </p>
-        </div>
-      ) : (
-        <FleetSearchGrid key={tab} models={models} />
-      )}
-    </div>
+      <div className="container space-y-10 py-12">
+        {models.length === 0 ? (
+          <div className="flex flex-col items-center gap-4 rounded-md border border-dashed border-border bg-muted/40 p-10 text-center">
+            <p className="text-lg font-medium">No bikes available right now.</p>
+            <p className="max-w-md text-sm text-muted-foreground">
+              We&rsquo;re adding more bikes to our fleet all the time — check back soon.
+            </p>
+          </div>
+        ) : (
+          <FleetSearchGrid key={tab} models={models} activeTab={tab} />
+        )}
+      </div>
+    </>
   );
 }

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { CheckCircle2, Loader2, PenTool, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SignaturePad } from "@/components/agreement/signature-pad";
 import {
@@ -115,14 +116,17 @@ export function ConsentDocumentViewer({
           <p className="text-muted-foreground">
             Signed {new Date(signed.signedAt).toLocaleString("en-AU")} · {signed.docVersion}
           </p>
-          <a
-            href={signed.fileUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-primary underline"
+          <DocumentViewerButton
+            fileUrl={signed.fileUrl}
+            title={`${doc.title} — signed`}
+            description={signed.docVersion}
+            kind="pdf"
+            variant="link"
+            size="sm"
+            className="h-auto px-0"
           >
             View signed PDF
-          </a>
+          </DocumentViewerButton>
         </CardContent>
       </Card>
     );

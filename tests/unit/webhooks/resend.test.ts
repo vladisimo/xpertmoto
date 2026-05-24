@@ -2,12 +2,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import crypto from "node:crypto";
 
 const notificationUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+const notificationFindFirst = vi.fn().mockResolvedValue(null);
 const systemSettingFindUnique = vi.fn().mockResolvedValue(null);
+const trackServerMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    notification: { updateMany: notificationUpdateMany },
+    notification: { updateMany: notificationUpdateMany, findFirst: notificationFindFirst },
     systemSetting: { findUnique: systemSettingFindUnique },
   },
+}));
+
+vi.mock("@/lib/analytics", () => ({
+  trackServer: (...args: unknown[]) => trackServerMock(...args),
 }));
 
 const SECRET = "whsec_" + Buffer.from("0123456789abcdef0123456789abcdef").toString("base64");
@@ -33,6 +39,9 @@ async function post(body: string, headers: Record<string, string> = {}) {
 
 beforeEach(async () => {
   notificationUpdateMany.mockClear();
+  notificationFindFirst.mockClear();
+  notificationFindFirst.mockResolvedValue(null);
+  trackServerMock.mockClear();
   systemSettingFindUnique.mockResolvedValue(null);
   process.env.RESEND_WEBHOOK_SECRET = SECRET;
   const { invalidateAll } = await import("@/lib/integration-config");
@@ -83,5 +92,20 @@ describe("Resend webhook", () => {
     const res = await post(body, signBody(body));
     expect(res.status).toBe(200);
     expect(notificationUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("emits comms.email_bounced for the recipient on a bounce", async () => {
+    notificationFindFirst.mockResolvedValue({ userId: "user_1" });
+    const body = JSON.stringify({ type: "email.bounced", data: { email_id: "re_def" } });
+    await post(body, signBody(body));
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "comms.email_bounced", distinctId: "user_1" }),
+    );
+  });
+
+  it("does NOT emit to PostHog on delivered/opened (gated)", async () => {
+    const body = JSON.stringify({ type: "email.delivered", data: { email_id: "re_abc" } });
+    await post(body, signBody(body));
+    expect(trackServerMock).not.toHaveBeenCalled();
   });
 });

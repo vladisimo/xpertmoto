@@ -1034,6 +1034,9 @@ model VehicleModel {
   useCases     FleetUseCase[] @default([])
   tagline      String?
   heroImageKey String?
+  // Internal/service vehicles (e.g. delivery vans) set this false so they
+  // never surface on consumer fleet/booking pages. See consumer-visibility.ts.
+  isRentable   Boolean        @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1112,6 +1115,9 @@ model VehicleImage {
   caption      String?
   isPrimary    Boolean @default(false)
   displayOrder Int     @default(0)
+  // sha256 of the file bytes. Lets the public model page collapse the same
+  // stock photo uploaded once per unit (distinct URLs, identical content).
+  checksum     String?
 
   vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
 

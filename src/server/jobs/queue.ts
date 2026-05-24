@@ -36,6 +36,7 @@ export type QueueName =
   | "debt-reminder"
   | "visitor-session-cleanup"
   | "revenue-reconcile"
+  | "rewards-recompute"
   | "staff-task-auto-abandon"
   | "cart-recovery"
   | "pre-pickup-upsell"

@@ -276,7 +276,7 @@ function InnerForm({
           >
             Back
           </Button>
-          <Button type="submit" disabled={!stripe || !elements || processing}>
+          <Button type="submit" variant="cta" disabled={!stripe || !elements || processing}>
             {processing ? "Processing…" : "Pay & confirm"}
           </Button>
         </div>

@@ -25,7 +25,19 @@ export function normaliseAuPhone(raw: string): string {
 }
 
 export async function sendSms(payload: SmsPayload): Promise<SendResult> {
-  const to = normaliseAuPhone(payload.to);
+  const intendedTo = normaliseAuPhone(payload.to);
+
+  // Dev-only safety valve: redirect every message to a single test number so
+  // local/staging testing never reaches real customers. Never honoured in
+  // production. The real recipient is prepended so the redirect is visible.
+  const redirect =
+    process.env.NODE_ENV !== "production" && process.env.SMS_DEV_REDIRECT_TO
+      ? normaliseAuPhone(process.env.SMS_DEV_REDIRECT_TO)
+      : null;
+  const to = redirect ?? intendedTo;
+  const body = redirect
+    ? `[DEV → would send to ${intendedTo}]\n${payload.body}`
+    : payload.body;
 
   const [accountSid, authToken, fromNumber, appUrl] = await Promise.all([
     getString("integration:twilio:accountSid", "TWILIO_ACCOUNT_SID"),
@@ -35,12 +47,18 @@ export async function sendSms(payload: SmsPayload): Promise<SendResult> {
   ]);
 
   if (accountSid && authToken && fromNumber) {
+    if (redirect) {
+      logger.info(
+        { intendedTo, redirectedTo: to },
+        "sms dev redirect active — message diverted to test number",
+      );
+    }
     const twilio = (await import("twilio")).default;
     const client = twilio(accountSid, authToken);
     const msg = await client.messages.create({
       from: fromNumber,
       to,
-      body: payload.body,
+      body,
       ...(appUrl ? { statusCallback: `${appUrl}/api/webhooks/twilio` } : {}),
     });
     const numSegments =

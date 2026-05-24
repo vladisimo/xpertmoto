@@ -81,6 +81,7 @@ export function BookingMobileBottomBar({
         </button>
         <Button
           type="button"
+          variant="cta"
           className="flex-1"
           disabled={continueDisabled || continuePending}
           onClick={() => action?.onClick()}

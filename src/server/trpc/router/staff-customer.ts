@@ -3,6 +3,8 @@ import bcrypt from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, staffProcedure, trpcRateLimit } from "../trpc";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { renderConsentDocumentPdf } from "@/lib/pdf/consent-document";
 import {
   CONSENT_DOC_TYPE_MAP,
@@ -14,6 +16,10 @@ import {
   getLicenceVerificationStatus,
 } from "@/lib/licence-verify";
 import { STATUS_FILTERS, type StatusFilter } from "@/lib/customers/filters";
+import {
+  CUSTOMER_DIRECTORY_SQL_PREDICATE,
+  customerDirectoryUserWhere,
+} from "@/lib/customer-identity";
 import { strongPasswordField } from "@/lib/validators/auth";
 import { deleteFile, downloadFile, getSignedUrl, uploadFile } from "@/lib/storage";
 import {
@@ -179,7 +185,11 @@ export function buildCustomerListWhere(
   input: { search?: string; status: StatusFilter },
   now: Date,
 ): Prisma.UserWhereInput {
-  const where: Prisma.UserWhereInput = { role: "CUSTOMER" };
+  // Directory membership is profile-based, not role-based: any user with a
+  // CustomerProfile (incl. back-office users who carry one so they can rent).
+  // Held in AND so the status facets below can still set `customerProfile`
+  // without clobbering the membership clause.
+  const where: Prisma.UserWhereInput = { AND: [customerDirectoryUserWhere()] };
   if (input.search) {
     where.OR = [
       { email: { contains: input.search, mode: "insensitive" } },
@@ -266,7 +276,7 @@ export const staffCustomerRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const items = await ctx.prisma.user.findMany({
         where: {
-          role: "CUSTOMER",
+          ...customerDirectoryUserWhere(),
           OR: [
             { email: { contains: input.query, mode: "insensitive" } },
             { firstName: { contains: input.query, mode: "insensitive" } },
@@ -289,6 +299,10 @@ export const staffCustomerRouter = createTRPCRouter({
     const now = new Date();
     const soon = new Date(now);
     soon.setDate(soon.getDate() + 30);
+    // Directory membership predicate (cp.id IS NOT NULL) sourced from the
+    // shared helper. Constant SQL with no user input, so Prisma.raw is safe;
+    // reused across every FILTER clause below.
+    const dir = Prisma.raw(CUSTOMER_DIRECTORY_SQL_PREDICATE);
 
     // Single round-trip: FILTER clauses over User LEFT JOIN CustomerProfile
     // for the user/profile-scoped metrics, plus two uncorrelated scalar
@@ -310,21 +324,21 @@ export const staffCustomerRouter = createTRPCRouter({
       }[]
     >`
       SELECT
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER')
+        COUNT(*) FILTER (WHERE ${dir})
           AS "total",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."licenceVerifiedAt" IS NOT NULL)
+        COUNT(*) FILTER (WHERE ${dir} AND cp."licenceVerifiedAt" IS NOT NULL)
           AS "verified",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."licenceExpiry" < ${now})
+        COUNT(*) FILTER (WHERE ${dir} AND cp."licenceExpiry" < ${now})
           AS "licenceExpired",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."licenceExpiry" >= ${now} AND cp."licenceExpiry" <= ${soon})
+        COUNT(*) FILTER (WHERE ${dir} AND cp."licenceExpiry" >= ${now} AND cp."licenceExpiry" <= ${soon})
           AS "licenceExpiringSoon",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND u.status = 'SUSPENDED')
+        COUNT(*) FILTER (WHERE ${dir} AND u.status = 'SUSPENDED')
           AS "suspended",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."riskRating" = 'LOW')
+        COUNT(*) FILTER (WHERE ${dir} AND cp."riskRating" = 'LOW')
           AS "riskLow",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."riskRating" = 'MEDIUM')
+        COUNT(*) FILTER (WHERE ${dir} AND cp."riskRating" = 'MEDIUM')
           AS "riskMedium",
-        COUNT(*) FILTER (WHERE u.role = 'CUSTOMER' AND cp."riskRating" = 'HIGH')
+        COUNT(*) FILTER (WHERE ${dir} AND cp."riskRating" = 'HIGH')
           AS "riskHigh",
         (SELECT COUNT(DISTINCT b."customerId") FROM "Booking" b
           WHERE b.status IN ('PENDING_PAYMENT','CONFIRMED','CHECKED_OUT','ACTIVE','OVERDUE'))
@@ -367,7 +381,9 @@ export const staffCustomerRouter = createTRPCRouter({
         },
       },
     });
-    if (!user || user.role !== "CUSTOMER") throw new TRPCError({ code: "NOT_FOUND" });
+    // Customer identity is profile-based: a back-office user who carries a
+    // CustomerProfile is a valid customer detail page.
+    if (!user || !user.customerProfile) throw new TRPCError({ code: "NOT_FOUND" });
     // Transparently decrypt PII fields before returning to the client.
     // Shape stays identical (plaintext string | null) so existing UI
     // code that reads `customerProfile.licenceNumber` keeps working;
@@ -447,6 +463,11 @@ export const staffCustomerRouter = createTRPCRouter({
           licenceVerifiedById: input.verified ? ctx.user.id : null,
         },
       });
+      await trackServer({
+        event: SERVER_EVENTS.licenceVerified,
+        distinctId: input.customerId,
+        properties: { verified: input.verified, actorUserId: ctx.user.id },
+      });
       return { ok: true };
     }),
 
@@ -485,6 +506,11 @@ export const staffCustomerRouter = createTRPCRouter({
           notes: [existing?.notes, noteLine].filter(Boolean).join("\n"),
         },
       });
+      await trackServer({
+        event: SERVER_EVENTS.licenceVerificationStarted,
+        distinctId: input.customerId,
+        properties: { sessionId: session.id, method: "stripe_identity", actorUserId: ctx.user.id },
+      });
       return session;
     }),
 
@@ -502,6 +528,11 @@ export const staffCustomerRouter = createTRPCRouter({
           },
         });
       }
+      await trackServer({
+        event: SERVER_EVENTS.licenceVerificationRefreshed,
+        distinctId: input.customerId,
+        properties: { sessionId: input.sessionId, status, actorUserId: ctx.user.id },
+      });
       return { status };
     }),
 
@@ -2982,6 +3013,7 @@ export const staffCustomerRouter = createTRPCRouter({
                 loyaltyTier: true,
                 totalSpend: true,
                 completedBookings: true,
+                totalBookings: true,
               },
             },
           },
@@ -3003,6 +3035,8 @@ export const staffCustomerRouter = createTRPCRouter({
           loyaltyTier: u.customerProfile?.loyaltyTier ?? "SILVER",
           totalSpend: u.customerProfile?.totalSpend.toNumber() ?? 0,
           completedBookings: u.customerProfile?.completedBookings ?? 0,
+          // Bookings column: completed + in-flight (current) engagements.
+          totalBookings: u.customerProfile?.totalBookings ?? 0,
         })),
         totalCount,
         pageCount: Math.max(1, Math.ceil(totalCount / input.pageSize)),

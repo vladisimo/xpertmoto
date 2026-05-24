@@ -1,6 +1,7 @@
 import { PrismaClient, Prisma, UserRole, VehicleStatus, BookingStatus, AddonType, InspectionType, InspectionStatus, VehicleCondition, type NotificationType, type NotificationCategory, type NotificationChannel } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { paragraphs, renderEmailShell, summaryTable } from "../src/lib/email-shell";
+import { buildOnboardingVersion } from "../src/lib/onboarding-status";
 
 const prisma = new PrismaClient();
 
@@ -220,6 +221,28 @@ async function main() {
       passwordHash: adminPw,
       role: "SUPER_ADMIN" satisfies UserRole,
       emailVerified: new Date(),
+      // Date of birth so the admin's customer identity passes age eligibility.
+      dateOfBirth: new Date(1985, 0, 15),
+      // Back-office users also carry a CustomerProfile so they can rent. The
+      // SUPER_ADMIN is seeded fully onboarded + licence-verified so the
+      // primary dev login can exercise the customer portal end-to-end.
+      customerProfile: {
+        create: {
+          onboardedAt: new Date(),
+          onboardingVersion: buildOnboardingVersion(),
+          termsAcceptedAt: new Date(),
+          privacyAcceptedAt: new Date(),
+          licenceNumber: "90000001",
+          licenceState: "QLD",
+          licenceClass: "C",
+          licenceExpiry: new Date(2030, 5, 1),
+          licenceVerifiedAt: new Date(),
+          addressLine1: "1 Admin St",
+          suburb: "Surfers Paradise",
+          state: "QLD",
+          postcode: "4217",
+        },
+      },
     },
   });
 
@@ -233,6 +256,8 @@ async function main() {
         role: "MANAGER",
         depotId: d.id,
         emailVerified: new Date(),
+        // Bare customer profile — manager can rent after completing onboarding.
+        customerProfile: { create: {} },
       },
     });
     await prisma.staffProfile.create({
@@ -247,6 +272,8 @@ async function main() {
         role: "STAFF",
         depotId: d.id,
         emailVerified: new Date(),
+        // Bare customer profile — staff can rent after completing onboarding.
+        customerProfile: { create: {} },
       },
     });
     await prisma.staffProfile.create({

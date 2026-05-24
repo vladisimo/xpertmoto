@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma";
 import { formatCurrency } from "@/lib/utils";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import BondReleased from "../../../emails/bond-released";
 import { getQueue, registerWorker } from "./queue";
 
@@ -30,7 +32,9 @@ export async function runBondAutoRelease(): Promise<number> {
       booking: { status: { in: ["COMPLETED", "RETURNED"] } },
     },
     include: {
-      booking: { include: { customer: true } },
+      booking: {
+        include: { customer: true, pickupDepot: { select: { slug: true } } },
+      },
     },
   });
 
@@ -78,6 +82,18 @@ export async function runBondAutoRelease(): Promise<number> {
         bookingReference: bond.booking.bookingReference,
         amount: Number(bond.heldAmount),
       },
+    });
+
+    await trackServer({
+      event: SERVER_EVENTS.bondAutoReleased,
+      distinctId: bond.customerId,
+      properties: {
+        bookingId: bond.bookingId,
+        reference: bond.booking.bookingReference,
+        heldAud: Number(bond.heldAmount),
+        autoReleaseDays,
+      },
+      groups: { depot: bond.booking.pickupDepot.slug },
     });
   }
 

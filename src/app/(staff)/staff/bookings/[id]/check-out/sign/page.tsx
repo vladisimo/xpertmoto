@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
 import { LoadingBlock } from "@/components/ui/spinner";
@@ -102,11 +103,15 @@ export default function CheckOutSignPage(props: { params: Promise<{ id: string }
             <Link href={`/staff/bookings/${id}/check-out/confirm`}>Continue to handover →</Link>
           </Button>
           {currentAgreement.pdfUrl && (
-            <Button variant="secondary" asChild>
-              <Link href={currentAgreement.pdfUrl} target="_blank">
-                View signed PDF
-              </Link>
-            </Button>
+            <DocumentViewerButton
+              variant="secondary"
+              fileUrl={currentAgreement.pdfUrl}
+              title={`Agreement ${currentAgreement.agreementNumber}`}
+              description={`v${currentAgreement.version}`}
+              kind="pdf"
+            >
+              View signed PDF
+            </DocumentViewerButton>
           )}
         </div>
       </PageShell>

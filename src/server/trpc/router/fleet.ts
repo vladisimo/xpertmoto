@@ -15,6 +15,8 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 // Statuses that a human (import or UI) is allowed to set directly.
 // Operational statuses (RENTED / RESERVED / IN_TRANSIT) are driven by
@@ -67,7 +69,9 @@ const vehicleCreate = z.object({
   financeProvider: z.string().optional(),
   financeRef: z.string().optional(),
   ownerId: z.string().optional(),
-  images: z.array(z.object({ url: z.string().min(1), caption: z.string().optional() })).optional(),
+  images: z
+    .array(z.object({ url: z.string().min(1), caption: z.string().optional(), checksum: z.string().optional() }))
+    .optional(),
   documents: z.array(z.object({
     type: z.enum(["REGO_CERT", "INSURANCE", "CTP", "PURCHASE_RECEIPT", "OTHER"]),
     fileUrl: z.string().min(1),
@@ -699,6 +703,7 @@ export const fleetRouter = createTRPCRouter({
             vehicleId: vehicle.id,
             url: img.url,
             caption: img.caption,
+            checksum: img.checksum,
             isPrimary: i === 0,
             displayOrder: i,
           })),
@@ -788,6 +793,7 @@ export const fleetRouter = createTRPCRouter({
       vehicleId: z.string(),
       url: z.string().min(1),
       caption: z.string().optional(),
+      checksum: z.string().optional(),
       isPrimary: z.boolean().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -805,6 +811,7 @@ export const fleetRouter = createTRPCRouter({
           vehicleId: input.vehicleId,
           url: input.url,
           caption: input.caption,
+          checksum: input.checksum,
           isPrimary: makePrimary,
           displayOrder: existingCount,
         },
@@ -1153,6 +1160,21 @@ export const fleetRouter = createTRPCRouter({
         });
       }
 
+      await trackServer({
+        event: SERVER_EVENTS.maintenanceCreated,
+        distinctId: ctx.user.id,
+        properties: {
+          workOrderId: wo.id,
+          workOrderNumber: wo.workOrderNumber,
+          vehicleId: input.vehicleId,
+          type: input.type,
+          priority: input.priority,
+          scheduledStartAt: input.scheduledStartAt?.toISOString() ?? null,
+          scheduledEndAt: input.scheduledEndAt?.toISOString() ?? null,
+          assigned: !!input.assignedToId,
+        },
+      });
+
       return wo;
     }),
 
@@ -1167,7 +1189,10 @@ export const fleetRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const wo = await ctx.prisma.maintenanceWorkOrder.findUniqueOrThrow({ where: { id: input.id }, include: { vehicle: true } });
+      const wo = await ctx.prisma.maintenanceWorkOrder.findUniqueOrThrow({
+        where: { id: input.id },
+        include: { vehicle: { include: { depot: { select: { slug: true } } } } },
+      });
       const data: Record<string, unknown> = { status: input.status };
       if (input.status === "IN_PROGRESS" && !wo.startedAt) data.startedAt = new Date();
       if (input.status === "COMPLETED") {
@@ -1210,6 +1235,20 @@ export const fleetRouter = createTRPCRouter({
           closingUserId: ctx.user.id,
         });
       }
+
+      await trackServer({
+        event: SERVER_EVENTS.maintenanceStatusChanged,
+        distinctId: ctx.user.id,
+        properties: {
+          workOrderId: wo.id,
+          workOrderNumber: wo.workOrderNumber,
+          vehicleId: wo.vehicleId,
+          status: input.status,
+          actualCostAud: input.actualCost ?? null,
+        },
+        ...(wo.vehicle.depot?.slug ? { groups: { depot: wo.vehicle.depot.slug } } : {}),
+      });
+
       return updated;
     }),
 
@@ -1282,6 +1321,22 @@ export const fleetRouter = createTRPCRouter({
         });
       }
 
+      await trackServer({
+        event: SERVER_EVENTS.incidentCreated,
+        distinctId: input.customerId ?? ctx.user.id,
+        properties: {
+          incidentId: incident.id,
+          incidentNumber: incident.incidentNumber,
+          type: input.type,
+          severity: input.severity,
+          vehicleId: input.vehicleId,
+          bookingId: input.bookingId ?? null,
+          customerLiable: input.customerLiable,
+          estimatedDamageAud: input.estimatedDamageCost ?? null,
+          actorUserId: ctx.user.id,
+        },
+      });
+
       return incident;
     }),
 
@@ -1334,7 +1389,11 @@ export const fleetRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const incident = await ctx.prisma.incident.findUniqueOrThrow({
         where: { id: input.incidentId },
-        include: { booking: { include: { bondLedger: true } } },
+        include: {
+          booking: {
+            include: { bondLedger: true, pickupDepot: { select: { slug: true } } },
+          },
+        },
       });
       if (!incident.booking) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Incident must be linked to a booking before charging." });
@@ -1471,6 +1530,23 @@ export const fleetRouter = createTRPCRouter({
       } catch {
         // tryIssueAdjustmentForBooking already logs internal failures.
       }
+
+      await trackServer({
+        event: SERVER_EVENTS.incidentCustomerCharged,
+        distinctId: customerId,
+        properties: {
+          incidentId: incident.id,
+          incidentNumber: incident.incidentNumber,
+          bookingId,
+          amountAud: amount,
+          fromBondAud: result.fromBond,
+          fromCardAud: result.fromCard,
+          actorUserId: ctx.user.id,
+        },
+        ...(incident.booking?.pickupDepot?.slug
+          ? { groups: { depot: incident.booking.pickupDepot.slug } }
+          : {}),
+      });
 
       return result;
     }),
@@ -1627,8 +1703,8 @@ export const fleetRouter = createTRPCRouter({
       resolution: z.string().optional(),
       actualDamageCost: z.number().optional(),
     }))
-    .mutation(({ ctx, input }) =>
-      ctx.prisma.incident.update({
+    .mutation(async ({ ctx, input }) => {
+      const updated = await ctx.prisma.incident.update({
         where: { id: input.id },
         data: {
           status: input.status,
@@ -1636,8 +1712,20 @@ export const fleetRouter = createTRPCRouter({
           actualDamageCost: input.actualDamageCost,
           ...(input.status === "RESOLVED" || input.status === "CLOSED" ? { resolvedAt: new Date() } : {}),
         },
-      }),
-    ),
+      });
+      await trackServer({
+        event: SERVER_EVENTS.incidentStatusChanged,
+        distinctId: updated.customerId ?? ctx.user.id,
+        properties: {
+          incidentId: updated.id,
+          incidentNumber: updated.incidentNumber,
+          status: input.status,
+          bookingId: updated.bookingId,
+          actorUserId: ctx.user.id,
+        },
+      });
+      return updated;
+    }),
 
   // Infringements
   createInfringement: staffProcedure
@@ -1654,9 +1742,24 @@ export const fleetRouter = createTRPCRouter({
         dueDate: z.coerce.date().optional(),
       }),
     )
-    .mutation(({ ctx, input }) =>
-      ctx.prisma.infringement.create({ data: input }),
-    ),
+    .mutation(async ({ ctx, input }) => {
+      const inf = await ctx.prisma.infringement.create({ data: input });
+      await trackServer({
+        event: SERVER_EVENTS.infringementCreated,
+        distinctId: input.customerId ?? ctx.user.id,
+        properties: {
+          infringementId: inf.id,
+          referenceNumber: inf.referenceNumber,
+          type: input.type,
+          issuer: input.issuer,
+          amountAud: input.amount,
+          vehicleId: input.vehicleId,
+          bookingId: input.bookingId ?? null,
+          actorUserId: ctx.user.id,
+        },
+      });
+      return inf;
+    }),
 
   listInfringements: staffProcedure.query(({ ctx }) =>
     ctx.prisma.infringement.findMany({
@@ -1741,6 +1844,19 @@ export const fleetRouter = createTRPCRouter({
           amount: Number(inf.amount),
         },
         sentById: ctx.user.id,
+      });
+
+      await trackServer({
+        event: SERVER_EVENTS.infringementNominated,
+        distinctId: inf.booking.customerId,
+        properties: {
+          infringementId: inf.id,
+          referenceNumber: inf.referenceNumber,
+          type: inf.type,
+          amountAud: Number(inf.amount),
+          bookingId: inf.bookingId ?? null,
+          actorUserId: ctx.user.id,
+        },
       });
 
       return updated;

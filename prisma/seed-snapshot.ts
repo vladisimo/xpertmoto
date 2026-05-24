@@ -50,6 +50,30 @@ async function main() {
     throw new Error(`psql exited with status ${result.status}`);
   }
   console.log("✅ Snapshot restored");
+
+  // The snapshot predates VehicleModel.isRentable, so restored van rows fall
+  // back to the column default (true). Re-flag the known internal/service
+  // vehicles so they stay hidden from consumers — mirrors the backfill in the
+  // add_vehicle_model_is_rentable migration. Idempotent.
+  const flag = spawnSync(
+    "psql",
+    [
+      "-h", host,
+      "-p", port,
+      "-U", user,
+      "-d", database,
+      "-v", "ON_ERROR_STOP=1",
+      "-c",
+      `UPDATE "VehicleModel" SET "isRentable" = false
+       WHERE (lower("make"), lower("model")) IN
+         (('ford', 'transit connect'), ('renault', 'master'));`,
+    ],
+    { env: { ...process.env, PGPASSWORD: password }, stdio: ["ignore", "inherit", "inherit"] },
+  );
+  if (flag.status !== 0) {
+    throw new Error(`psql (non-rental flag) exited with status ${flag.status}`);
+  }
+  console.log("✅ Re-flagged non-rental service vehicles");
 }
 
 main().catch((err) => {

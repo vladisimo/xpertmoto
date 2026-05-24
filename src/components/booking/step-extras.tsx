@@ -286,7 +286,7 @@ export function StepExtras() {
       {layout === "desktop" && (
         <div className="mt-6 flex justify-between">
           <Button variant="outline" onClick={() => w.back()}>Back</Button>
-          <Button onClick={() => w.next()}>Continue</Button>
+          <Button variant="cta" onClick={() => w.next()}>Continue</Button>
         </div>
       )}
     </div>

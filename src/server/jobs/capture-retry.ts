@@ -4,6 +4,8 @@ import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { getQueue, registerWorker } from "./queue";
 
 /**
@@ -59,13 +61,35 @@ export async function runCaptureRetry(data: CaptureRetryJobData): Promise<"succe
       type: true,
       amount: true,
       status: true,
-      booking: { select: { bookingReference: true } },
+      booking: {
+        select: {
+          bookingReference: true,
+          pickupDepot: { select: { slug: true } },
+        },
+      },
     },
   });
   if (!row || !row.customerId || row.status !== "PENDING") {
     logger.info({ paymentId: data.paymentId, status: row?.status }, "capture-retry: row gone or already resolved");
     return "missing";
   }
+  const depotSlug = row.booking?.pickupDepot?.slug;
+  const emitAttempt = (outcome: string, extra?: Record<string, unknown>) =>
+    trackServer({
+      event: SERVER_EVENTS.paymentCaptureAttempt,
+      distinctId: row.customerId!,
+      properties: {
+        paymentId: row.id,
+        bookingId: row.bookingId,
+        type: row.type,
+        amountAud: Number(row.amount),
+        attempt: data.attempt,
+        retry: true,
+        outcome,
+        ...extra,
+      },
+      ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+    });
 
   const attemptKey = `payment-capture-retry:${row.id}:${data.attempt}:${row.reference}`;
   const charge = await chargeOffSessionForUser({
@@ -101,6 +125,7 @@ export async function runCaptureRetry(data: CaptureRetryJobData): Promise<"succe
       source: `job:capture-retry:${data.attempt}`,
       data: { stripePaymentIntentId: charge.id, attempt: data.attempt },
     }, { swallow: true });
+    await emitAttempt("succeeded");
     return "succeeded";
   }
 
@@ -146,6 +171,7 @@ export async function runCaptureRetry(data: CaptureRetryJobData): Promise<"succe
         data: { paymentId: row.id, paymentReference: row.reference, attempts: data.attempt },
       });
     }
+    await emitAttempt("exhausted", { errorCode: charge?.errorCode ?? null });
     return "exhausted";
   }
 
@@ -158,6 +184,7 @@ export async function runCaptureRetry(data: CaptureRetryJobData): Promise<"succe
     data: { nextAttempt, errorCode: charge?.errorCode, charge_status: charge?.status },
   }, { swallow: true });
   await enqueueCaptureRetry({ paymentId: row.id, attempt: nextAttempt, errorCode: charge?.errorCode });
+  await emitAttempt("requeued", { errorCode: charge?.errorCode ?? null, nextAttempt });
   return "requeued";
 }
 

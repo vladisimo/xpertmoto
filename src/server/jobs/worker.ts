@@ -43,6 +43,7 @@ import { startVisitorSessionCleanupScheduler } from "./visitor-session-cleanup";
 import { startAnalyticsAlertScheduler } from "@/server/services/analytics-alert";
 import { startAnalyticsDigestScheduler } from "@/server/services/analytics-digest";
 import { startRevenueReconcileScheduler } from "./revenue-reconcile";
+import { startRewardsRecomputeScheduler } from "./rewards-recompute";
 import { startStaffTaskAutoAbandonScheduler } from "./staff-task-auto-abandon";
 import { startCartRecoveryScheduler } from "./cart-recovery";
 import { startPrePickupUpsellScheduler } from "./pre-pickup-upsell";
@@ -106,6 +107,7 @@ async function main() {
   startAnalyticsAlertScheduler();
   startAnalyticsDigestScheduler();
   startRevenueReconcileScheduler();
+  startRewardsRecomputeScheduler();
   startStaffTaskAutoAbandonScheduler();
   // Revenue-lever schedulers
   startCartRecoveryScheduler();

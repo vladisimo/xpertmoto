@@ -8,9 +8,12 @@ import { withAudit } from "@/lib/with-audit";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writeAudit } from "@/server/services/audit";
 import { writePaymentEvent } from "@/server/services/payment-events";
+import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { stripeWebhookOutcome } from "@/server/services/metrics";
 import { sendNotification } from "@/server/services/notification-sender";
 import { recordRefund, invalidateRevenueCaches } from "@/server/services/revenue-aggregator";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 function humanisePaymentType(type: string): string {
   return type
@@ -230,6 +233,15 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         }
       }
 
+      // Capture the prior status BEFORE the flip so the balanceDue decrement
+      // below stays idempotent: a redelivered webhook (or the deposit's own
+      // payment_intent.succeeded, which is already SUCCEEDED) must not
+      // double-decrement. Bond holds are handled in the branch above.
+      const priorCharge = await prisma.payment.findFirst({
+        where: { stripePaymentIntentId: id },
+        select: { bookingId: true, type: true, amount: true, status: true },
+      });
+
       await prisma.payment.updateMany({
         where: { stripePaymentIntentId: id },
         data: {
@@ -238,6 +250,16 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           processedAt: new Date(),
         },
       });
+      // Remove a now-collected ancillary charge from Booking.balanceDue
+      // (no-op for the deposit / bonds / already-SUCCEEDED redeliveries).
+      if (priorCharge) {
+        await applyCaptureToBalanceDue(prisma, {
+          bookingId: priorCharge.bookingId,
+          type: priorCharge.type,
+          amount: priorCharge.amount,
+          previousStatus: priorCharge.status,
+        });
+      }
       const payment = await prisma.payment.findFirst({
         where: { stripePaymentIntentId: id },
         select: {
@@ -248,7 +270,12 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           type: true,
           processedAt: true,
           bookingId: true,
-          booking: { select: { bookingReference: true } },
+          booking: {
+            select: {
+              bookingReference: true,
+              pickupDepot: { select: { slug: true } },
+            },
+          },
           customer: { select: { firstName: true } },
           adjustmentNote: { select: { id: true } },
         },
@@ -263,6 +290,26 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           stripeEventId: event.id,
           data: { stripeChargeId: chargeId, stripePaymentIntentId: id },
         }, { swallow: true });
+      }
+      // PostHog: emit `payment.captured` once, from the Stripe webhook —
+      // the single source of truth for money actually settling. Skip bond
+      // holds (tracked via bond.* events) and idempotent redeliveries (the
+      // charge was already SUCCEEDED before this delivery), so a redelivered
+      // webhook never double-counts. Best-effort, never blocks the webhook.
+      if (payment?.id && payment.customerId && !isBondHold && priorCharge?.status !== "SUCCEEDED") {
+        const depotSlug = payment.booking?.pickupDepot?.slug;
+        await trackServer({
+          event: SERVER_EVENTS.paymentCaptured,
+          distinctId: payment.customerId,
+          properties: {
+            paymentId: payment.id,
+            bookingId: payment.bookingId,
+            reference: payment.booking?.bookingReference ?? payment.reference,
+            amountAud: Number(payment.amount),
+            type: payment.type,
+          },
+          ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+        });
       }
       // Issue a branded receipt PDF for the now-SUCCEEDED payment so the
       // attachment resolver can find a `receiptPdfKey` to email out.
@@ -341,6 +388,26 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         where: { stripePaymentIntentId: id },
         data: { status: "HELD" },
       });
+      const bond = await prisma.bondLedger.findFirst({
+        where: { stripePaymentIntentId: id },
+        select: {
+          bookingId: true,
+          customerId: true,
+          heldAmount: true,
+          booking: { select: { pickupDepot: { select: { slug: true } } } },
+        },
+      });
+      if (bond) {
+        await trackServer({
+          event: SERVER_EVENTS.bondHeldUpdated,
+          distinctId: bond.customerId,
+          properties: {
+            bookingId: bond.bookingId,
+            heldAud: Number(bond.heldAmount),
+          },
+          groups: { depot: bond.booking.pickupDepot.slug },
+        });
+      }
       return;
     }
     case "payment_intent.payment_failed": {
@@ -353,7 +420,14 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       });
       const failedPayments = await prisma.payment.findMany({
         where: { stripePaymentIntentId: id },
-        select: { id: true },
+        select: {
+          id: true,
+          customerId: true,
+          bookingId: true,
+          amount: true,
+          type: true,
+          booking: { select: { pickupDepot: { select: { slug: true } } } },
+        },
       });
       for (const p of failedPayments) {
         await writePaymentEvent(prisma, {
@@ -363,6 +437,21 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           source: "webhook",
           stripeEventId: event.id,
         }, { swallow: true });
+        if (p.customerId) {
+          await trackServer({
+            event: SERVER_EVENTS.paymentFailed,
+            distinctId: p.customerId,
+            properties: {
+              paymentId: p.id,
+              bookingId: p.bookingId,
+              amountAud: Number(p.amount),
+              type: p.type,
+            },
+            ...(p.booking?.pickupDepot?.slug
+              ? { groups: { depot: p.booking.pickupDepot.slug } }
+              : {}),
+          });
+        }
       }
       // C3: transition any stuck PENDING_PAYMENT / QUOTE booking tied to
       // this intent to CANCELLED immediately. Avoids a pile of abandoned
@@ -417,7 +506,14 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         });
         const payment = await prisma.payment.findFirst({
           where: { stripePaymentIntentId: pi, bookingId: { not: null } },
-          select: { id: true, booking: { select: { depotId: true } } },
+          select: {
+            id: true,
+            customerId: true,
+            bookingId: true,
+            booking: {
+              select: { depotId: true, pickupDepot: { select: { slug: true } } },
+            },
+          },
         });
         if (payment?.id && amountRefundedCents > 0) {
           await writePaymentEvent(prisma, {
@@ -429,6 +525,21 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
             stripeEventId: event.id,
             data: { amountRefundedCents, fullyRefunded },
           }, { swallow: true });
+          if (payment.customerId) {
+            const depotSlug = payment.booking?.pickupDepot?.slug;
+            await trackServer({
+              event: SERVER_EVENTS.paymentRefunded,
+              distinctId: payment.customerId,
+              properties: {
+                paymentId: payment.id,
+                bookingId: payment.bookingId,
+                amountRefundedAud: amountRefundedCents / 100,
+                fullyRefunded,
+                source: "stripe_webhook",
+              },
+              ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+            });
+          }
         }
         const depotId = payment?.booking?.depotId;
         if (depotId && amountRefundedCents > 0) {
@@ -482,7 +593,14 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           bookingId: true,
           customerId: true,
           amount: true,
-          booking: { select: { vehicleId: true, depotId: true, bookingReference: true } },
+          booking: {
+            select: {
+              vehicleId: true,
+              depotId: true,
+              bookingReference: true,
+              pickupDepot: { select: { slug: true } },
+            },
+          },
         },
       });
       if (!payment) return;
@@ -554,6 +672,23 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
             data: { disputeId, incidentNumber, reason },
           });
         }
+
+        if (payment.customerId) {
+          const depotSlug = payment.booking?.pickupDepot?.slug;
+          await trackServer({
+            event: SERVER_EVENTS.paymentDisputed,
+            distinctId: payment.customerId,
+            properties: {
+              paymentId: payment.id,
+              bookingId: payment.bookingId,
+              disputeId,
+              reason,
+              disputeAmountAud: disputeAmountCents / 100,
+              incidentNumber,
+            },
+            ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+          });
+        }
       }
       return;
     }
@@ -561,10 +696,33 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       const parsed = parseEventObject(paymentIntentFailedSchema, obj, event.type);
       if (!parsed) return;
       const id = parsed.id;
-      await prisma.bondLedger.updateMany({
+      const released = await prisma.bondLedger.updateMany({
         where: { stripePaymentIntentId: id, status: "HELD" },
         data: { status: "RELEASED", releasedAmount: new Prisma.Decimal(0) },
       });
+      if (released.count > 0) {
+        const bond = await prisma.bondLedger.findFirst({
+          where: { stripePaymentIntentId: id },
+          select: {
+            bookingId: true,
+            customerId: true,
+            heldAmount: true,
+            booking: { select: { pickupDepot: { select: { slug: true } } } },
+          },
+        });
+        if (bond) {
+          await trackServer({
+            event: SERVER_EVENTS.bondReleased,
+            distinctId: bond.customerId,
+            properties: {
+              bookingId: bond.bookingId,
+              heldAud: Number(bond.heldAmount),
+              source: "stripe_webhook",
+            },
+            groups: { depot: bond.booking.pickupDepot.slug },
+          });
+        }
+      }
       return;
     }
     case "charge.refund.updated": {
@@ -644,7 +802,12 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       const incidentNumber = `CBK-${parsed.id}`;
       const incident = await prisma.incident.findFirst({
         where: { incidentNumber },
-        select: { id: true, bookingId: true, customerId: true },
+        select: {
+          id: true,
+          bookingId: true,
+          customerId: true,
+          booking: { select: { pickupDepot: { select: { slug: true } } } },
+        },
       });
       if (!incident) {
         logger.info(
@@ -686,6 +849,27 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         status: "SUCCESS",
         newData: { disputeId: parsed.id, disputeStatus, paymentIntentId: pi },
       });
+      const disputeEventByType: Record<string, string> = {
+        "charge.dispute.funds_withdrawn": SERVER_EVENTS.disputeFundsWithdrawn,
+        "charge.dispute.funds_reinstated": SERVER_EVENTS.disputeFundsReinstated,
+        "charge.dispute.updated": SERVER_EVENTS.disputeUpdated,
+        "charge.dispute.closed": SERVER_EVENTS.disputeClosed,
+      };
+      const disputeEvent = disputeEventByType[event.type];
+      if (disputeEvent && incident.customerId) {
+        const depotSlug = incident.booking?.pickupDepot?.slug;
+        await trackServer({
+          event: disputeEvent,
+          distinctId: incident.customerId,
+          properties: {
+            incidentId: incident.id,
+            bookingId: incident.bookingId,
+            disputeId: parsed.id,
+            disputeStatus,
+          },
+          ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+        });
+      }
       return;
     }
     case "payment_method.attached":
@@ -755,11 +939,25 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           where: { userId: customerId },
           data: { licenceVerifiedAt: new Date() },
         });
+        await trackServer({
+          event: SERVER_EVENTS.identityVerified,
+          distinctId: customerId,
+          properties: { source: "stripe_identity" },
+        });
       }
       return;
     }
     case "identity.verification_session.requires_input": {
       logger.info({ eventId: event.id }, "identity verification requires more input");
+      const parsed = parseEventObject(identityVerifiedSchema, obj, event.type);
+      const customerId = parsed?.metadata?.customerId;
+      if (customerId) {
+        await trackServer({
+          event: SERVER_EVENTS.identityRequiresInput,
+          distinctId: customerId,
+          properties: { source: "stripe_identity" },
+        });
+      }
       return;
     }
     default:

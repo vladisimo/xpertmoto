@@ -110,7 +110,7 @@ export default async function ConfirmationPage({
               <img
                 src={heroUrl}
                 alt={vehicleTitle}
-                className="absolute inset-0 h-full w-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain"
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center text-xs uppercase tracking-wide text-muted-foreground">

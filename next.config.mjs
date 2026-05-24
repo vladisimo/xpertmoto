@@ -30,6 +30,8 @@ const scriptSrc = [
   "'unsafe-inline'",
   isDev ? "'unsafe-eval'" : null,
   "https://js.stripe.com",
+  // PostHog snippet loads array.js from <region>-assets.i.posthog.com.
+  "https://*.i.posthog.com",
 ]
   .filter(Boolean)
   .join(" ");
@@ -57,12 +59,15 @@ const cspDirectives = [
   "style-src 'self' 'unsafe-inline'",
   `img-src ${imgSrc}`,
   "font-src 'self' data:",
-  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io${
+  // *.i.posthog.com covers both event ingestion (us.i.posthog.com) and the
+  // static asset host (us-assets.i.posthog.com), plus the EU region.
+  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io https://*.i.posthog.com${
     process.env.NEXT_PUBLIC_MAP_STYLE_URL
       ? ""
       : " https://demotiles.maplibre.org"
   }`,
-  "frame-src https://js.stripe.com https://hooks.stripe.com",
+  // www.google.com hosts the Google Maps embed iframes (public depot map).
+  "frame-src https://js.stripe.com https://hooks.stripe.com https://www.google.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

@@ -85,7 +85,7 @@ export function QuoteSummary({ nested = false }: Props = {}) {
                 alt={`${preferredVehicle.make} ${preferredVehicle.model}`}
                 fill
                 sizes="64px"
-                className="object-cover"
+                className="object-contain"
               />
             ) : null}
           </div>

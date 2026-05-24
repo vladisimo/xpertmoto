@@ -7,6 +7,7 @@ import type { UserRole } from "@prisma/client";
 import { writeAuditAsync } from "@/server/services/audit";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import { needsOnboarding } from "@/lib/onboarding-status";
 
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
@@ -67,6 +68,9 @@ export type AuditMeta =
       customerIdPath?:
         | string
         | ((input: unknown, ctx: Context) => string | undefined | null);
+      bookingIdPath?:
+        | string
+        | ((input: unknown, ctx: Context) => string | undefined | null);
       entity?: string;
     };
 
@@ -92,6 +96,18 @@ export function resolveCustomerId(
 ): string | undefined {
   if (!meta || typeof meta !== "object") return undefined;
   const p = meta.customerIdPath;
+  if (!p) return undefined;
+  const raw = typeof p === "function" ? p(input, ctx) : getByPath(input, p);
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
+export function resolveBookingId(
+  meta: AuditMeta | undefined,
+  input: unknown,
+  ctx: Context,
+): string | undefined {
+  if (!meta || typeof meta !== "object") return undefined;
+  const p = meta.bookingIdPath;
   if (!p) return undefined;
   const raw = typeof p === "function" ? p(input, ctx) : getByPath(input, p);
   return typeof raw === "string" && raw.length > 0 ? raw : undefined;
@@ -135,6 +151,7 @@ const auditMiddleware = t.middleware(async ({ ctx, path, type, input, meta, next
       : "FAILURE";
 
   const customerId = resolveCustomerId(auditMeta, input, effectiveCtx);
+  const bookingId = resolveBookingId(auditMeta, input, effectiveCtx);
   const metaEntity = typeof auditMeta === "object" && auditMeta ? auditMeta.entity : undefined;
   const entity = metaEntity ?? (customerId ? "User" : (path.split(".")[0] ?? "tRPC"));
   const entityId = customerId ?? undefined;
@@ -171,6 +188,33 @@ const auditMiddleware = t.middleware(async ({ ctx, path, type, input, meta, next
     ipAddress: ctx.ipAddress,
     userAgent: ctx.userAgent,
   });
+
+  // Companion row keyed to the affected booking so the event surfaces on the
+  // booking's Activity tab — mirrors the entity='User' row tagged via
+  // customerIdPath. Reaches here only when the resolver did NOT skipAutoAudit
+  // (early-returned at the `skip` check above), so the 8 manual entity='Booking'
+  // rows are never doubled. Guard skips the rare case where the primary row is
+  // already this exact Booking row (meta.entity='Booking' + bookingIdPath).
+  if (bookingId && !(entity === "Booking" && entityId === bookingId)) {
+    writeAuditAsync(ctx.prisma, {
+      userId: ctx.session?.user?.id,
+      impersonatorId: ctx.session?.impersonatorId ?? null,
+      category: type === "mutation" ? "MUTATION" : "QUERY",
+      action: path,
+      entity: "Booking",
+      entityId: bookingId,
+      method: "tRPC",
+      path,
+      status,
+      durationMs: Date.now() - start,
+      depotId: ctx.session?.user?.depotId ?? null,
+      reqId: ctx.reqId,
+      errorCode: result.ok ? undefined : result.error.code,
+      newData: input,
+      ipAddress: ctx.ipAddress,
+      userAgent: ctx.userAgent,
+    });
+  }
   return result;
 });
 
@@ -319,6 +363,16 @@ export const stepUpProcedure = publicProcedure.use(async ({ ctx, next }) => {
  * `onboarding` router — everything else MUST use `protectedProcedure` so
  * a non-onboarded session can't reach the rest of the API. Still rejects
  * `pending2fa` sessions: TOTP step-up always comes before onboarding.
+ *
+ * Admittance is profile-based, not role-based: any authenticated user
+ * whose CustomerProfile still needs onboarding may run the wizard —
+ * including back-office users (STAFF/MANAGER/ADMIN/SUPER_ADMIN) who now
+ * carry a CustomerProfile so they can rent. We deliberately never set
+ * `requiresOnboarding` on a back-office session (it would lock them out of
+ * the whole back office via protectedProcedure), so this gate reads the
+ * profile directly rather than trusting the session flag. A fully
+ * onboarded user of any role is rejected so they can't re-enter the
+ * consent-gated procedures.
  */
 export const onboardingProcedure = publicProcedure.use(async ({ ctx, next }) => {
   if (!ctx.session?.user) {
@@ -330,10 +384,14 @@ export const onboardingProcedure = publicProcedure.use(async ({ ctx, next }) => 
       message: "Two-factor authentication required",
     });
   }
-  if (ctx.session.user.role !== "CUSTOMER") {
+  const profile = await ctx.prisma.customerProfile.findUnique({
+    where: { userId: ctx.session.user.id },
+    select: { onboardedAt: true, onboardingVersion: true },
+  });
+  if (!needsOnboarding(profile)) {
     throw new TRPCError({
       code: "FORBIDDEN",
-      message: "Onboarding flow is for customers only",
+      message: "Onboarding already complete",
     });
   }
   return next({ ctx: { ...ctx, session: ctx.session, user: ctx.session.user } });

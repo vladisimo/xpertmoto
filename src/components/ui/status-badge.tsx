@@ -131,6 +131,11 @@ const STATUS_TONE_MAP = {
   OPT_OUT:           { tone: "neutral",  label: "Opt-out" },
   UNSUBSCRIBED:      { tone: "neutral",  label: "Unsubscribed" },
   READ:              { tone: "info",     label: "Read" },
+  // NotificationStatus.SUPPRESSED — the message was intentionally gated by an
+  // admin notification setting, not a delivery failure. CommunicationLog rows
+  // record this as status FAILED + errorMessage "SUPPRESSED:<reason>"; the
+  // comms drawer maps that back to this neutral pill so it doesn't read as red.
+  SUPPRESSED:        { tone: "neutral",  label: "Suppressed" },
   // SupportTicketStatus additions (OPEN/ASSIGNED/RESOLVED/CLOSED reused above)
   PENDING_CUSTOMER:  { tone: "warning",  label: "Pending customer" },
   // SupportPriority + StaffTaskTier
@@ -144,6 +149,8 @@ const STATUS_TONE_MAP = {
   ABANDONED_VEHICLE: { tone: "warning",  label: "Abandoned" },
   PAYMENT:           { tone: "info",     label: "Payment" },
   GENERAL:           { tone: "neutral",  label: "General" },
+  // Public fleet availability pills (count surfaced via the `label` override)
+  STOCK_LOW:         { tone: "warning",  label: "Low availability" },
   // Fleet import row status
   READY:             { tone: "success",  label: "Ready" },
   ERROR:             { tone: "danger",   label: "Error" },

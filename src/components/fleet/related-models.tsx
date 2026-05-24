@@ -37,7 +37,7 @@ export function RelatedModels({
                   alt={`${m.make} ${m.model}`}
                   fill
                   sizes="112px"
-                  className="object-cover"
+                  className="object-contain"
                 />
               ) : (
                 <div className="flex h-full items-center justify-center">

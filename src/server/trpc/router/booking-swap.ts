@@ -10,10 +10,15 @@ import { refundCharge } from "@/lib/stripe";
 import { renderSwapAgreementPdf } from "@/lib/pdf/swap-agreement";
 import { uploadFile } from "@/lib/storage";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { logger } from "@/lib/logger";
 import {
+  captureBookingId,
+  readCapturedBookingId,
   skipAutoAudit,
   writeAudit,
+  writeBookingAuditAsync,
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
@@ -329,6 +334,13 @@ export const bookingSwapRouter = createTRPCRouter({
           origin: input.origin,
         },
       });
+      // Companion row so the swap draft surfaces on the booking's Activity tab.
+      writeBookingAuditAsync(ctx.prisma, b.id, {
+        userId: ctx.user.id,
+        action: "BOOKING_SWAP_DRAFT_STARTED",
+        reqId: ctx.reqId,
+        newData: { swapId: draft.id, reason: input.reason, origin: input.origin },
+      });
       return draft;
     }),
 
@@ -391,6 +403,7 @@ export const bookingSwapRouter = createTRPCRouter({
             take: 1,
           },
           billingPlan: { select: { id: true } },
+          pickupDepot: { select: { slug: true } },
         },
       });
       if (!(SWAP_ALLOWED_STATUSES as readonly string[]).includes(booking.status)) {
@@ -1166,6 +1179,23 @@ export const bookingSwapRouter = createTRPCRouter({
         dedupKey: `swap-confirmed:${draft.id}`,
       });
 
+      await trackServer({
+        event: SERVER_EVENTS.bookingSwapConfirmed,
+        distinctId: booking.customerId,
+        properties: {
+          bookingId: booking.id,
+          reference: booking.bookingReference,
+          swapId: draft.id,
+          reason: draft.reason,
+          incomingVehicleId: input.incomingVehicleId,
+          direction,
+          deltaAmountAud: absDelta,
+          gstAmountAud: gstAmount,
+          actorUserId: ctx.user.id,
+        },
+        groups: { depot: booking.pickupDepot.slug },
+      });
+
       return { swap: result.committed, direction, deltaAmount: absDelta, gstAmount };
     }),
 
@@ -1213,6 +1243,13 @@ export const bookingSwapRouter = createTRPCRouter({
         previousData: { status: "DRAFT" },
         newData: { status: "VOIDED", reason: input.reason },
       });
+      // Companion row so the void surfaces on the booking's Activity tab.
+      writeBookingAuditAsync(ctx.prisma, draft.bookingId, {
+        userId: ctx.user.id,
+        action: "BOOKING_SWAP_VOIDED",
+        reqId: ctx.reqId,
+        newData: { swapId: draft.id, reason: input.reason },
+      });
       return voided;
     }),
 
@@ -1223,10 +1260,12 @@ export const bookingSwapRouter = createTRPCRouter({
    */
   reconcileCreditTransfer: managerProcedure
     .input(z.object({ paymentId: z.string(), reference: z.string().min(1) }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const p = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
       });
+      captureBookingId(ctx, p.bookingId);
       if (p.type !== "MANUAL_CREDIT" || p.status !== "PENDING") {
         throw new TRPCError({
           code: "BAD_REQUEST",

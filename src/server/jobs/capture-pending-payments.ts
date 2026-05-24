@@ -5,7 +5,10 @@ import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { sendNotification } from "@/server/services/notification-sender";
+import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { getBranding } from "@/lib/branding";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { getQueue, registerWorker } from "./queue";
 
 /**
@@ -89,7 +92,12 @@ export async function runCapturePendingPayments(
       type: true,
       amount: true,
       notes: true,
-      booking: { select: { bookingReference: true } },
+      booking: {
+        select: {
+          bookingReference: true,
+          pickupDepot: { select: { slug: true } },
+        },
+      },
     },
   });
 
@@ -105,6 +113,25 @@ export async function runCapturePendingPayments(
     if (!row.customerId) continue;
     const attemptKey = `payment-capture:${row.id}:${row.reference}`;
     const description = `${row.type} — ${row.booking?.bookingReference ?? row.reference}`;
+    const customerId = row.customerId;
+    const depotSlug = row.booking?.pickupDepot?.slug;
+    // One event per attempt, discriminated by `outcome`, so the PostHog
+    // capture-success funnel and failure breakdown both read off a single
+    // event. Best-effort — never blocks the capture loop.
+    const emitAttempt = (outcome: string, extra?: Record<string, unknown>) =>
+      trackServer({
+        event: SERVER_EVENTS.paymentCaptureAttempt,
+        distinctId: customerId,
+        properties: {
+          paymentId: row.id,
+          bookingId: row.bookingId,
+          type: row.type,
+          amountAud: Number(row.amount),
+          outcome,
+          ...extra,
+        },
+        ...(depotSlug ? { groups: { depot: depotSlug } } : {}),
+      });
 
     const charge = await chargeOffSessionForUser({
       userId: row.customerId,
@@ -126,7 +153,7 @@ export async function runCapturePendingPayments(
       await prisma.payment.update({
         where: { id: row.id },
         data: {
-          notes: appendNote(row.notes, "capture-pending: skipped — no stored PM"),
+          notes: refreshSkipNote(row.notes),
         },
       });
       await writePaymentAudit(prisma, {
@@ -137,6 +164,7 @@ export async function runCapturePendingPayments(
         status: "SUCCESS",
         newData: { paymentId: row.id, paymentType: row.type },
       });
+      await emitAttempt("no_pm");
       continue;
     }
 
@@ -150,6 +178,15 @@ export async function runCapturePendingPayments(
           processedAt: new Date(),
           notes: appendNote(row.notes, `capture-pending: captured via off-session`),
         },
+      });
+      // The charge was raised PENDING with its amount added to
+      // Booking.balanceDue; now that it's collected, remove it so the
+      // customer isn't shown (and dunned for) money already taken.
+      await applyCaptureToBalanceDue(prisma, {
+        bookingId: row.bookingId,
+        type: row.type,
+        amount: row.amount,
+        previousStatus: "PENDING",
       });
       // Mirror the capture back onto the source Infringement when this
       // is an INFRINGEMENT_RECOVERY payment so the staff Tolls tab and
@@ -189,6 +226,7 @@ export async function runCapturePendingPayments(
           stripePaymentIntentId: charge.id,
         },
       });
+      await emitAttempt("succeeded");
       continue;
     }
 
@@ -223,6 +261,7 @@ export async function runCapturePendingPayments(
         status: "SUCCESS",
         newData: { paymentId: row.id, stripePaymentIntentId: charge.id },
       });
+      await emitAttempt("requires_action");
       continue;
     }
 
@@ -256,6 +295,7 @@ export async function runCapturePendingPayments(
         const { enqueueCaptureRetry } = await import("./capture-retry");
         await enqueueCaptureRetry({ paymentId: row.id, attempt: 1, errorCode: charge.errorCode });
         result.failed += 1;
+        await emitAttempt("queued_retry", { errorCode: charge.errorCode ?? null });
         continue;
       } catch (err) {
         logger.warn({ err, paymentId: row.id }, "could not enqueue capture-retry; marking FAILED");
@@ -324,6 +364,7 @@ export async function runCapturePendingPayments(
         data: { paymentId: row.id, paymentType: row.type },
       });
     }
+    await emitAttempt("failed", { errorCode: charge.errorCode ?? null });
   }
 
   // Reference to maxAttempts kept for future retry logic (G8). Silence the
@@ -391,6 +432,25 @@ function appendNote(existing: string | null, add: string): string {
   const stamp = new Date().toISOString();
   const line = `[${stamp}] ${add}`;
   return existing ? `${existing}\n${line}` : line;
+}
+
+/** Marker text for the no-stored-PM skip line. Constant so we can find and
+ *  collapse prior occurrences rather than stacking a new one each tick. */
+export const NO_PM_SKIP_MARKER = "capture-pending: skipped — no stored PM";
+
+/**
+ * Like {@link appendNote}, but for the no-stored-PM skip line specifically.
+ * A PENDING charge with no usable PM keeps matching the scan query every
+ * tick, so a plain append would grow `notes` by one line every 5 minutes
+ * forever (the bug behind the runaway Charges blob). Instead we keep a
+ * single skip line and refresh its timestamp, leaving any non-skip lines
+ * (captured / requires_action / failed) untouched. Idempotent across runs.
+ */
+export function refreshSkipNote(existing: string | null): string {
+  const line = `[${new Date().toISOString()}] ${NO_PM_SKIP_MARKER}`;
+  if (!existing) return line;
+  const kept = existing.split("\n").filter((l) => !l.includes(NO_PM_SKIP_MARKER));
+  return kept.length ? `${kept.join("\n")}\n${line}` : line;
 }
 
 export function startCapturePendingPaymentsScheduler() {

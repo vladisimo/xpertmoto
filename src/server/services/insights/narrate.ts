@@ -14,8 +14,12 @@ import {
   SupportAIUnavailableError,
   type SupportAIMessage,
   type SupportAITool,
+  type SupportAIUsage,
 } from "./../support-ai";
 import { logger } from "@/lib/logger";
+import { trackAiGeneration } from "@/lib/analytics";
+import { USD_AUD_RATE } from "@/lib/constants";
+import { usageToAud } from "./../support-cost";
 import {
   INSIGHT_META,
   type InsightNarrative,
@@ -84,6 +88,7 @@ Rules:
 
 export async function narrateInsight(
   payload: InsightPayload,
+  opts: { depotId?: string | null } = {},
 ): Promise<InsightNarrative> {
   const cfg = getSupportConfig();
   try {
@@ -97,7 +102,7 @@ export async function narrateInsight(
       },
     ];
 
-    const narrative = await runToolCall(provider, messages);
+    const narrative = await runToolCall(provider, messages, payload.id, opts.depotId ?? null);
     if (narrative) return narrative;
   } catch (err) {
     logger.warn({ err, insightId: payload.id }, "insight narration failed");
@@ -108,7 +113,14 @@ export async function narrateInsight(
 async function runToolCall(
   provider: ReturnType<typeof getSupportAIProvider>,
   messages: SupportAIMessage[],
+  insightId: string,
+  depotId: string | null,
 ): Promise<InsightNarrative | null> {
+  const startedAt = performance.now();
+  let narrative: InsightNarrative | null = null;
+  let usage: SupportAIUsage | undefined;
+  // Consume the whole stream so the trailing usage chunk is captured even
+  // after the tool_use arrives — needed for the PostHog $ai_generation event.
   for await (const chunk of provider.streamChat({
     system: SYSTEM_PROMPT,
     messages,
@@ -117,16 +129,31 @@ async function runToolCall(
     if (chunk.kind === "tool_use" && chunk.toolCall.name === "emit_insight") {
       const parsed = narrativeSchema.safeParse(chunk.toolCall.input);
       if (parsed.success) {
-        return {
-          ...parsed.data,
-          confidence: Number(parsed.data.confidence.toFixed(2)),
-        };
+        narrative = { ...parsed.data, confidence: Number(parsed.data.confidence.toFixed(2)) };
+      } else {
+        logger.warn({ errors: parsed.error.flatten() }, "insight narrative schema failed");
       }
-      logger.warn({ errors: parsed.error.flatten() }, "insight narrative schema failed");
-      return null;
+    } else if (chunk.kind === "usage") {
+      usage = chunk.usage;
     }
   }
-  return null;
+
+  await trackAiGeneration({
+    distinctId: "system",
+    model: usage?.model ?? provider.model,
+    provider: provider.kind,
+    feature: "insights",
+    ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } : {}),
+    latencySeconds: (performance.now() - startedAt) / 1000,
+    ...(typeof usage?.upstreamCostUsd === "number"
+      ? { costUsd: usage.upstreamCostUsd }
+      : usage
+        ? { costUsd: usageToAud(usage) / USD_AUD_RATE }
+        : {}),
+    properties: { insightId, depotId, parsed: narrative != null },
+  });
+
+  return narrative;
 }
 
 function buildUserPrompt(payload: InsightPayload): string {

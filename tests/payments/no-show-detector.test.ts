@@ -75,6 +75,7 @@ describe("no-show-detector", () => {
         vehicleId: "veh_1",
         pickupDateTime: pickup,
         bondAmount: "200.00",
+        pickupDepot: { slug: "gold-coast" },
         bondLedger: {
           id: "bond_1",
           status: "HELD",
@@ -124,6 +125,7 @@ describe("no-show-detector", () => {
         vehicleId: null,
         pickupDateTime: new Date(Date.now() - 4 * 3600 * 1000),
         bondAmount: "0",
+        pickupDepot: { slug: "gold-coast" },
         bondLedger: null,
       },
     ]);
