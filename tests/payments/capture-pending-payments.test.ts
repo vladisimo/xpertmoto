@@ -19,12 +19,17 @@ const auditCreate = vi.fn().mockResolvedValue({});
 const userFindMany = vi.fn().mockResolvedValue([{ id: "mgr_1" }]);
 const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], notificationIds: [] });
 const chargeOffSessionForUser = vi.fn();
+// The success branch calls applyCaptureToBalanceDue, which reads/writes the
+// booking to net the now-collected charge off Booking.balanceDue.
+const bookingFindUnique = vi.fn().mockResolvedValue({ balanceDue: 150 });
+const bookingUpdate = vi.fn().mockResolvedValue({});
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     payment: { findMany, update },
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
+    booking: { findUnique: bookingFindUnique, update: bookingUpdate },
   },
 }));
 
@@ -36,6 +41,7 @@ vi.mock("@/server/services/notification-sender", () => ({ sendNotification }));
 vi.mock("@/server/jobs/queue", () => ({
   getQueue: vi.fn().mockReturnValue(null),
   registerWorker: vi.fn().mockReturnValue(null),
+  monitorCron: vi.fn(),
 }));
 
 const baseRow = {
@@ -57,6 +63,9 @@ beforeEach(() => {
   userFindMany.mockResolvedValue([{ id: "mgr_1" }]);
   sendNotification.mockClear();
   chargeOffSessionForUser.mockReset();
+  bookingFindUnique.mockClear();
+  bookingFindUnique.mockResolvedValue({ balanceDue: 150 });
+  bookingUpdate.mockClear();
 });
 
 describe("capture-pending-payments", () => {

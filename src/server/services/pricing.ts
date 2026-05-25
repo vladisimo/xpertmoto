@@ -11,6 +11,7 @@ import type {
 } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
+import * as Sentry from "@sentry/nextjs";
 import { GST_RATE } from "@/lib/constants";
 import { lookupOrComputeMultiplier } from "./yield-pricing";
 import {
@@ -641,7 +642,36 @@ function buildPayOnlineBreakdown(args: {
   }
 }
 
+/**
+ * The pricing cascade (CLAUDE.md rule #2): base rate → duration discount →
+ * seasonal multiplier → yield → discount code. Wrapped in a Sentry span so
+ * the cascade's DB round-trips and arithmetic show up as a node under the
+ * request transaction — turning "checkout feels slow" into a flame graph.
+ */
 export async function quote(prisma: PrismaClient, input: PricingInput): Promise<PricingQuote> {
+  return Sentry.startSpan(
+    {
+      name: "pricing.quote",
+      op: "pricing.cascade",
+      attributes: {
+        categoryId: input.categoryId,
+        depotId: input.pickupDepotId ?? undefined,
+        vehicleAllocated: Boolean(input.vehicleId),
+      },
+    },
+    async (span) => {
+      const result = await quoteImpl(prisma, input);
+      span.setAttributes({
+        pricingMethod: result.pricingMethod,
+        durationDays: result.durationDays,
+        totalAmount: result.totalAmount,
+      });
+      return result;
+    },
+  );
+}
+
+async function quoteImpl(prisma: PrismaClient, input: PricingInput): Promise<PricingQuote> {
   const category = await prisma.vehicleCategory.findUniqueOrThrow({
     where: { id: input.categoryId },
   });
@@ -1132,6 +1162,20 @@ export async function quoteExtension(
   prisma: PrismaClient,
   input: ExtensionQuoteInput,
 ): Promise<ExtensionQuote> {
+  return Sentry.startSpan(
+    { name: "pricing.quoteExtension", op: "pricing.cascade", attributes: { categoryId: input.categoryId } },
+    async (span) => {
+      const result = await quoteExtensionImpl(prisma, input);
+      span.setAttributes({ extensionDays: result.extensionDays, totalAmount: result.totalAmount });
+      return result;
+    },
+  );
+}
+
+async function quoteExtensionImpl(
+  prisma: PrismaClient,
+  input: ExtensionQuoteInput,
+): Promise<ExtensionQuote> {
   if (input.newReturnDateTime.getTime() <= input.oldReturnDateTime.getTime()) {
     throw new TRPCError({
       code: "BAD_REQUEST",
@@ -1278,6 +1322,20 @@ export type SwapDeltaQuote = {
  * field is a convenience for UI rendering.
  */
 export async function quoteSwapDelta(
+  prisma: PrismaClient,
+  input: SwapDeltaInput,
+): Promise<SwapDeltaQuote> {
+  return Sentry.startSpan(
+    { name: "pricing.quoteSwapDelta", op: "pricing.cascade" },
+    async (span) => {
+      const result = await quoteSwapDeltaImpl(prisma, input);
+      span.setAttributes({ deltaAmount: result.deltaAmount });
+      return result;
+    },
+  );
+}
+
+async function quoteSwapDeltaImpl(
   prisma: PrismaClient,
   input: SwapDeltaInput,
 ): Promise<SwapDeltaQuote> {

@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import * as Sentry from "@sentry/nextjs";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
@@ -67,6 +68,27 @@ export type CapturePendingResult = {
 };
 
 export async function runCapturePendingPayments(
+  opts: { graceSeconds?: number; batch?: number; maxAttempts?: number } = {},
+): Promise<CapturePendingResult> {
+  // forceTransaction so this job-driven money path becomes its own root trace
+  // (jobs have no incoming HTTP transaction to nest under). The per-row
+  // `stripe.charge_offsession` child spans then surface beneath it.
+  return Sentry.startSpan(
+    { name: "payment.capture_pending", op: "queue.task", forceTransaction: true },
+    async (span) => {
+      const result = await runCapturePendingPaymentsImpl(opts);
+      span.setAttributes({
+        scanned: result.scanned,
+        succeeded: result.succeeded,
+        failed: result.failed,
+        requiresAction: result.requiresAction,
+      });
+      return result;
+    },
+  );
+}
+
+async function runCapturePendingPaymentsImpl(
   opts: { graceSeconds?: number; batch?: number; maxAttempts?: number } = {},
 ): Promise<CapturePendingResult> {
   const graceSeconds = opts.graceSeconds ?? DEFAULT_GRACE_SECONDS;
