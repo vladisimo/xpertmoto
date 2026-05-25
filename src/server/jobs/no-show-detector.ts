@@ -209,6 +209,26 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
       }
       marked += 1;
 
+      // Credit the rental invoice down to $0 — the supply was never
+      // provided. The no-show fee / bond forfeiture is a separate punitive
+      // charge with its own document, NOT retained rental consideration, so
+      // `retained: 0`. Best-effort + idempotent (one CANCELLATION credit per
+      // invoice); the weekly sweep is the backstop.
+      try {
+        const { tryIssueCancellationAdjustment } = await import(
+          "@/server/services/invoice-lifecycle"
+        );
+        await tryIssueCancellationAdjustment({
+          bookingId: b.id,
+          retained: 0,
+          refundAmount: 0,
+          detail: `No-show — pickup ${b.pickupDateTime.toISOString()}`,
+          description: "Cancellation credit — booking marked as no-show (rental not provided)",
+        });
+      } catch {
+        // tryIssueCancellationAdjustment already swallows + logs.
+      }
+
       // Reflect any forfeited/retained money in the rewards counters
       // promptly. Best-effort — the nightly recompute is the backstop.
       if (b.customerId) {
