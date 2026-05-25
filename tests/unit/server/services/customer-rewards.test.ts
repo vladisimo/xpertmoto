@@ -75,6 +75,35 @@ describe("computeNetCollected", () => {
     expect(computeNetCollected(rows, POINTS_ELIGIBLE_TYPES).toNumber()).toBe(500);
   });
 
+  it("does not let a PARTIAL refund of a non-points charge reduce points (linked)", () => {
+    // Regression: a damage-fee partial refund (parentPaymentId → the damage
+    // charge) must not erode points, but must still net against lifetime spend.
+    const rows = [
+      { id: "p1", type: "BOOKING_PAYMENT", status: "SUCCEEDED", amount: d(500), parentPaymentId: null },
+      { id: "p2", type: "DAMAGE_CHARGE", status: "PARTIALLY_REFUNDED", amount: d(100), parentPaymentId: null },
+      { id: "r1", type: "REFUND", status: "SUCCEEDED", amount: d(40), parentPaymentId: "p2" },
+    ] as never;
+    expect(computeNetCollected(rows, POINTS_ELIGIBLE_TYPES).toNumber()).toBe(500); // hire only, refund invisible
+    expect(computeNetCollected(rows).toNumber()).toBe(560); // 500 + (100 − 40)
+  });
+
+  it("nets a linked partial refund of a points charge against both totals", () => {
+    const rows = [
+      { id: "p1", type: "BOOKING_PAYMENT", status: "PARTIALLY_REFUNDED", amount: d(200), parentPaymentId: null },
+      { id: "r1", type: "REFUND", status: "SUCCEEDED", amount: d(50), parentPaymentId: "p1" },
+    ] as never;
+    expect(computeNetCollected(rows, POINTS_ELIGIBLE_TYPES).toNumber()).toBe(150);
+    expect(computeNetCollected(rows).toNumber()).toBe(150);
+  });
+
+  it("nets a linked full refund to zero without double-subtracting", () => {
+    const rows = [
+      { id: "p1", type: "MANUAL_CHARGE", status: "REFUNDED", amount: d(50), parentPaymentId: null },
+      { id: "r1", type: "REFUND", status: "SUCCEEDED", amount: d(50), parentPaymentId: "p1" },
+    ] as never;
+    expect(computeNetCollected(rows).toNumber()).toBe(0);
+  });
+
   it("clamps over-refund to zero", () => {
     expect(
       computeNetCollected([

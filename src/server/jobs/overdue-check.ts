@@ -7,7 +7,7 @@ import { BOOKING_RULES } from "@/lib/constants";
 import { getBranding } from "@/lib/branding";
 import { sendNotification } from "@/server/services/notification-sender";
 import OverdueNotice from "../../../emails/overdue-notice";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 import { logger } from "@/lib/logger";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
@@ -321,6 +321,9 @@ async function notifyManagers(b: CandidateBooking, title: string, body: string):
 
 export function startOverdueCheckScheduler() {
   registerWorker(QUEUE, async () => runOverdueCheck());
+  // Monitor approximates the 15-min interval as a crontab so Sentry can flag
+  // a stalled worker (a missed overdue sweep delays OVERDUE transitions).
+  monitorCron(QUEUE, "*/15 * * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   q.add(

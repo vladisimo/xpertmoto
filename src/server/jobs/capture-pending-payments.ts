@@ -9,7 +9,7 @@ import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { getBranding } from "@/lib/branding";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 /**
  * G5 — capture-pending-payments
@@ -455,6 +455,7 @@ export function refreshSkipNote(existing: string | null): string {
 
 export function startCapturePendingPaymentsScheduler() {
   registerWorker(QUEUE, async () => runCapturePendingPayments());
+  monitorCron(QUEUE, "*/5 * * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   // Every 5 minutes during business hours is the plan's cadence. Cron

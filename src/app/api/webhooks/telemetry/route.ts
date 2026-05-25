@@ -103,6 +103,8 @@ async function handlePost(req: Request) {
       await trackServer({
         event: SERVER_EVENTS.vehicleBatteryLow,
         distinctId: vehicle.id,
+        // Vehicle id is not a person — don't mint a person profile per bike.
+        processPerson: false,
         properties: { batteryPct: p.batteryPct, deviceId: p.deviceId },
         ...(vehicle.depot?.slug ? { groups: { depot: vehicle.depot.slug } } : {}),
       });

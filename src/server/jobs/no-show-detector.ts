@@ -8,7 +8,7 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { recomputeCustomerRewards } from "@/server/services/customer-rewards";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 /**
  * G22 — no-show detector.
@@ -143,6 +143,13 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
               notes: `No-show fee (pickup ${b.pickupDateTime.toISOString()})`,
             },
           });
+          // Owed until the capture-pending job collects it. Add to balanceDue
+          // so applyCaptureToBalanceDue nets it out on capture, keeping the
+          // raise→add / collect→remove invariant (see balance-due.ts).
+          await tx.booking.update({
+            where: { id: b.id },
+            data: { balanceDue: { increment: feeAud } },
+          });
         }
 
         if (b.vehicleId) {
@@ -228,6 +235,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
 
 export function startNoShowDetectorScheduler() {
   registerWorker(QUEUE, async () => runNoShowDetector());
+  monitorCron(QUEUE, "0 * * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   // Every hour. Cheap scan, low-cardinality candidates.

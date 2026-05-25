@@ -26,6 +26,18 @@ export type AnalyticsEvent = {
    * forks two groups. We standardise on the depot slug everywhere.
    */
   groups?: Record<string, string>;
+  /**
+   * Set `false` for events keyed on a non-person `distinctId` (anonymous
+   * visitor cookie, vehicle id, the `"system"` sentinel). It emits the
+   * reserved `$process_person_profile: false` so PostHog ingests the event
+   * WITHOUT minting/updating a billable person profile. Unlike the browser
+   * SDK's `person_profiles: 'identified_only'`, server events POSTed to the
+   * raw capture API never inherit that setting — every server event with a
+   * `distinctId` creates a person profile unless this flag is sent. Defaults
+   * to person processing (true) so authenticated `User.id` events still
+   * build profiles.
+   */
+  processPerson?: boolean;
 };
 
 export type PostHogPublicConfig = {
@@ -72,6 +84,10 @@ function withReservedKeys(event: AnalyticsEvent): Record<string, unknown> {
   if (event.set) properties.$set = event.set;
   if (event.setOnce) properties.$set_once = event.setOnce;
   if (event.groups) properties.$groups = event.groups;
+  // Suppress person-profile creation for non-person distinct_ids. PostHog
+  // only honours this on the event itself — there is no project-side
+  // equivalent of the browser SDK's `identified_only`.
+  if (event.processPerson === false) properties.$process_person_profile = false;
   return properties;
 }
 
@@ -195,10 +211,13 @@ export async function trackAiGeneration(input: {
   groups?: Record<string, string>;
   /** Whether the call errored — surfaced as PostHog's `$ai_is_error`. */
   isError?: boolean;
+  /** Set false when `distinctId` is non-person (e.g. the "system" sentinel). */
+  processPerson?: boolean;
 }): Promise<void> {
   await trackServer({
     event: "$ai_generation",
     distinctId: input.distinctId,
+    ...(input.processPerson === false ? { processPerson: false } : {}),
     properties: {
       $ai_model: input.model,
       $ai_provider: input.provider,

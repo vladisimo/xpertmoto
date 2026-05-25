@@ -8,6 +8,7 @@ import {
   Eye,
   FileText,
   Gauge,
+  HelpCircle,
   Home,
   LayoutDashboard,
   LifeBuoy,
@@ -94,6 +95,7 @@ export const BACK_OFFICE_NAV: readonly BackOfficeNavItem[] = [
     ],
   },
   { href: "/staff/ai-insights",    label: "AI Insights",    icon: Sparkles,        section: "staff", allowedRoles: MANAGER_PLUS },
+  { href: "/staff/help",           label: "Help",           icon: HelpCircle,      section: "staff", allowedRoles: STAFF_PLUS },
 
   {
     href: "/admin/dashboard", label: "Dashboard", icon: Gauge, section: "admin", allowedRoles: ADMIN_PLUS,
@@ -158,6 +160,7 @@ export const BACK_OFFICE_NAV: readonly BackOfficeNavItem[] = [
     ],
   },
   { href: "/admin/settings",     label: "System Settings", icon: Settings,    section: "admin", allowedRoles: SUPER_ADMIN_ONLY },
+  { href: "/admin/help",         label: "Help",            icon: HelpCircle,  section: "admin", allowedRoles: ADMIN_PLUS },
 ];
 
 export type CustomerNavItem = {

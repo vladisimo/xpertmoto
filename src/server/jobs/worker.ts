@@ -18,6 +18,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "@/lib/redis";
+import { scrubSentryEvent } from "@/lib/observability/sentry-scrub";
 import { logger } from "@/lib/logger";
 import { shutdownQueues } from "./queue";
 
@@ -75,6 +76,7 @@ if (process.env.SENTRY_DSN) {
     tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
     enabled: process.env.NODE_ENV !== "test",
     serverName: "xpertmoto-worker",
+    beforeSend: scrubSentryEvent,
   });
 }
 

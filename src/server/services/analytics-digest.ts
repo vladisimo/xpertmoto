@@ -220,6 +220,8 @@ export async function runWeeklyDigest(): Promise<{ recipients: number; sent: num
   await trackServer({
     event: SERVER_EVENTS.analyticsWeeklyDigest,
     distinctId: "system",
+    // Org-wide rollup keyed on the "system" sentinel — not a person.
+    processPerson: false,
     properties: {
       periodStart: digest.periodStart.toISOString(),
       periodEnd: digest.periodEnd.toISOString(),

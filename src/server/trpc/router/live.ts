@@ -131,8 +131,11 @@ type FanOutEvent = {
 /**
  * Fan the already-PII-scrubbed client visitor events out to PostHog as one
  * batched `/batch/` request. Anonymous: `distinct_id` is the visitor cookie
- * id, so with `person_profiles:'identified_only'` these never create
- * billable person profiles. Best-effort — gated on PostHog being enabled,
+ * id, so each event is sent with `processPerson: false`
+ * (`$process_person_profile: false`) to stop PostHog minting a billable
+ * person profile per visitor cookie — the browser SDK's
+ * `person_profiles:'identified_only'` does NOT apply to raw server capture.
+ * Best-effort — gated on PostHog being enabled,
  * fully wrapped so a failure never surfaces to the `events` mutation, and
  * fired with `void` (no await) so it can't delay the mutation response.
  */
@@ -149,6 +152,9 @@ export async function fanOutVisitorEvents(
     const mapped: AnalyticsEvent[] = events.map((e) => ({
       event: VISITOR_EVENT_NAMES[e.kind],
       distinctId: vid,
+      // Anonymous visitor cookie — never a person. Suppress profile creation
+      // so the fan-out can't mint one billable person per visitor cookie.
+      processPerson: false,
       properties: {
         path: e.path,
         ...(e.target != null ? { target: e.target } : {}),

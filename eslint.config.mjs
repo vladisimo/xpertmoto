@@ -8,6 +8,7 @@ export default [
     ignores: [
       "node_modules/**",
       ".next/**",
+      ".next-e2e/**",
       "coverage/**",
       "playwright-report/**",
       "test-results/**",
@@ -42,12 +43,18 @@ export default [
       ],
       "@typescript-eslint/no-explicit-any": "error",
       "react-hooks/exhaustive-deps": "warn",
-      // React Compiler rules (react-hooks v7 preview) are too noisy against
-      // an existing codebase; demote to warn so they surface without blocking.
+      // React Compiler rules (react-hooks v7 preview). Three of these fire
+      // only on known false-positives / intentional patterns in this codebase
+      // and are turned off:
+      //   - immutability: trips on `window.location.href = ...` navigation
+      //   - set-state-in-effect: prop->state sync effects we keep on purpose
+      //   - incompatible-library: react-hook-form's `form.watch()`, unfixable
+      // The rest stay at "warn" so genuinely new issues still surface.
       // Revisit when the React Compiler stabilises.
-      "react-hooks/immutability": "warn",
+      "react-hooks/immutability": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/incompatible-library": "off",
       "react-hooks/purity": "warn",
-      "react-hooks/set-state-in-effect": "warn",
       "react-hooks/set-state-in-render": "warn",
       "react-hooks/refs": "warn",
       "react-hooks/static-components": "warn",
@@ -70,6 +77,9 @@ export default [
     files: [
       "scripts/**/*.{ts,tsx,js,mjs,cjs}",
       "prisma/seed*.ts",
+      // e2e global setup/teardown run one-shot before Playwright and print
+      // progress directly to the terminal, same as the scripts above.
+      "tests/e2e/global-*.ts",
     ],
     rules: {
       "no-console": "off",

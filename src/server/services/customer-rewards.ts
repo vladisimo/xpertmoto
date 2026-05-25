@@ -88,17 +88,31 @@ export const CURRENT_BOOKING_STATUSES: BookingStatus[] = [
   "RETURNED",
 ];
 
-type PaymentRow = { type: PaymentType; status: string; amount: Prisma.Decimal };
+type PaymentRow = {
+  id: string;
+  type: PaymentType;
+  status: string;
+  amount: Prisma.Decimal;
+  parentPaymentId: string | null;
+};
 
 /**
  * Net money collected for a set of payment rows, restricted to `types`
  * (default: all revenue inflows → lifetime spend; pass POINTS_ELIGIBLE_TYPES
- * for points). See module doc for the formula. Partial refunds
- * (PARTIALLY_REFUNDED charge + a REFUND row) net correctly; full refunds
- * (REFUNDED charge + a REFUND row) net to zero without double-subtracting.
- * Refund rows can't be attributed to a payment type, so the full-refund
- * offset is computed over ALL inflow types — a refunded penalty doesn't
- * erroneously reduce the points-eligible total. Clamped at zero.
+ * for points). See module doc for the formula.
+ *
+ * Refund handling is attribution-based: a REFUND row carries no PaymentType,
+ * so we link it to the charge it reverses via `parentPaymentId` (set by the
+ * refund flows) and attribute it to that charge's type/status. A partial
+ * refund only reduces a pass it actually belongs to — so a partial refund of
+ * a non-points charge no longer erodes the points-eligible total. A full
+ * refund nets to zero (the REFUNDED charge is already excluded from the
+ * positive total, and its linked refund is not subtracted again).
+ *
+ * Legacy REFUND rows with no `parentPaymentId` fall back to the prior global
+ * approximation (subtract the unlinked pool, offset by unlinked full refunds
+ * across all inflow) — unchanged behavior for pre-migration data. Clamped at
+ * zero.
  */
 export function computeNetCollected(
   payments: PaymentRow[],
@@ -106,27 +120,60 @@ export function computeNetCollected(
 ): Prisma.Decimal {
   const allInflow = new Set<PaymentType>(REVENUE_INFLOW_TYPES);
   const selected = new Set<PaymentType>(types);
+
+  // Index charges so a REFUND row can be resolved to its source charge's
+  // type + status. Only non-REFUND rows are charges.
+  const chargeById = new Map<string, { type: PaymentType; status: string }>();
+  for (const p of payments) {
+    if (p.type !== "REFUND") chargeById.set(p.id, { type: p.type, status: p.status });
+  }
+
   let succeeded = new Prisma.Decimal(0);
   let partiallyRefunded = new Prisma.Decimal(0);
-  let refundedAllInflow = new Prisma.Decimal(0);
-  let refundRows = new Prisma.Decimal(0);
+  // Partial refunds precisely attributed to a selected charge.
+  let linkedRefundsSelected = new Prisma.Decimal(0);
+  // Legacy refunds with no resolvable source link.
+  let unlinkedRefundRows = new Prisma.Decimal(0);
+  // Source charges whose refund we attributed precisely — excluded from the
+  // legacy full-refund offset so a linked full refund isn't double-counted.
+  const linkedSourceIds = new Set<string>();
 
   for (const p of payments) {
     if (p.type === "REFUND") {
-      if (p.status === "SUCCEEDED") refundRows = refundRows.add(p.amount);
+      if (p.status !== "SUCCEEDED") continue;
+      const src = p.parentPaymentId ? chargeById.get(p.parentPaymentId) : undefined;
+      if (src) {
+        linkedSourceIds.add(p.parentPaymentId!);
+        // Subtract only partial refunds of selected charges. A fully-refunded
+        // source is already excluded from the positive total, so subtracting
+        // its refund too would double-count.
+        if (src.status === "PARTIALLY_REFUNDED" && selected.has(src.type)) {
+          linkedRefundsSelected = linkedRefundsSelected.add(p.amount);
+        }
+        continue;
+      }
+      unlinkedRefundRows = unlinkedRefundRows.add(p.amount);
       continue;
     }
     if (!allInflow.has(p.type)) continue;
-    // Full-refund flips of ANY inflow type net out their REFUND row.
-    if (p.status === "REFUNDED") refundedAllInflow = refundedAllInflow.add(p.amount);
     if (!selected.has(p.type)) continue;
     if (p.status === "SUCCEEDED") succeeded = succeeded.add(p.amount);
     else if (p.status === "PARTIALLY_REFUNDED") partiallyRefunded = partiallyRefunded.add(p.amount);
   }
 
-  // Refunds not explained by a full-refund flip (i.e. partial refunds).
-  const netRefunds = Prisma.Decimal.max(refundRows.sub(refundedAllInflow), 0);
-  const net = succeeded.add(partiallyRefunded).sub(netRefunds);
+  // Legacy offset: full-refund flips of any inflow type cancel their unlinked
+  // REFUND row (prior global behavior), excluding charges we already
+  // attributed precisely above.
+  let refundedUnlinkedInflow = new Prisma.Decimal(0);
+  for (const p of payments) {
+    if (p.type === "REFUND" || !allInflow.has(p.type)) continue;
+    if (p.status === "REFUNDED" && !linkedSourceIds.has(p.id)) {
+      refundedUnlinkedInflow = refundedUnlinkedInflow.add(p.amount);
+    }
+  }
+  const legacyNetRefunds = Prisma.Decimal.max(unlinkedRefundRows.sub(refundedUnlinkedInflow), 0);
+
+  const net = succeeded.add(partiallyRefunded).sub(linkedRefundsSelected).sub(legacyNetRefunds);
   return Prisma.Decimal.max(net, 0);
 }
 
@@ -163,7 +210,7 @@ export async function computeCustomerRewards(db: Db, userId: string): Promise<Re
   const payments = spendBookingIds.length
     ? await db.payment.findMany({
         where: { bookingId: { in: spendBookingIds } },
-        select: { type: true, status: true, amount: true },
+        select: { id: true, type: true, status: true, amount: true, parentPaymentId: true },
       })
     : [];
   // Lifetime spend = all money drawn down (incl. penalties). Points only

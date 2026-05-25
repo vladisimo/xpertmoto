@@ -94,7 +94,7 @@ export function HeroCarousel({
               priority={i === 0}
               loading={i === 0 ? undefined : "eager"}
               sizes="100vw"
-              className="object-contain"
+              className="object-cover"
             />
           </div>
         ))

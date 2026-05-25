@@ -72,6 +72,22 @@ describe("trackServer", () => {
     expect(props).toEqual({ a: 1 });
     expect("$set" in props).toBe(false);
     expect("$groups" in props).toBe(false);
+    // Person processing is the default — no suppression flag emitted.
+    expect("$process_person_profile" in props).toBe(false);
+  });
+
+  it("emits $process_person_profile:false for non-person distinct ids", async () => {
+    const { trackServer } = await import("@/lib/analytics");
+    await trackServer({ event: "visitor.click", distinctId: "v_abc", processPerson: false });
+    const props = lastBody(fetchMock).properties as Record<string, unknown>;
+    expect(props.$process_person_profile).toBe(false);
+  });
+
+  it("does not emit the suppression flag when processPerson is true", async () => {
+    const { trackServer } = await import("@/lib/analytics");
+    await trackServer({ event: "e", distinctId: "user_1", processPerson: true });
+    const props = lastBody(fetchMock).properties as Record<string, unknown>;
+    expect("$process_person_profile" in props).toBe(false);
   });
 
   it("no-ops when the server key is not configured", async () => {

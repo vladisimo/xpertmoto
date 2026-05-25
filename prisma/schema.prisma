@@ -1714,6 +1714,11 @@ model Payment {
   stripePaymentIntentId String?
   stripeChargeId        String?
   status                PaymentStatus @default(PENDING)
+  // For a REFUND row: the charge it refunds. Lets the rewards aggregator
+  // attribute an (otherwise type-less) refund back to its source charge's
+  // PaymentType, so a partial refund of a non-points charge can't wrongly
+  // reduce loyalty points. Null on charges and on legacy/unlinked refunds.
+  parentPaymentId       String?
   // Stripe-hosted receipt URL (returned by the charge object). Kept
   // for audit; not the customer-facing branded receipt.
   receiptUrl            String?
@@ -1736,6 +1741,8 @@ model Payment {
   events         PaymentEvent[]
   swap           BookingSwap?
   adjustmentNote AdjustmentNote?
+  parentPayment  Payment?        @relation("PaymentRefunds", fields: [parentPaymentId], references: [id], onDelete: SetNull)
+  refunds        Payment[]       @relation("PaymentRefunds")
 
   @@index([bookingId])
   @@index([customerId])
@@ -1745,6 +1752,7 @@ model Payment {
   @@index([status, createdAt])
   @@index([type, createdAt])
   @@index([type, status, createdAt])
+  @@index([parentPaymentId])
   @@index([deletedAt])
 }
 

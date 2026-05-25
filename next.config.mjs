@@ -86,6 +86,10 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  // Lets the e2e dev server (NEXT_DIST_DIR=.next-e2e) run from its own build
+  // dir, coexisting with a normal `next dev` on the dev DB (Next refuses two
+  // dev servers sharing one build dir).
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
   poweredByHeader: false,
   devIndicators: false,

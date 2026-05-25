@@ -140,6 +140,7 @@ async function runToolCall(
 
   await trackAiGeneration({
     distinctId: "system",
+    processPerson: false,
     model: usage?.model ?? provider.model,
     provider: provider.kind,
     feature: "insights",

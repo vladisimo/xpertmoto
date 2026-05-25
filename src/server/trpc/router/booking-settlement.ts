@@ -607,6 +607,9 @@ export const bookingSettlementRouter = createTRPCRouter({
             reference: `REF-${Date.now()}`,
             customerId: source.customerId,
             bookingId: source.bookingId,
+            // Link the refund to the charge it reverses so the rewards
+            // aggregator can attribute it to the source PaymentType.
+            parentPaymentId: source.id,
             type: "REFUND",
             method: "STRIPE",
             amount: refundAmount,

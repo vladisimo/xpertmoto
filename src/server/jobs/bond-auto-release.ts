@@ -8,7 +8,7 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import BondReleased from "../../../emails/bond-released";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 const QUEUE = "bond-auto-release" as const;
 
@@ -102,6 +102,7 @@ export async function runBondAutoRelease(): Promise<number> {
 
 export function startBondAutoReleaseScheduler() {
   registerWorker(QUEUE, async () => runBondAutoRelease());
+  monitorCron(QUEUE, "0 2 * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   q.add(

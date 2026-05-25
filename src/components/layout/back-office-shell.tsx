@@ -11,6 +11,7 @@ import {
   Menu,
   ChevronDown,
   User,
+  Search,
 } from "lucide-react";
 import {
   BACK_OFFICE_NAV,
@@ -44,6 +45,7 @@ import {
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { useBranding } from "@/components/shared/branding-provider";
+import { GlobalSearch } from "@/components/layout/global-search";
 
 type BackOfficeUser = {
   name?: string | null;
@@ -213,7 +215,7 @@ function SidebarNav({
   const currentTab = searchParams.get("tab");
 
   return (
-    <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-3 lg:py-4 lg:space-y-6">
+    <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-2 lg:py-3 lg:space-y-3">
       {SECTIONS_ORDER.map((section) => {
         const items = BACK_OFFICE_NAV.filter(
           (i) => i.section === section && canAccess(i, role),
@@ -223,14 +225,14 @@ function SidebarNav({
         return (
           <div key={section}>
             {!collapsed && (
-              <h3 className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-widest text-slate-400 lg:mb-2">
+              <h3 className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-widest text-slate-400">
                 {SECTION_META[section].label}
               </h3>
             )}
             {collapsed && (
               <Separator className="mb-3 mx-auto w-6 bg-slate-700" />
             )}
-            <ul className="space-y-0.5 lg:space-y-1">
+            <ul className="space-y-0.5">
               {items.map((item) => {
                 const active =
                   pathname === item.href ||
@@ -247,7 +249,7 @@ function SidebarNav({
                   <Link
                     href={item.href}
                     className={cn(
-                      "group flex items-center gap-3 rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-150 lg:py-2.5",
+                      "group flex items-center gap-3 rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-150 lg:py-1.5",
                       active
                         ? "bg-white/10 text-white shadow-sm"
                         : "text-slate-300 hover:bg-white/5 hover:text-white",
@@ -316,12 +318,14 @@ function SidebarContent({
   collapsed,
   onToggle,
   onSignOut,
+  onOpenSearch,
   accent,
 }: {
   user: BackOfficeUser;
   collapsed: boolean;
   onToggle: () => void;
   onSignOut: () => void;
+  onOpenSearch: () => void;
   accent: ShellAccent;
 }) {
   const initials = getInitials(user.name, user.email);
@@ -362,20 +366,40 @@ function SidebarContent({
             />
           </Link>
         )}
-        <button
-          onClick={onToggle}
-          className={cn(
-            "hidden lg:flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white transition-colors",
-            collapsed && "mx-auto mt-2",
-          )}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {collapsed ? (
-            <ChevronRight className="h-4 w-4" />
-          ) : (
-            <ChevronLeft className="h-4 w-4" />
-          )}
-        </button>
+      </div>
+
+      {/* Global search trigger — opens the ⌘K command palette */}
+      <div className={cn("px-3 pt-3", collapsed && "px-2")}>
+        {collapsed ? (
+          <Tooltip delayDuration={0}>
+            <TooltipTrigger asChild>
+              <button
+                onClick={onOpenSearch}
+                className="mx-auto flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
+                aria-label="Search (⌘K)"
+              >
+                <Search className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent
+              side="right"
+              className="bg-slate-800 text-white border-slate-700"
+            >
+              Search — ⌘K
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <button
+            onClick={onOpenSearch}
+            className="flex w-full items-center gap-2 rounded-lg border border-secondary bg-white/5 px-3 py-2 text-left text-sm text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
+          >
+            <Search className="h-4 w-4 shrink-0" />
+            <span className="flex-1">Search…</span>
+            <kbd className="rounded border border-white/15 bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
+              ⌘K
+            </kbd>
+          </button>
+        )}
       </div>
 
       {/* Nav */}
@@ -465,6 +489,32 @@ function SidebarContent({
           </DropdownMenu>
         )}
       </div>
+
+      {/* Collapse toggle — desktop only, anchored at the very bottom */}
+      <div
+        className={cn(
+          "hidden border-t border-white/5 p-2 lg:block",
+          collapsed ? "px-2" : "px-3",
+        )}
+      >
+        <button
+          onClick={onToggle}
+          className={cn(
+            "flex h-8 items-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white transition-colors",
+            collapsed ? "w-full justify-center" : "w-full justify-end px-2 gap-1.5",
+          )}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {!collapsed && (
+            <span className="text-xs font-medium">Collapse</span>
+          )}
+          {collapsed ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronLeft className="h-4 w-4" />
+          )}
+        </button>
+      </div>
     </div>
   );
 }
@@ -484,7 +534,20 @@ export function BackOfficeShell({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const pathname = usePathname();
+
+  // ⌘K / Ctrl+K opens the global search palette from anywhere in the shell.
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((o) => !o);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
   // Close the mobile drawer on route change so tapping a nav item
   // doesn't leave the sheet open over the destination page. Done via
   // the setState-during-render pattern from the React docs ("You Might
@@ -531,6 +594,7 @@ export function BackOfficeShell({
             collapsed={collapsed}
             onToggle={() => setCollapsed((c) => !c)}
             onSignOut={handleSignOut}
+            onOpenSearch={() => setSearchOpen(true)}
             accent={accent}
           />
         </aside>
@@ -544,6 +608,10 @@ export function BackOfficeShell({
               collapsed={false}
               onToggle={() => setMobileOpen(false)}
               onSignOut={handleSignOut}
+              onOpenSearch={() => {
+                setMobileOpen(false);
+                setSearchOpen(true);
+              }}
               accent={accent}
             />
           </SheetContent>
@@ -567,6 +635,15 @@ export function BackOfficeShell({
             </Button>
             <span className="text-lg font-semibold tracking-tight">{pageTitle}</span>
             <div className="flex-1" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 shrink-0 text-white hover:bg-white/10 hover:text-white"
+              onClick={() => setSearchOpen(true)}
+            >
+              <Search className="h-5 w-5" />
+              <span className="sr-only">Search</span>
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-2 rounded-lg p-1.5 hover:bg-white/10 transition-colors">
@@ -633,6 +710,12 @@ export function BackOfficeShell({
             {children}
           </main>
         </div>
+
+        <GlobalSearch
+          open={searchOpen}
+          onOpenChange={setSearchOpen}
+          accent={accent}
+        />
       </div>
     </TooltipProvider>
   );

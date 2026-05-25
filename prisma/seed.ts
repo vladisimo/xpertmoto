@@ -2,6 +2,7 @@ import { PrismaClient, Prisma, UserRole, VehicleStatus, BookingStatus, AddonType
 import bcrypt from "bcryptjs";
 import { paragraphs, renderEmailShell, summaryTable } from "../src/lib/email-shell";
 import { buildOnboardingVersion } from "../src/lib/onboarding-status";
+import { encryptSecret } from "../src/lib/crypto";
 
 const prisma = new PrismaClient();
 
@@ -246,6 +247,11 @@ async function main() {
     },
   });
 
+  // Back-office users whose forced-2FA gate the e2e suite must clear. Populated
+  // below; TOTP is seeded only when E2E_TOTP_SECRET is set (the e2e profile),
+  // leaving the normal demo seed's security posture untouched.
+  const backOfficeUserIds: string[] = [admin.id];
+
   for (const [i, d] of depots.entries()) {
     const mgr = await prisma.user.create({
       data: {
@@ -279,6 +285,28 @@ async function main() {
     await prisma.staffProfile.create({
       data: { userId: staff.id, employeeId: `STF-${String(i + 1).padStart(3, "0")}`, position: "Front Desk" },
     });
+    backOfficeUserIds.push(mgr.id, staff.id);
+  }
+
+  // E2E login bypass: seed a deterministic, already-enabled TOTP enrolment for
+  // every back-office user so Playwright can generate live codes (otpauth) and
+  // satisfy the /staff & /admin forced-2FA gate. Gated on E2E_TOTP_SECRET so it
+  // never fires for `npm run db:seed:demo`.
+  const e2eTotpSecret = process.env.E2E_TOTP_SECRET;
+  if (e2eTotpSecret) {
+    const encryptedSecret = encryptSecret(e2eTotpSecret);
+    for (const userId of backOfficeUserIds) {
+      await prisma.userTotp.create({
+        data: {
+          userId,
+          encryptedSecret: encryptedSecret as unknown as Prisma.InputJsonValue,
+          recoveryCodes: [],
+          enabled: true,
+          enabledAt: new Date(),
+        },
+      });
+    }
+    console.log(`   🔐 Seeded deterministic TOTP for ${backOfficeUserIds.length} back-office users (e2e)`);
   }
 
   // Customers
@@ -323,14 +351,26 @@ async function main() {
       else passportExpiry = daysFromNow(365 * (2 + (i % 4)));
     }
 
+    // The first customer (sarah.smith@example.com) is seeded fully onboarded so
+    // it can be used as a ready-to-go customer login (e2e + manual smoke). The
+    // rest stay un-onboarded so the onboarding gate is still exercisable.
+    const onboarded = i === 0;
     await prisma.customerProfile.create({
       data: {
         userId: u.id,
+        ...(onboarded
+          ? {
+              onboardedAt: new Date(),
+              onboardingVersion: buildOnboardingVersion(),
+              termsAcceptedAt: new Date(),
+              privacyAcceptedAt: new Date(),
+            }
+          : {}),
         licenceNumber: String(10000000 + i * 12345),
         licenceState: rand(["QLD", "NSW", "VIC"]),
         licenceClass: rand(["C", "RE", "R"]),
         licenceExpiry: new Date(2028, i % 12, (i % 27) + 1),
-        licenceVerifiedAt: i % 3 === 0 ? null : new Date(),
+        licenceVerifiedAt: onboarded ? new Date() : i % 3 === 0 ? null : new Date(),
         passportNumber,
         passportCountry,
         passportExpiry,
@@ -1573,8 +1613,8 @@ async function main() {
 
   console.log("✅ Seed complete.");
   console.log("   Admin:    admin@xpertmoto.com.au / admin1234");
-  console.log("   Manager:  manager.gold-coast@xpertmoto.com.au / staff1234");
-  console.log("   Staff:    staff.gold-coast@xpertmoto.com.au / staff1234");
+  console.log(`   Manager:  manager.${depots[0]?.slug}@xpertmoto.com.au / staff1234`);
+  console.log(`   Staff:    staff.${depots[0]?.slug}@xpertmoto.com.au / staff1234`);
   console.log("   Customer: sarah.smith@example.com / customer1234");
 }
 

@@ -142,6 +142,14 @@ describe("no-show-detector", () => {
         }),
       }),
     );
+    // The no-show fee is owed until collected, so it's added to balanceDue
+    // (the capture-pending job nets it out on capture).
+    expect(bookingUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "book_no_bond" },
+        data: { balanceDue: { increment: 50 } },
+      }),
+    );
   });
 
   it("respects the grace hours from SystemSetting", async () => {

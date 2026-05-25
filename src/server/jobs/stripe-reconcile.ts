@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { listBalanceTransactions, type StripeBalanceTransaction } from "@/lib/stripe";
 import { getSecret, setSecret } from "@/lib/integration-config";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 /**
  * G3 — stripe-reconcile
@@ -195,6 +195,7 @@ async function upsertUnmatched(args: {
 
 export function startStripeReconcileScheduler() {
   registerWorker(QUEUE, async () => runStripeReconcile());
+  monitorCron(QUEUE, "30 2 * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   // Nightly at 02:30 Brisbane, after bond-auto-release + revenue-reconcile.

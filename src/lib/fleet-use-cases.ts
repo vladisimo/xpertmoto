@@ -69,4 +69,4 @@ export function tabToSlug(tab: FleetTab): string {
   return tab === ALL_TAB ? ALL_TAB : USE_CASE_SLUGS[tab];
 }
 
-export const DEFAULT_FLEET_TAB: FleetTab = "SPORT_CRUISER";
+export const DEFAULT_FLEET_TAB: FleetTab = ALL_TAB;

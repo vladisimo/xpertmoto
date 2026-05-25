@@ -674,6 +674,18 @@ export const returnRouter = createTRPCRouter({
             },
           });
         }
+        // Ancillary charges raised above (damage + late + fuel + cleaning,
+        // summing to totalDueNow) are owed until the capture-pending job /
+        // webhook collects them. Add them to balanceDue here so
+        // applyCaptureToBalanceDue can net them out on capture — keeping the
+        // "raised → added, collected → removed" invariant (see balance-due.ts)
+        // and mirroring bookingSettlement.addCharge.
+        if (totalDueNow > 0) {
+          await tx.booking.update({
+            where: { id: assessment.bookingId },
+            data: { balanceDue: { increment: totalDueNow } },
+          });
+        }
         await autoCloseByTarget(tx, "ReturnAssessment", assessment.id, {
           types: ["RETURN_ASSESSMENT_FINALISE"],
           reason: "completed",
@@ -856,6 +868,16 @@ export const returnRouter = createTRPCRouter({
               processedById: ctx.user.id,
             },
           }));
+        // Newly-raised PENDING charge → add to balanceDue so the eventual
+        // capture nets it out (see balance-due.ts). Skipped when re-confirming
+        // an already-raised charge (idempotent path above), which would
+        // otherwise double-count.
+        if (!existing && bookingId) {
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { balanceDue: { increment: amountNumber } },
+          });
+        }
         const damageCharge = await tx.damageCharge.update({
           where: { id: charge.id },
           data: {

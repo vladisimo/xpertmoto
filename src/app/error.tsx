@@ -1,10 +1,14 @@
 "use client";
 import { useEffect } from "react";
 import Link from "next/link";
+import * as Sentry from "@sentry/nextjs";
 
 export default function GlobalError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
   useEffect(() => {
-    console.error(error);
+    // Report to Sentry. Without this, errors caught by the route-segment
+    // boundary never reach Sentry — the backend is fully instrumented but
+    // client-rendered crashes would otherwise only hit the browser console.
+    Sentry.captureException(error);
   }, [error]);
 
   return (

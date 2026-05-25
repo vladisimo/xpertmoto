@@ -17,6 +17,25 @@ const queues = new Map<string, Queue>();
 const workers = new Map<string, Worker>();
 const queueEvents = new Map<string, QueueEvents>();
 
+/**
+ * Cron-monitor registry. A scheduler calls `monitorCron(queue, pattern)` to
+ * declare that the queue runs on a fixed cadence; the wrapped processor then
+ * emits Sentry cron check-ins (in_progress → ok/error) on every run. Sentry
+ * uses the declared schedule to alert when an expected run never arrives —
+ * i.e. the worker is down or Redis is unreachable — which a plain
+ * captureException on throw can never detect. Event-driven queues stay out of
+ * the registry and emit no check-ins.
+ */
+const cronMonitors = new Map<string, { pattern: string; tz: string }>();
+
+export function monitorCron(
+  name: QueueName,
+  pattern: string,
+  tz = "Australia/Brisbane",
+): void {
+  cronMonitors.set(name, { pattern, tz });
+}
+
 export type QueueName =
   | "booking-reminder"
   | "overdue-check"
@@ -90,6 +109,18 @@ export function registerWorker<T = unknown>(
 
   const wrapped: Processor<T> = async (job, token) => {
     const start = Date.now();
+    const cron = cronMonitors.get(name);
+    const checkInId = cron
+      ? Sentry.captureCheckIn(
+          { monitorSlug: name, status: "in_progress" },
+          {
+            schedule: { type: "crontab", value: cron.pattern },
+            timezone: cron.tz,
+            checkinMargin: 5,
+            maxRuntime: 30,
+          },
+        )
+      : undefined;
     await writeAudit(prisma, {
       category: "JOB",
       action: `${name}.start`,
@@ -112,9 +143,15 @@ export function registerWorker<T = unknown>(
         status: "SUCCESS",
         durationMs: Date.now() - start,
       });
+      if (checkInId) {
+        Sentry.captureCheckIn({ checkInId, monitorSlug: name, status: "ok" });
+      }
       return result;
     } catch (err) {
       const e = err as Error;
+      if (checkInId) {
+        Sentry.captureCheckIn({ checkInId, monitorSlug: name, status: "error" });
+      }
       await writeAudit(prisma, {
         category: "JOB",
         action: `${name}.failed`,

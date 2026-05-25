@@ -28,7 +28,10 @@ export function BookingMobileBottomBar({
     w.pickupDepotId &&
     w.returnDepotId &&
     w.pickupDateTime &&
-    w.returnDateTime
+    w.returnDateTime &&
+    // Don't show a cost estimate until the customer has made a vehicle
+    // decision in Step 2 — a specific bike or "No preference".
+    (w.preferredVehicleId || w.noPreference)
   );
   const { data: quote } = trpc.booking.quote.useQuery(
     {
