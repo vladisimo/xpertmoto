@@ -349,7 +349,7 @@ describe("platform.observabilityUsage · live / placeholder", () => {
   it("placeholder when no snapshots", async () => {
     const res = await caller(buildCtx()).observabilityUsage();
     expect(res.source).toBe("placeholder");
-    expect(res.dailySeries).toEqual([]);
+    expect(res.chartSeries).toEqual([]);
   });
 
   it("aggregates snapshots per metric", async () => {
@@ -382,6 +382,32 @@ describe("platform.observabilityUsage · live / placeholder", () => {
     const byMetric = Object.fromEntries(res.metrics.map((m) => [m.metric, m.quantity]));
     expect(byMetric.error).toBe(2100);
     expect(byMetric.transaction).toBe(50_000);
-    expect(res.dailySeries).toHaveLength(3);
+    expect(res.chartSeries).toHaveLength(2);
+
+    // derived cost from the placeholder pricing (error 0.0005, txn 0.00003)
+    const error = res.metrics.find((m) => m.metric === "error")!;
+    expect(error.costAud).toBeCloseTo(1.05, 6);
+    // day-over-day: 900 on 04-21 vs 1200 on 04-20 = -25%
+    expect(error.deltaPct).toBeCloseTo(-25, 6);
+    // transaction has only one day → no prior day to compare
+    expect(res.metrics.find((m) => m.metric === "transaction")!.deltaPct).toBeNull();
+
+    // headline rollups
+    expect(res.totals.events).toBe(52_100);
+    expect(res.totals.daysWithData).toBe(2);
+    expect(res.totals.costAud).toBeCloseTo(2.55, 6);
+
+    // pivoted chart series: one row per day, peak is the 04-21 stack
+    expect(res.chartSeries).toHaveLength(2);
+    expect(res.chartSeries[1]).toMatchObject({ date: "2026-04-21", error: 900, transaction: 50_000, total: 50_900 });
+    expect(res.peak).toEqual({ date: "2026-04-21", total: 50_900 });
+  });
+
+  it("placeholder response still carries empty rollups", async () => {
+    const res = await caller(buildCtx()).observabilityUsage();
+    expect(res.totals).toEqual({ events: 0, costAud: 0, projectedMonthlyCostAud: 0, daysWithData: 0 });
+    expect(res.chartSeries).toEqual([]);
+    expect(res.peak).toBeNull();
+    expect(res.pricingIsEstimate).toBe(true);
   });
 });

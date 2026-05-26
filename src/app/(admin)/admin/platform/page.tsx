@@ -58,8 +58,12 @@ export default async function AdminPlatformPage({
   const sp = await searchParams;
   const activeTab = parseTab(sp.tab);
 
+  // Observability owns its own vertical space: the daily-series table scrolls
+  // internally rather than growing the page. Other tabs stay natural-flow.
+  const fillLayout = activeTab === "observability";
+
   return (
-    <PageShell>
+    <PageShell full={fillLayout}>
       <PageHeader
         eyebrow="Super admin"
         title="Platform"
