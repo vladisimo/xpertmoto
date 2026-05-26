@@ -9,6 +9,9 @@ import {
   slugToTab,
   type FleetTab,
 } from "@/lib/fleet-use-cases";
+import { slugToBikeType } from "@/lib/bike-types";
+import { slugToRiderLevel } from "@/lib/rider-levels";
+import { slugToBand } from "@/lib/engine-bands";
 
 /** Number of cards in the "high-performance picks" featured strip. */
 const FEATURED_COUNT = 3;
@@ -50,6 +53,8 @@ async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
       year: true,
       tagline: true,
       useCases: true,
+      bikeTypes: true,
+      riderLevels: true,
       engineCapacityCc: true,
       dryWeightKg: true,
       seatHeightMm: true,
@@ -97,6 +102,8 @@ async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
         year: m.year,
         tagline: m.tagline,
         useCases: m.useCases,
+        bikeTypes: m.bikeTypes,
+        riderLevels: m.riderLevels,
         colours,
         specs: {
           engineCapacityCc: m.engineCapacityCc,
@@ -122,11 +129,25 @@ async function getModels(tab: FleetTab): Promise<FleetSearchModel[]> {
 export default async function FleetPage({
   searchParams,
 }: {
-  searchParams: Promise<{ use?: string }>;
+  searchParams: Promise<{
+    use?: string;
+    type?: string;
+    level?: string;
+    cc?: string;
+  }>;
 }) {
   const resolvedSearch = await searchParams;
   const tab = slugToTab(resolvedSearch?.use) ?? DEFAULT_FLEET_TAB;
   const models = await getModels(tab);
+
+  // Bike type / rider level / engine band are refined client-side, but we seed
+  // them from the URL so deep links like /fleet?type=sport&cc=601-1000 land
+  // pre-filtered with the dropdowns reflecting that state.
+  const initialFilters = {
+    bikeType: slugToBikeType(resolvedSearch?.type),
+    riderLevel: slugToRiderLevel(resolvedSearch?.level),
+    band: slugToBand(resolvedSearch?.cc),
+  };
 
   const featured = pickFeatured(models);
 
@@ -146,7 +167,12 @@ export default async function FleetPage({
             </p>
           </div>
         ) : (
-          <FleetSearchGrid key={tab} models={models} activeTab={tab} />
+          <FleetSearchGrid
+            key={tab}
+            models={models}
+            activeTab={tab}
+            initialFilters={initialFilters}
+          />
         )}
       </div>
     </>

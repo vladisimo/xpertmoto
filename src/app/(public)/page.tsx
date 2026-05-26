@@ -37,6 +37,7 @@ async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
       year: true,
       tagline: true,
       useCases: true,
+      riderLevels: true,
       category: {
         select: {
           id: true,
@@ -72,6 +73,7 @@ async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
         year: m.year,
         tagline: m.tagline,
         useCases: m.useCases,
+        riderLevels: m.riderLevels,
         category: {
           id: m.category?.id ?? "",
           licenceRequired: m.category?.licenceRequired ?? "",

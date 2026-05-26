@@ -125,7 +125,7 @@ async function getRelated(
   excludeSlug: string,
 ): Promise<RelatedModelEntry[]> {
   if (useCases.length === 0) return [];
-  const preferred = useCases.find((uc) => uc !== "LEARNER_APPROVED") ?? useCases[0]!;
+  const preferred = useCases[0]!;
   const models = await prisma.vehicleModel.findMany({
     where: {
       useCases: { has: preferred },

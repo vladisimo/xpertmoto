@@ -1030,8 +1030,10 @@ model VehicleModel {
   specsConfidence     SpecConfidence @default(UNVERIFIED)
   lastEnrichmentError String?
 
-  // Public fleet browsing
+  // Public fleet browsing / classification (display-only — never pricing)
   useCases     FleetUseCase[] @default([])
+  bikeTypes    BikeType[]     @default([])
+  riderLevels  RiderLevel[]   @default([])
   tagline      String?
   heroImageKey String?
   // Internal/service vehicles (e.g. delivery vans) set this false so they
@@ -1104,8 +1106,26 @@ enum FleetUseCase {
   COMMUTING
   PRACTICE
   DELIVERY
-  SPORT_CRUISER
-  LEARNER_APPROVED
+}
+
+/// What kind of machine a model is — display/filter taxonomy only, never
+/// pricing or eligibility. A model can carry more than one (e.g. a naked that
+/// doubles as a sport bike).
+enum BikeType {
+  NAKED
+  SCOOTER
+  TOURING
+  SPORT
+  CRUISER
+  SUPER_SPORT
+}
+
+/// Who a model suits — display/filter taxonomy only. A model can suit a range
+/// of rider levels. NOT a substitute for licence/age eligibility checks.
+enum RiderLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
 }
 
 model VehicleImage {

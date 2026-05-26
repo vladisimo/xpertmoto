@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { FleetUseCase } from "@prisma/client";
+import { FleetUseCase, RiderLevel } from "@prisma/client";
 import { Button } from "@/components/ui/button";
 import { ModelCard } from "@/components/fleet/model-card";
 import { UseCaseTabs } from "@/components/fleet/use-case-tabs";
@@ -22,6 +22,7 @@ export interface HomeFleetPreviewModel {
   year: number;
   tagline: string | null;
   useCases: FleetUseCase[];
+  riderLevels: RiderLevel[];
   primaryImageUrl: string | null;
   availableCount: number;
   category: {
@@ -84,7 +85,7 @@ export function HomeFleetPreview({ models }: { models: HomeFleetPreviewModel[] }
               tagline={m.tagline}
               imageSrc={m.primaryImageUrl}
               licenceBadge={m.category.licenceRequired || null}
-              lamsApproved={m.useCases.includes("LEARNER_APPROVED")}
+              lamsApproved={m.riderLevels.includes("BEGINNER")}
               useCases={m.useCases}
               dailyRate={m.category.baseDailyRate}
               availableCount={m.availableCount}

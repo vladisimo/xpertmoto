@@ -27,8 +27,8 @@ test.describe("fleet listing", () => {
 
   test("selecting a use-case tab syncs the ?use= query param", async ({ page }) => {
     await page.goto("/fleet");
-    await page.getByRole("tab", { name: /learner approved/i }).click();
-    await expect(page).toHaveURL(/[?&]use=learner-approved/);
+    await page.getByRole("tab", { name: /commuting/i }).click();
+    await expect(page).toHaveURL(/[?&]use=commuting/);
   });
 
   test("applying a make filter updates the result count", async ({ page }) => {

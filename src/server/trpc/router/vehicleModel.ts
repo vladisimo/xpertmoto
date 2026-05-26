@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { BikeType, FleetUseCase, RiderLevel } from "@prisma/client";
 import { createTRPCRouter, staffProcedure } from "../trpc";
 import { enqueueEnrichVehicleModel } from "@/server/jobs/enrich-vehicle-model";
 import { runEnrichment } from "@/server/services/vehicle-enrichment";
@@ -42,6 +43,19 @@ const updateSpecInput = z.object({
     .optional(),
 });
 
+/**
+ * Per-model classification (browse/filter taxonomy). Each axis is sent in
+ * full (the client owns the complete set of toggles), so arrays replace —
+ * Prisma treats `{ bikeTypes: [...] }` as `set`.
+ */
+export const updateClassificationInput = z.object({
+  id: z.string(),
+  bikeTypes: z.array(z.nativeEnum(BikeType)),
+  riderLevels: z.array(z.nativeEnum(RiderLevel)),
+  useCases: z.array(z.nativeEnum(FleetUseCase)),
+});
+export type UpdateClassificationInput = z.infer<typeof updateClassificationInput>;
+
 export const vehicleModelRouter = createTRPCRouter({
   list: staffProcedure.query(async ({ ctx }) => {
     const rows = await ctx.prisma.vehicleModel.findMany({
@@ -59,6 +73,9 @@ export const vehicleModelRouter = createTRPCRouter({
       slug: r.slug,
       category: r.category,
       engineCapacityCc: r.engineCapacityCc,
+      useCases: r.useCases,
+      bikeTypes: r.bikeTypes,
+      riderLevels: r.riderLevels,
       specsConfidence: r.specsConfidence,
       specsFetchedAt: r.specsFetchedAt,
       specsSourceName: r.specsSourceName,
@@ -117,6 +134,27 @@ export const vehicleModelRouter = createTRPCRouter({
     });
     return { ok: true };
   }),
+
+  // Classification (bike types / rider levels / use cases) is a separate
+  // browse-and-filter taxonomy, NOT spec data — so it deliberately does NOT
+  // touch `specsFetchedAt` / `specsConfidence`. Toggling a tag must never make
+  // the catalogue claim the manufacturer specs were re-verified.
+  updateClassification: staffProcedure
+    .input(updateClassificationInput)
+    .mutation(async ({ ctx, input }) => {
+      const { id, bikeTypes, riderLevels, useCases } = input;
+      const existing = await ctx.prisma.vehicleModel.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
+
+      await ctx.prisma.vehicleModel.update({
+        where: { id },
+        data: { bikeTypes, riderLevels, useCases },
+      });
+      return { ok: true };
+    }),
 
   enqueueEnrichment: staffProcedure
     .input(z.object({ id: z.string() }))

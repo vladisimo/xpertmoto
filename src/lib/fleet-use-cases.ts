@@ -1,12 +1,14 @@
 import { FleetUseCase } from "@prisma/client";
 
+// Use cases are now the four *pure* "what you'd use it for" tags. Machine kind
+// (sport/cruiser/naked…) moved to BikeType (`bike-types.ts`) and learner
+// suitability to RiderLevel (`rider-levels.ts`) — see the bike_classification
+// _axes migration.
 export const USE_CASES: readonly FleetUseCase[] = [
   "ADVENTURE",
   "COMMUTING",
   "PRACTICE",
   "DELIVERY",
-  "SPORT_CRUISER",
-  "LEARNER_APPROVED",
 ] as const;
 
 export const USE_CASE_LABELS: Record<FleetUseCase, string> = {
@@ -14,8 +16,6 @@ export const USE_CASE_LABELS: Record<FleetUseCase, string> = {
   COMMUTING: "Commuting",
   PRACTICE: "Practice",
   DELIVERY: "Delivery",
-  SPORT_CRUISER: "Sport & Cruiser",
-  LEARNER_APPROVED: "Learner Approved",
 };
 
 export const USE_CASE_SLUGS: Record<FleetUseCase, string> = {
@@ -23,8 +23,6 @@ export const USE_CASE_SLUGS: Record<FleetUseCase, string> = {
   COMMUTING: "commuting",
   PRACTICE: "practice",
   DELIVERY: "delivery",
-  SPORT_CRUISER: "sport-cruiser",
-  LEARNER_APPROVED: "learner-approved",
 };
 
 export const USE_CASE_DESCRIPTIONS: Record<FleetUseCase, string> = {
@@ -32,8 +30,6 @@ export const USE_CASE_DESCRIPTIONS: Record<FleetUseCase, string> = {
   COMMUTING: "Light, easy city bikes and scooters for the daily ride.",
   PRACTICE: "Forgiving first bikes — perfect for building licence hours.",
   DELIVERY: "Cheap-to-run delivery workhorses, vans, and fleet scooters.",
-  SPORT_CRUISER: "Sport bikes, nakeds and cruisers with serious character.",
-  LEARNER_APPROVED: "LAMS-approved bikes you can ride on a learner or provisional licence.",
 };
 
 const SLUG_TO_USE_CASE: Record<string, FleetUseCase> = Object.fromEntries(
@@ -51,7 +47,7 @@ export function useCaseToSlug(useCase: FleetUseCase): string {
   return USE_CASE_SLUGS[useCase];
 }
 
-export const DEFAULT_USE_CASE: FleetUseCase = "SPORT_CRUISER";
+export const DEFAULT_USE_CASE: FleetUseCase = "COMMUTING";
 
 // "All" sentinel for the fleet page tab strip — not a real FleetUseCase.
 // Home preview tabs don't include it (see UseCaseTabs `includeAll`).

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { X } from "lucide-react";
-import { FleetUseCase } from "@prisma/client";
+import { BikeType, FleetUseCase, RiderLevel } from "@prisma/client";
 import {
   Select,
   SelectContent,
@@ -16,6 +16,9 @@ import { ModelCard, type ModelCardSpecs } from "@/components/fleet/model-card";
 import { UseCaseTabs } from "@/components/fleet/use-case-tabs";
 import { cn } from "@/lib/utils";
 import type { FleetTab } from "@/lib/fleet-use-cases";
+import { BIKE_TYPES, BIKE_TYPE_LABELS } from "@/lib/bike-types";
+import { RIDER_LEVELS, RIDER_LEVEL_LABELS } from "@/lib/rider-levels";
+import { ENGINE_BANDS, ENGINE_BAND_LABELS, ccToBand, type EngineBand } from "@/lib/engine-bands";
 
 export interface FleetSearchModel {
   id: string;
@@ -25,6 +28,8 @@ export interface FleetSearchModel {
   year: number;
   tagline: string | null;
   useCases: FleetUseCase[];
+  bikeTypes: BikeType[];
+  riderLevels: RiderLevel[];
   colours: string[];
   primaryImageUrl: string | null;
   availableCount: number;
@@ -42,6 +47,9 @@ type Filters = {
   make: string;
   model: string;
   colour: string;
+  bikeType: BikeType | "all";
+  riderLevel: RiderLevel | "all";
+  band: EngineBand | "all";
   sort: SortKey;
 };
 
@@ -49,17 +57,31 @@ const DEFAULT_FILTERS: Filters = {
   make: "all",
   model: "all",
   colour: "all",
+  bikeType: "all",
+  riderLevel: "all",
+  band: "all",
   sort: "available-desc",
 };
 
 export function FleetSearchGrid({
   models,
   activeTab,
+  initialFilters,
 }: {
   models: FleetSearchModel[];
   activeTab: FleetTab;
+  initialFilters?: {
+    bikeType?: BikeType | null;
+    riderLevel?: RiderLevel | null;
+    band?: EngineBand | null;
+  };
 }) {
-  const [filters, setFilters] = React.useState<Filters>(DEFAULT_FILTERS);
+  const [filters, setFilters] = React.useState<Filters>({
+    ...DEFAULT_FILTERS,
+    bikeType: initialFilters?.bikeType ?? "all",
+    riderLevel: initialFilters?.riderLevel ?? "all",
+    band: initialFilters?.band ?? "all",
+  });
 
   const makeOptions = React.useMemo(
     () => Array.from(new Set(models.map((m) => m.make))).sort(),
@@ -80,6 +102,9 @@ export function FleetSearchGrid({
       if (filters.make !== "all" && m.make !== filters.make) return false;
       if (filters.model !== "all" && m.model !== filters.model) return false;
       if (filters.colour !== "all" && !m.colours.includes(filters.colour)) return false;
+      if (filters.bikeType !== "all" && !m.bikeTypes.includes(filters.bikeType)) return false;
+      if (filters.riderLevel !== "all" && !m.riderLevels.includes(filters.riderLevel)) return false;
+      if (filters.band !== "all" && ccToBand(m.specs?.engineCapacityCc) !== filters.band) return false;
       return true;
     });
     const sorted = [...base];
@@ -114,6 +139,9 @@ export function FleetSearchGrid({
     filters.make !== "all" ||
     filters.model !== "all" ||
     filters.colour !== "all" ||
+    filters.bikeType !== "all" ||
+    filters.riderLevel !== "all" ||
+    filters.band !== "all" ||
     filters.sort !== DEFAULT_FILTERS.sort;
 
   const onClear = () => setFilters(DEFAULT_FILTERS);
@@ -201,6 +229,81 @@ export function FleetSearchGrid({
           </Select>
 
           <Select
+            value={filters.bikeType}
+            onValueChange={(value) =>
+              setFilters({ ...filters, bikeType: value as Filters["bikeType"] })
+            }
+          >
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by bike type">
+              <SelectValue>
+                {filters.bikeType === "all" ? (
+                  <span className="text-muted-foreground">Type</span>
+                ) : (
+                  <span className="truncate">{BIKE_TYPE_LABELS[filters.bikeType]}</span>
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any type</SelectItem>
+              {BIKE_TYPES.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {BIKE_TYPE_LABELS[t]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
+            value={filters.riderLevel}
+            onValueChange={(value) =>
+              setFilters({ ...filters, riderLevel: value as Filters["riderLevel"] })
+            }
+          >
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by rider level">
+              <SelectValue>
+                {filters.riderLevel === "all" ? (
+                  <span className="text-muted-foreground">Level</span>
+                ) : (
+                  <span className="truncate">{RIDER_LEVEL_LABELS[filters.riderLevel]}</span>
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any level</SelectItem>
+              {RIDER_LEVELS.map((l) => (
+                <SelectItem key={l} value={l}>
+                  {RIDER_LEVEL_LABELS[l]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
+            value={filters.band}
+            onValueChange={(value) =>
+              setFilters({ ...filters, band: value as Filters["band"] })
+            }
+          >
+            <SelectTrigger className="w-full min-w-0 sm:flex-1" aria-label="Filter by engine size">
+              <SelectValue>
+                {filters.band === "all" ? (
+                  <span className="text-muted-foreground">Engine</span>
+                ) : (
+                  <span className="truncate">{ENGINE_BAND_LABELS[filters.band]}</span>
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any engine</SelectItem>
+              {ENGINE_BANDS.map((b) => (
+                <SelectItem key={b} value={b}>
+                  {ENGINE_BAND_LABELS[b]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
             value={filters.sort}
             onValueChange={(value) =>
               setFilters({ ...filters, sort: value as SortKey })
@@ -268,7 +371,7 @@ export function FleetSearchGrid({
               tagline={m.tagline}
               imageSrc={m.primaryImageUrl}
               licenceBadge={m.category.licenceRequired || null}
-              lamsApproved={m.useCases.includes("LEARNER_APPROVED")}
+              lamsApproved={m.riderLevels.includes("BEGINNER")}
               useCases={m.useCases}
               dailyRate={m.category.baseDailyRate}
               availableCount={m.availableCount}

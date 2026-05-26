@@ -29,7 +29,7 @@ export function FleetFeatured({
           tagline={m.tagline}
           imageSrc={m.primaryImageUrl}
           licenceBadge={m.category.licenceRequired || null}
-          lamsApproved={m.useCases.includes("LEARNER_APPROVED")}
+          lamsApproved={m.riderLevels.includes("BEGINNER")}
           useCases={m.useCases}
           dailyRate={m.category.baseDailyRate}
           availableCount={m.availableCount}
