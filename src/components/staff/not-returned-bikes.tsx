@@ -16,11 +16,7 @@ const STAGE_LABEL: Record<number, string> = {
 
 export function NotReturnedBikes({ rows }: { rows: NotReturnedBooking[] }) {
   if (rows.length === 0) {
-    return (
-      <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-        No overdue returns right now.
-      </p>
-    );
+    return null;
   }
 
   return (

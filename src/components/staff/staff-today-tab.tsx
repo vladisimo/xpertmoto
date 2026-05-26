@@ -98,6 +98,7 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
     prisma.vehicle.count({ where: fleetAttentionWhere }),
     prisma.vehicle.findMany({
       where: fleetAttentionWhere,
+      include: vehicleInclude,
       orderBy: { nextServiceDueDate: "asc" },
       take: 40,
     }),
@@ -173,13 +174,7 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
 
       <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
         <ScrollCard title="Today's pickups" count={pickups.length}>
-          {pickups.length === 0 ? (
-            <EmptyState
-              icon={LogOut}
-              title="No pickups"
-              hint="Nothing scheduled to go out today."
-            />
-          ) : (
+          {pickups.length > 0 && (
             <div className="flex flex-col gap-2">
               {pickups.map((b) => (
                 <BookingRow
@@ -194,13 +189,7 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
           )}
         </ScrollCard>
         <ScrollCard title="Today's returns" count={returns.length}>
-          {returns.length === 0 ? (
-            <EmptyState
-              icon={LogIn}
-              title="No returns"
-              hint="Nothing scheduled to come back today."
-            />
-          ) : (
+          {returns.length > 0 && (
             <div className="flex flex-col gap-2">
               {returns.map((b) => (
                 <BookingRow
@@ -214,11 +203,7 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
             </div>
           )}
         </ScrollCard>
-        <ScrollCard
-          title="Not returned"
-          count={overdueCount}
-          description="Past scheduled return — escalation auto-advances (+1h notice, +24h manager, +72h theft)."
-        >
+        <ScrollCard title="Not returned" count={overdueCount}>
           <NotReturnedBikes rows={overdueRows} />
         </ScrollCard>
       </div>
@@ -237,34 +222,11 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
             />
           ) : (
             fleetVehicles.map((v) => (
-              <Link
+              <FleetRow
                 key={v.id}
-                href="/staff/fleet?tab=vehicles"
-                className="block rounded-md border border-border bg-background px-3 py-2.5 transition-colors hover:bg-muted/50"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold tracking-wider">
-                    {v.internalCode}
-                  </span>
-                  <span className="truncate text-sm font-medium">
-                    {v.make} {v.model}
-                  </span>
-                </div>
-                <div className="mt-1.5 flex flex-wrap gap-1">
-                  {attentionChips(v, now, in30, in14).map((c) => (
-                    <span
-                      key={c.label}
-                      className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[11px] font-medium tabular-nums ${
-                        c.overdue
-                          ? "border-destructive/30 bg-destructive/5 text-destructive"
-                          : "border-border text-muted-foreground"
-                      }`}
-                    >
-                      {c.label} {formatDate(c.date)}
-                    </span>
-                  ))}
-                </div>
-              </Link>
+                v={v}
+                chips={attentionChips(v, now, in30, in14)}
+              />
             ))
           )}
         </ScrollCard>
@@ -324,7 +286,22 @@ function ScrollCard({
   );
 }
 
-type AttentionChip = { label: string; date: Date; overdue: boolean };
+type AttentionChip = {
+  label: string;
+  date: Date;
+  overdue: boolean;
+  dueText: string;
+};
+
+function dueText(date: Date, now: Date): string {
+  const days = Math.round((date.getTime() - now.getTime()) / MS_IN_DAY);
+  if (days < 0) {
+    const n = Math.abs(days);
+    return `overdue by ${n} day${n === 1 ? "" : "s"}`;
+  }
+  if (days === 0) return "due today";
+  return `due in ${days} day${days === 1 ? "" : "s"}`;
+}
 
 function attentionChips(
   v: {
@@ -338,27 +315,81 @@ function attentionChips(
   in14: Date,
 ): AttentionChip[] {
   const chips: AttentionChip[] = [];
-  if (v.regoExpiry && v.regoExpiry < in30)
-    chips.push({
-      label: "Rego",
-      date: v.regoExpiry,
-      overdue: v.regoExpiry < now,
-    });
-  if (v.ctpExpiry && v.ctpExpiry < in30)
-    chips.push({ label: "CTP", date: v.ctpExpiry, overdue: v.ctpExpiry < now });
-  if (v.insuranceExpiry && v.insuranceExpiry < in30)
-    chips.push({
-      label: "Ins",
-      date: v.insuranceExpiry,
-      overdue: v.insuranceExpiry < now,
-    });
+  const add = (label: string, date: Date) =>
+    chips.push({ label, date, overdue: date < now, dueText: dueText(date, now) });
+  if (v.regoExpiry && v.regoExpiry < in30) add("Rego", v.regoExpiry);
+  if (v.ctpExpiry && v.ctpExpiry < in30) add("CTP", v.ctpExpiry);
+  if (v.insuranceExpiry && v.insuranceExpiry < in30) add("Ins", v.insuranceExpiry);
   if (v.nextServiceDueDate && v.nextServiceDueDate < in14)
-    chips.push({
-      label: "Service",
-      date: v.nextServiceDueDate,
-      overdue: v.nextServiceDueDate < now,
-    });
+    add("Service", v.nextServiceDueDate);
   return chips;
+}
+
+function FleetRow({
+  v,
+  chips,
+}: {
+  v: {
+    id: string;
+    make: string;
+    model: string;
+    year: number;
+    colour: string;
+    internalCode: string;
+    images: { url: string; caption: string | null }[];
+  };
+  chips: AttentionChip[];
+}) {
+  const image = v.images[0];
+  const title = `${v.year} ${v.make} ${v.model}`;
+  return (
+    <Link
+      href={`/staff/fleet/vehicles/${v.id}?tab=overview&edit=compliance`}
+      className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5 transition-colors hover:bg-muted/50"
+    >
+      <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md bg-muted">
+        {image ? (
+          <Image
+            src={image.url}
+            alt={image.caption ?? title}
+            fill
+            sizes="56px"
+            className="object-contain"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-muted-foreground">
+            <ImageIcon className="h-5 w-5" aria-hidden />
+          </span>
+        )}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold tracking-wider">
+            {v.internalCode}
+          </span>
+          <span className="truncate text-sm font-medium">{title}</span>
+        </div>
+        <div className="truncate text-xs text-muted-foreground">{v.colour}</div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          {chips.map((c) => (
+            <span
+              key={c.label}
+              className={cn(
+                "text-[11px] leading-tight tabular-nums",
+                c.overdue ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              <span className="font-medium">
+                {c.label} {c.dueText}
+              </span>{" "}
+              · {formatDate(c.date)}
+            </span>
+          ))}
+        </div>
+      </div>
+    </Link>
+  );
 }
 
 function EmptyState({
