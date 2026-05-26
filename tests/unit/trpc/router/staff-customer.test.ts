@@ -126,3 +126,48 @@ describe("staffCustomer.detail reward overlay", () => {
     expect(result?.customerProfile?.loyaltyTier).toBe("GOLD");
   });
 });
+
+describe("staffCustomer.topSpenders", () => {
+  type Caller = ReturnType<typeof staffCustomerRouter.createCaller>;
+
+  test("scopes by CustomerProfile presence, not role (back-office renters appear)", async () => {
+    // A SUPER_ADMIN who has rented carries a CustomerProfile and must rank.
+    const findMany = vi.fn().mockResolvedValue([
+      {
+        id: "admin-renter",
+        firstName: "Vlad",
+        lastName: "Stanculescu",
+        email: "vlad@example.test",
+        customerProfile: {
+          totalSpend: new Prisma.Decimal("2457.36"),
+          totalBookings: 1,
+          completedBookings: 0,
+          loyaltyTier: "SILVER",
+          lastBookingAt: null,
+        },
+      },
+    ]);
+    const ctx = {
+      prisma: { user: { findMany } },
+      user: { id: "staff1", role: "STAFF" as const },
+      session: { user: { id: "staff1", role: "STAFF" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["topSpenders"]>[0];
+
+    const result = await staffCustomerRouter.createCaller(ctx as never).topSpenders({ take: 10 });
+
+    // The where clause must filter on profile presence, never role.
+    const where = (findMany.mock.calls[0]?.[0] as { where: Record<string, unknown> }).where;
+    expect(where.customerProfile).toEqual({ isNot: null });
+    expect(where.role).toBeUndefined();
+
+    // Count reflects all non-cancelled hires (totalBookings), matching the
+    // spend basis — not completedBookings, which would read 0 mid-hire.
+    expect(result[0]).toMatchObject({
+      id: "admin-renter",
+      totalSpend: 2457.36,
+      totalBookings: 1,
+    });
+  });
+});

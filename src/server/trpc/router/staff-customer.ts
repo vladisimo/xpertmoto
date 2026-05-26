@@ -3224,7 +3224,10 @@ export const staffCustomerRouter = createTRPCRouter({
     .input(z.object({ take: z.number().int().min(1).max(50).default(10) }))
     .query(async ({ ctx, input }) => {
       const items = await ctx.prisma.user.findMany({
-        where: { role: "CUSTOMER", deletedAt: null },
+        // Customer identity is profile-based, not role-based: back-office
+        // users carry a CustomerProfile so they can rent and must appear in
+        // the leaderboard. See src/lib/customer-identity.ts.
+        where: { deletedAt: null, ...customerDirectoryUserWhere() },
         select: {
           id: true,
           firstName: true,
@@ -3233,6 +3236,7 @@ export const staffCustomerRouter = createTRPCRouter({
           customerProfile: {
             select: {
               totalSpend: true,
+              totalBookings: true,
               completedBookings: true,
               loyaltyTier: true,
               lastBookingAt: true,
@@ -3248,6 +3252,9 @@ export const staffCustomerRouter = createTRPCRouter({
         lastName: u.lastName,
         email: u.email,
         totalSpend: u.customerProfile?.totalSpend.toNumber() ?? 0,
+        // Count all non-cancelled hires so it matches the spend basis (which
+        // counts collected money across ACTIVE bookings, not just COMPLETED).
+        totalBookings: u.customerProfile?.totalBookings ?? 0,
         completedBookings: u.customerProfile?.completedBookings ?? 0,
         loyaltyTier: u.customerProfile?.loyaltyTier ?? "SILVER",
         lastBookingAt: u.customerProfile?.lastBookingAt ?? null,
