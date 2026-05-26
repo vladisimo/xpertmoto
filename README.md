@@ -1,18 +1,18 @@
 # 🛵 XPERT Moto
 
-Enterprise scooter & motorbike hire platform for Australia. Production-ready full-stack Next.js 14 / TypeScript / Prisma / Postgres.
+Enterprise scooter & motorbike hire platform for Australia. Production-ready full-stack Next.js 16 / React 19 / TypeScript / tRPC v11 / Prisma 5 / Postgres.
 
 ## What's in here
 
 | Layer | Implemented |
 |---|---|
-| **Public website** | Homepage, fleet, locations, pricing, FAQ, contact, terms |
-| **Booking engine** | 6-step wizard with quote/availability/Stripe stub/confirmation, customer portal |
-| **Customer portal** | Dashboard, bookings list & detail, profile, invoice download |
-| **Staff back-office** | Dashboard (today's pickups/returns/overdue), bookings list & detail, check-out, check-in (auto late/fuel/damage charges + bond release), customer management with licence verify, walk-in POS, calendar (14d timeline), inspections with damage zones |
-| **Fleet & plant** | Fleet dashboard with utilisation/book value, vehicle registry & detail (with depreciation + ROI), 4-step onboarding wizard, decommissioning, work orders (kanban + status transitions cascade vehicle status), incidents, infringements |
-| **Admin panel** | KPI dashboard with 12-month revenue trend, users & roles (with staff invite + temp password), depots CRUD + operating hours, pricing config (rates/addons/insurance/discounts/seasons), finance + GST report + CSV export, reports suite (bookings/fleet/customers), system settings, audit log, API keys |
-| **Cross-cutting** | NextAuth v5 (credentials + Google), tRPC v11 with role-based procedures, role middleware, audit log writes on key mutations, email + SMS stubs, HTML invoice generation, security headers, error/not-found/loading boundaries, basic unit tests, GitHub Actions CI |
+| **Public website** | Homepage, fleet (multi-axis bike classification + browse/filter), locations, pricing, FAQ, contact, terms |
+| **Booking engine** | 6-step wizard with quote/availability/confirmation; real Stripe PaymentIntents, bond auth/capture, refunds, reconciliation |
+| **Customer portal** | Dashboard, bookings list & detail, profile, loyalty/rewards, invoice PDF download |
+| **Staff back-office** | Dashboard (today's pickups/returns/overdue), bookings list & detail, check-out, check-in (auto late/fuel/damage charges + bond release), customer management with licence verify, walk-in POS (modal on Bookings), calendar (14d timeline), inspections with damage zones. Consolidated nav: customers, fleet, finance, pricing, communications, settings |
+| **Fleet & plant** | Fleet dashboard with utilisation/book value, vehicle registry & detail (with depreciation + ROI), 4-step onboarding wizard, decommissioning, work orders (kanban + status transitions cascade vehicle status), incidents, infringements, eToll sync |
+| **Admin panel** | KPI dashboard with 12-month revenue trend, pricing config (rates/addons/insurance/discounts/seasons), finance + GST report + CSV export, reports suite, platform + observability (Sentry cost analytics), integrations status dashboard, system settings, audit log, API keys, backups, webhooks. Users→`/staff/customers`, depots→`/staff/fleet` and notification templates→`/staff/communications` now live in the staff portal |
+| **Cross-cutting** | NextAuth v5 (credentials + Google/Apple/Microsoft/GitHub OAuth, TOTP step-up), tRPC v11 with role-based procedures, role middleware, audit log writes on key mutations, real Resend/SMTP email + Twilio SMS, `@react-pdf` invoices, BullMQ scheduled jobs, Sentry, mobile-responsive back-office (tablet/phone primitives), security headers, error/not-found/loading boundaries, unit + integration + Playwright E2E, GitHub Actions CI |
 
 ## Setup
 
@@ -112,18 +112,27 @@ src/
 │   ├── (admin)/          Admin panel (ADMIN+)
 │   └── api/              tRPC, auth, finance export, invoice PDF
 ├── server/
-│   ├── trpc/router/      auth, booking, vehicle, depot, customer, catalog,
-│   │                     staffBooking, staffCustomer, inspection, fleet, admin
-│   └── services/         pricing, availability, depreciation, audit
-├── lib/                  prisma, auth, stripe (stub), email, sms, pdf, utils
-├── components/           shadcn/ui primitives, layout, booking wizard
-├── stores/               Zustand booking wizard
+│   ├── trpc/router/      ~44 routers: booking, fleet, customer, payments,
+│   │                     maintenance, incidents, gift cards, referrals,
+│   │                     loyalty, subscriptions, eToll, yield pricing,
+│   │                     analytics, backups, … (see src/server/trpc/CLAUDE.md)
+│   ├── services/         ~90 business-logic modules (pricing, availability,
+│   │                     depreciation, audit, reconciliation, …)
+│   └── jobs/             BullMQ workers (Australia/Brisbane TZ)
+├── lib/                  prisma, auth, branding, money, logger, stripe,
+│                         email, sms, pdf, utils
+├── components/           shadcn/ui primitives, layout shells, mobile
+│                         primitives, booking wizard, domain components
+├── stores/               Zustand (sparse usage)
 └── middleware.ts         Role-based route protection
 ```
 
+> Schema, API-layer, UI and lib rules live in per-folder `CLAUDE.md` files
+> (`prisma/`, `src/server/trpc/`, `src/components/ui/`, `src/lib/`).
+
 ## Optional integrations
 
-All third-party integrations have stub-friendly fallbacks. Set the env vars to switch to real mode:
+All third-party integrations have stub-friendly fallbacks for local dev. Set the env vars to switch to real mode. Integration **credentials are environment-only** — there is no in-app credential editor; `/admin/integrations` is a read-only status dashboard.
 
 | Env var | Effect |
 |---|---|
@@ -151,8 +160,14 @@ Without any of these set, the platform runs end-to-end using stubs that log to t
 ## Phases
 
 1. ✅ Foundation (schema, auth, tRPC, layouts, seed)
-2. ✅ Public booking engine (wizard, Stripe stub, confirmation, customer portal)
+2. ✅ Public booking engine (wizard, payments, confirmation, customer portal)
 3. ✅ Staff back-office (check-out/in, customers, POS, calendar, inspections)
 4. ✅ Fleet & plant management (registry, onboarding, work orders, incidents, infringements, depreciation)
 5. ✅ Admin panel (users, depots, pricing, finance, reports, settings, audit, API keys)
 6. ✅ Polish (@react-pdf invoices, real Resend/SMTP email, real Twilio SMS, S3/MinIO storage, Mapbox, BullMQ worker with scheduled jobs, unit + integration + Playwright E2E tests, security headers, CI, Docker compose stack)
+
+Beyond the original plan, the platform has grown a full payments stack (Stripe
+PaymentIntents, bond auth/capture, refunds, GST-aware reconciliation), loyalty
+& rewards, gift cards/referrals/subscriptions, eToll infringement sync, yield
+pricing, a mobile-responsive back-office, and observability (Sentry cost
+analytics). See `CLAUDE.md` for the authoritative current scope.

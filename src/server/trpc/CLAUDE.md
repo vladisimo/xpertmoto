@@ -10,7 +10,7 @@ The original CLAUDE.md spec listed 14 routers. The actual repo has **44 routers*
 
 ## Procedure layers — pick the right base
 
-Six procedure bases are defined in [trpc.ts:225-353](trpc.ts). Picking the wrong one silently breaks auth.
+Eight procedure bases are defined in [trpc.ts:273-411](trpc.ts). Picking the wrong one silently breaks auth.
 
 | Caller | Base | Notes |
 |---|---|---|
