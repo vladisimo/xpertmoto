@@ -71,6 +71,7 @@ function makeCtx(overrides: {
     bookingReference: "SCT-20260420-0001",
     customerId: "cust1",
     balanceDue: 0,
+    amountPaid: 0,
     ...overrides.booking,
   };
   const paymentCreated = overrides.paymentCreated ?? { id: "p1" };
@@ -160,6 +161,7 @@ describe("bookingSettlement.refund", () => {
     id: "src1",
     status: "SUCCEEDED",
     amount: 110,
+    gstAmount: 10,
     customerId: "cust1",
     bookingId: "b1",
     stripePaymentIntentId: "pi_1",
@@ -167,6 +169,21 @@ describe("bookingSettlement.refund", () => {
     processedAt: new Date(),
     createdAt: new Date(),
   };
+
+  it("credits GST on the refund row, proportional to the slice refunded", async () => {
+    refundChargeMock.mockResolvedValueOnce({ id: "re_2", status: "succeeded", amountCents: 5500 });
+    const ctx = makeCtx({ sourcePayment: source, paymentCreated: { id: "refund3" } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+
+    // Refund half of the $110 (incl. $10 GST) charge → $5.00 GST credit.
+    await c.refund({ paymentId: "src1", amount: 55, reason: "Partial goodwill" });
+
+    const refundCreate = ctx.prisma.payment.create.mock.calls.find(
+      ([arg]) => (arg as { data: { type: string } }).data.type === "REFUND",
+    )?.[0] as { data: { amount: number; gstAmount: unknown } };
+    expect(refundCreate.data.amount).toBe(55);
+    expect(Number(refundCreate.data.gstAmount)).toBeCloseTo(5, 2);
+  });
 
   it("issues a DECREASE/REFUND adjustment note when the Stripe refund succeeds", async () => {
     refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded", amountCents: 11000 });
@@ -238,9 +255,10 @@ describe("bookingSettlement.captureNow", () => {
 
     expect(res.status).toBe("SUCCEEDED");
     // 904.97 − 854.97 = 50.00 — the no-show fee that remains genuinely owed.
+    // The captured amount is mirrored onto amountPaid (0 + 854.97).
     expect(ctx.prisma.booking.update).toHaveBeenCalledWith({
       where: { id: "b1" },
-      data: { balanceDue: 50 },
+      data: { balanceDue: 50, amountPaid: 854.97 },
     });
   });
 

@@ -1,7 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
 import { TRPCError } from "@trpc/server";
+
+// The quote-validation tests below drive the booking.quote error mapping in
+// isolation: the rate-limit middleware and depot-hours guard are stubbed to
+// no-ops so the test reaches the pricing cascade, and the cascade itself is
+// mocked so we can make it throw a specific domain error. The real error
+// classes are preserved via importActual — the procedure's `instanceof`
+// checks depend on them.
+vi.mock("@/lib/rate-limit", () => ({
+  rateLimit: vi.fn().mockResolvedValue({ ok: true }),
+}));
+vi.mock("@/server/services/booking-times-guard", () => ({
+  enforceBookingTimesWithinHours: vi.fn().mockResolvedValue(undefined),
+  enforceDateTimeWithinDepotHours: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/server/services/pricing", async (importActual) => {
+  const actual = await importActual<typeof import("@/server/services/pricing")>();
+  return { ...actual, quote: vi.fn() };
+});
+
 import { bookingRouter } from "../../../../src/server/trpc/router/booking";
 import { buildOnboardingVersion } from "../../../../src/lib/onboarding-status";
+import {
+  quote as quotePricing,
+  MinimumRentalPeriodError,
+  OneWayDisallowedError,
+} from "../../../../src/server/services/pricing";
 
 const ONBOARDED = { onboardedAt: new Date(), onboardingVersion: buildOnboardingVersion() };
 const BARE = { onboardedAt: null, onboardingVersion: null };
@@ -138,5 +162,57 @@ describe("booking.mine", () => {
     const c = bookingRouter.createCaller(ctx as never);
     const out = await c.mine();
     expect(out).toEqual({ items: [], nextCursor: null });
+  });
+});
+
+/**
+ * The booking.quote endpoint must surface pricing-cascade validation
+ * outcomes as BAD_REQUEST. Letting them escape turns a normal customer-input
+ * rejection (e.g. a 1-day rental on a 2-day-minimum bike) into a 500 + Sentry
+ * exception, and makes the wizard's price breakdown flash then disappear.
+ */
+describe("booking.quote — validation errors map to BAD_REQUEST", () => {
+  const quoteMock = vi.mocked(quotePricing);
+
+  function quoteCtx() {
+    return {
+      prisma: {},
+      session: null,
+      ipAddress: "127.0.0.1",
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["quote"]>[0];
+  }
+
+  const input = {
+    categoryId: "cat1",
+    vehicleId: "veh1",
+    pickupDepotId: "dep1",
+    returnDepotId: "dep1",
+    pickupDateTime: new Date("2026-07-21T00:00:00.000Z"),
+    returnDateTime: new Date("2026-07-22T00:00:00.000Z"),
+    addons: [],
+    deliveryFee: 0,
+  };
+
+  it("maps MinimumRentalPeriodError to BAD_REQUEST with its message", async () => {
+    quoteMock.mockRejectedValueOnce(new MinimumRentalPeriodError(2));
+    const c = bookingRouter.createCaller(quoteCtx() as never);
+    await expect(c.quote(input)).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("2-day minimum"),
+    });
+  });
+
+  it("maps OneWayDisallowedError to BAD_REQUEST", async () => {
+    quoteMock.mockRejectedValueOnce(new OneWayDisallowedError("CBD", "Airport"));
+    const c = bookingRouter.createCaller(quoteCtx() as never);
+    await expect(c.quote(input)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("lets unexpected errors through unchanged (still a server fault)", async () => {
+    quoteMock.mockRejectedValueOnce(new Error("db exploded"));
+    const c = bookingRouter.createCaller(quoteCtx() as never);
+    await expect(c.quote(input)).rejects.toThrow("db exploded");
   });
 });

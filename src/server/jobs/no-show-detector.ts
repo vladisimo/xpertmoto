@@ -101,6 +101,15 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           },
         });
 
+        // Cancel any long-term recurring billing plan in the same transaction,
+        // mirroring booking-cancellation.ts — don't rely on the hourly
+        // booking-billing tick to notice the NO_SHOW status, which would leave
+        // an ACTIVE plan able to queue a charge against a no-show in between.
+        await tx.bookingBillingPlan.updateMany({
+          where: { bookingId: b.id, status: { notIn: ["CANCELLED", "COMPLETED"] } },
+          data: { status: "CANCELLED", cancelReason: "Booking marked as no-show" },
+        });
+
         if (canForfeitBond && ledger) {
           const existingDeductions = Array.isArray(ledger.deductions)
             ? [...(ledger.deductions as Array<{ reason: string; amount: number }>)]

@@ -1037,10 +1037,14 @@ async function quoteImpl(prisma: PrismaClient, input: PricingInput): Promise<Pri
   if (isLongTerm) {
     recurringFrequency = category.longTermDefaultFrequency;
     const periodDays = periodLengthDays(recurringFrequency);
-    // Total number of whole periods in this booking. Any remainder days
-    // (e.g. days 22–23 on a 23-day weekly hire) collapse into the first
-    // period so the customer never sees a fractional final charge.
-    const totalPeriods = Math.max(1, Math.floor(durationDays / periodDays));
+    // Number of charges this booking is split into, rounding UP so any
+    // remainder days form their own (smaller) FIRST charge rather than
+    // inflating it. e.g. a 20-day weekly hire bills as ~6 days up-front +
+    // 2 full weeks, not 13 days up-front + 1 week. Recurring charges stay
+    // clean full periods; the first period absorbs the remainder + flat
+    // fees + rounding residual, so the customer never sees a fractional
+    // *final* charge and pays the least up-front the schedule allows.
+    const totalPeriods = Math.max(1, Math.ceil(durationDays / periodDays));
 
     // Split totalDec into the per-day-billable portion (base rental +
     // per-day add-ons + per-day insurance) and the flat one-time fees

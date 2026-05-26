@@ -30,7 +30,7 @@ export function QuoteSummary({ nested = false }: Props = {}) {
     // decision in Step 2 — a specific bike or "No preference".
     (w.preferredVehicleId || w.noPreference)
   );
-  const { data: quote } = trpc.booking.quote.useQuery(
+  const { data: quote, error: quoteError } = trpc.booking.quote.useQuery(
     {
       categoryId: w.categoryId ?? "",
       vehicleId: w.preferredVehicleId ?? undefined,
@@ -71,6 +71,28 @@ export function QuoteSummary({ nested = false }: Props = {}) {
       value: code,
     });
   }, [quote, w.discountCode]);
+
+  // A BAD_REQUEST from the quote endpoint is a validation outcome the
+  // customer can fix (e.g. a vehicle's minimum-rental period, or a one-way
+  // pair that isn't offered). Show the message in place rather than letting
+  // the whole summary unmount — otherwise the breakdown "flashes then
+  // disappears" and the customer gets no explanation.
+  if (ready && !quote && quoteError?.data?.code === "BAD_REQUEST") {
+    const message = (
+      <div className="rounded-md border border-amber-600/30 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
+        {quoteError.message}
+      </div>
+    );
+    if (nested) return <div className="text-sm">{message}</div>;
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Your quote</CardTitle>
+        </CardHeader>
+        <CardContent>{message}</CardContent>
+      </Card>
+    );
+  }
 
   if (!ready || !quote) return null;
 

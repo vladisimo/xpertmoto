@@ -12,6 +12,8 @@ import { ExportMenu } from "@/components/admin/export-menu";
 import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
+import { isNonCashPayment } from "@/lib/payment-labels";
+import type { PaymentType } from "@prisma/client";
 
 type Row = {
   id: string;
@@ -48,7 +50,7 @@ export default function FinanceTransactionsPage() {
     { id: "type", header: "Type", cell: (r) => r.type.replace(/_/g, " ") },
     { id: "method", header: "Method", cell: (r) => r.method, mobileHidden: true },
     { id: "status", header: "Status", cell: (r) => <StatusBadge status={r.status as StatusKey} /> },
-    { id: "amount", header: "Amount", cell: (r) => <span className="tabular-nums">{formatCurrency(r.amount)}</span>, align: "right" },
+    { id: "amount", header: "Amount", cell: (r) => <span className={amountClass(r)}>{formatCurrency(r.amount)}</span>, align: "right" },
     { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gst)}</span>, align: "right", mobileHidden: true },
     { id: "booking", header: "Booking", cell: (r) => r.bookingReference ?? "—" },
     { id: "customer", header: "Customer", cell: (r) => r.customer ?? "—", mobileHidden: true },
@@ -85,10 +87,16 @@ export default function FinanceTransactionsPage() {
       </div>
 
       {data && (
-        <div className="grid grid-cols-3 gap-4 rounded-lg border bg-card p-4 shadow-sm sm:flex sm:flex-wrap">
-          <Totals label="Count" value={data.totals.count.toLocaleString("en-AU")} />
-          <Totals label="Gross" value={formatCurrency(data.totals.amount)} />
-          <Totals label="GST" value={formatCurrency(data.totals.gst)} />
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-3 gap-4 rounded-lg border bg-card p-4 shadow-sm sm:flex sm:flex-wrap">
+            <Totals label="Count" value={data.totals.count.toLocaleString("en-AU")} />
+            <Totals label="Net" value={formatCurrency(data.totals.amount)} />
+            <Totals label="GST" value={formatCurrency(data.totals.gst)} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Net is cash in minus cash out. Bond holds and releases are card authorisations, not
+            cash, so they appear as muted rows but don&rsquo;t affect the total.
+          </p>
         </div>
       )}
 
@@ -102,6 +110,13 @@ export default function FinanceTransactionsPage() {
       />
     </PageShell>
   );
+}
+
+// Bond holds/releases are authorisations, not cash: shown as muted rows and
+// excluded from Net. Real outflows (refunds/credits) are negative → destructive.
+function amountClass(r: Row): string {
+  if (isNonCashPayment(r.type as PaymentType)) return "tabular-nums text-muted-foreground";
+  return r.amount < 0 ? "tabular-nums text-destructive" : "tabular-nums";
 }
 
 function Totals({ label, value }: { label: string; value: string }) {

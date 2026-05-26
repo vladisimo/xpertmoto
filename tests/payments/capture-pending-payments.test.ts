@@ -21,7 +21,7 @@ const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], no
 const chargeOffSessionForUser = vi.fn();
 // The success branch calls applyCaptureToBalanceDue, which reads/writes the
 // booking to net the now-collected charge off Booking.balanceDue.
-const bookingFindUnique = vi.fn().mockResolvedValue({ balanceDue: 150 });
+const bookingFindUnique = vi.fn().mockResolvedValue({ balanceDue: 150, amountPaid: 0 });
 const bookingUpdate = vi.fn().mockResolvedValue({});
 
 vi.mock("@/lib/prisma", () => ({
@@ -64,7 +64,7 @@ beforeEach(() => {
   sendNotification.mockClear();
   chargeOffSessionForUser.mockReset();
   bookingFindUnique.mockClear();
-  bookingFindUnique.mockResolvedValue({ balanceDue: 150 });
+  bookingFindUnique.mockResolvedValue({ balanceDue: 150, amountPaid: 0 });
   bookingUpdate.mockClear();
 });
 

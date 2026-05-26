@@ -8,7 +8,7 @@ import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { captureBookingId, readCapturedBookingId } from "@/server/services/audit";
 import { writePaymentEvent } from "@/server/services/payment-events";
-import { gstFromInclusive } from "@/lib/money";
+import { gstFromInclusive, aud, roundCents, times } from "@/lib/money";
 import { trackServer } from "@/lib/analytics";
 
 /**
@@ -613,7 +613,14 @@ export const bookingSettlementRouter = createTRPCRouter({
             type: "REFUND",
             method: "STRIPE",
             amount: refundAmount,
-            gstAmount: 0,
+            // Credit GST proportional to the slice of the source charge being
+            // refunded, so the GST/BAS export nets the reversal correctly.
+            // (Was hardcoded 0, which overstated GST collected on partial/full
+            // refunds of GST-inclusive charges.)
+            gstAmount:
+              originalAmount > 0
+                ? roundCents(times(aud(source.gstAmount), refundAmount / originalAmount))
+                : 0,
             status,
             stripeChargeId: stripeRefundId,
             processedAt: status === "SUCCEEDED" ? new Date() : null,

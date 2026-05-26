@@ -99,6 +99,16 @@ export async function runBookingBilling(
       await prisma.$transaction(async (tx) => {
         // Create the Payment row — capture-pending-payments will charge
         // the stored card on its next tick.
+        //
+        // IMPORTANT: do NOT increment Booking.balanceDue here. Unlike every
+        // other balance-affecting charge (manual charges, extensions, etc.
+        // which add to balanceDue when raised), the full recurring balance
+        // `recurringAmount × periodsTotal` was already pre-loaded into
+        // balanceDue at confirmation time (booking.ts: `balanceDue =
+        // totalAmount − payOnline`). It is removed period-by-period only when
+        // each SUBSCRIPTION_CHARGE is captured, via applyCaptureToBalanceDue.
+        // Adding an increment here would double-count the entire recurring
+        // balance. See tests/unit/jobs/booking-billing.test.ts.
         await tx.payment.create({
           data: {
             reference,

@@ -19,6 +19,7 @@ function makeCtx(
       returnDateTime?: Date;
     } | null;
     existingDraft?: unknown;
+    candidateVehicles?: Array<Record<string, unknown>>;
   } = {},
 ) {
   const booking = opts.booking ?? {
@@ -33,6 +34,15 @@ function makeCtx(
     booking: {
       findUniqueOrThrow: vi.fn(async () => booking),
       findUnique: vi.fn(async () => booking),
+      // isVehicleFree clash search — no clashing booking → vehicle is free.
+      findFirst: vi.fn(async () => null),
+    },
+    vehicle: {
+      findMany: vi.fn(async () => opts.candidateVehicles ?? []),
+    },
+    // isVehicleFree scheduled-work-order block — none → vehicle is free.
+    maintenanceWorkOrder: {
+      findMany: vi.fn(async () => []),
     },
     bookingSwap: {
       findFirst: vi.fn(async () => opts.existingDraft ?? null),
@@ -241,6 +251,86 @@ describe("bookingSwap.quoteDelta", () => {
   });
 });
 
+describe("bookingSwap.listCandidates", () => {
+  function candidate(over: Partial<Record<string, unknown>> = {}) {
+    return {
+      id: "v1",
+      internalCode: "SCT-13628",
+      rego: "IQJ46",
+      make: "Honda",
+      model: "CB125E",
+      year: 2024,
+      colour: "Black",
+      condition: "GOOD",
+      currentOdometerKm: 0,
+      regoExpiry: new Date("2027-01-01T00:00:00+10:00"),
+      ctpExpiry: new Date("2027-01-01T00:00:00+10:00"),
+      insuranceExpiry: new Date("2027-01-01T00:00:00+10:00"),
+      categoryId: "cat-A",
+      category: { id: "cat-A", name: "LAMS Motorcycle", engineCapacity: 125 },
+      depot: { name: "Brisbane CBD" },
+      images: [{ url: "/img/1.jpg", isPrimary: true, displayOrder: 0, caption: null }],
+      ...over,
+    };
+  }
+
+  it("returns enriched, free candidates for an eligible booking", async () => {
+    const ctx = makeCtx({
+      candidateVehicles: [
+        candidate(),
+        candidate({ id: "v2", internalCode: "MTB-11479", rego: "JKZ02", categoryId: "cat-B" }),
+      ],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.listCandidates({ bookingId: "b1", includeCrossCategory: true });
+    expect(res.eligible).toBe(true);
+    expect(res.vehicles).toHaveLength(2);
+    const first = res.vehicles[0]!;
+    // Enriched fields the rich card relies on.
+    expect(first).toMatchObject({
+      make: "Honda",
+      model: "CB125E",
+      engineCapacity: 125,
+      depotName: "Brisbane CBD",
+      isSameCategory: true,
+      free: true,
+    });
+    expect(first.images).toHaveLength(1);
+    // Docs all valid past the return date → no expiry warnings.
+    expect(first.docsExpiringDuringRental).toEqual([]);
+    // Cross-category unit is flagged as such.
+    expect(res.vehicles[1]!.isSameCategory).toBe(false);
+  });
+
+  it("flags documents expiring during the rental window", async () => {
+    const ctx = makeCtx({
+      candidateVehicles: [
+        candidate({ regoExpiry: new Date("2026-06-01T00:00:00+10:00") }),
+      ],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.listCandidates({ bookingId: "b1", includeCrossCategory: false });
+    expect(res.vehicles[0]!.docsExpiringDuringRental).toContain("rego");
+  });
+
+  it("returns ineligible with no vehicles for a non-swappable booking", async () => {
+    const ctx = makeCtx({
+      booking: {
+        id: "b1",
+        status: "COMPLETED",
+        vehicleId: "v-old",
+        categoryId: "cat-A",
+        customerId: "cust1",
+        returnDateTime: new Date("2026-06-10T10:00:00+10:00"),
+      },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.listCandidates({ bookingId: "b1", includeCrossCategory: false });
+    expect(res.eligible).toBe(false);
+    expect(res.vehicles).toEqual([]);
+  });
+});
+
 describe("bookingSwap.voidSwapDraft", () => {
   it("allows the draft author to void", async () => {
     const ctx = makeCtx({
@@ -305,6 +395,95 @@ describe("bookingSwap.voidSwapDraft", () => {
     const caller = bookingSwapRouter.createCaller(ctx as never);
     await expect(
       caller.voidSwapDraft({ swapId: "draft-1" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("bookingSwap.activeDraft", () => {
+  it("returns the open DRAFT so the wizard can resume", async () => {
+    const ctx = makeCtx({
+      existingDraft: {
+        id: "draft-1",
+        reason: "LATERAL",
+        origin: "CUSTOMER_WALK_IN",
+        reasonNotes: "notes",
+        originDetails: null,
+        draftState: { step: "outgoing" },
+        swappedById: "staff1",
+      } as never,
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(caller.activeDraft({ bookingId: "b1" })).resolves.toMatchObject({
+      id: "draft-1",
+      reason: "LATERAL",
+    });
+  });
+
+  it("returns null when no draft is open", async () => {
+    const ctx = makeCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(caller.activeDraft({ bookingId: "b1" })).resolves.toBeNull();
+  });
+});
+
+describe("bookingSwap.saveDraftProgress", () => {
+  const draftState = {
+    step: "select" as const,
+    outgoing: {
+      odometerKm: "12345",
+      fuelLevel: 90,
+      overallCondition: "GOOD" as const,
+      notes: "",
+      markers: [],
+      activeSeverity: "MINOR" as const,
+    },
+    incoming: {
+      odometerKm: "",
+      fuelLevel: 100,
+      overallCondition: "GOOD" as const,
+      notes: "",
+      markers: [],
+      activeSeverity: "MINOR" as const,
+    },
+    incomingVehicleId: "",
+    includeCrossCategory: false,
+    customerSignatureUrl: null,
+    staffSignatureUrl: null,
+    incidentSeverity: "MODERATE" as const,
+    workOrderPriority: "HIGH" as const,
+  };
+
+  it("persists progress for the draft author", async () => {
+    const ctx = makeCtx({
+      userId: "author-1",
+      existingDraft: { id: "draft-1", status: "DRAFT", swappedById: "author-1" } as never,
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.saveDraftProgress({ swapId: "draft-1", draftState }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+  });
+
+  it("rejects a non-author STAFF from editing the draft", async () => {
+    const ctx = makeCtx({
+      userId: "other-staff",
+      role: "STAFF",
+      existingDraft: { id: "draft-1", status: "DRAFT", swappedById: "author-1" } as never,
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.saveDraftProgress({ swapId: "draft-1", draftState }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("rejects editing a non-DRAFT swap", async () => {
+    const ctx = makeCtx({
+      userId: "author-1",
+      existingDraft: { id: "draft-1", status: "COMMITTED", swappedById: "author-1" } as never,
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.saveDraftProgress({ swapId: "draft-1", draftState }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 });

@@ -39,11 +39,14 @@ type BalanceDuePrismaLike = {
   booking: {
     findUnique: (args: {
       where: { id: string };
-      select: { balanceDue: true };
-    }) => Promise<{ balanceDue: Prisma.Decimal | number } | null>;
+      select: { balanceDue: true; amountPaid: true };
+    }) => Promise<{
+      balanceDue: Prisma.Decimal | number;
+      amountPaid: Prisma.Decimal | number;
+    } | null>;
     update: (args: {
       where: { id: string };
-      data: { balanceDue: number };
+      data: { balanceDue: number; amountPaid: number };
     }) => Promise<unknown>;
   };
 };
@@ -51,10 +54,15 @@ type BalanceDuePrismaLike = {
 const round2 = (x: number) => Math.round(x * 100) / 100;
 
 /**
- * Apply a charge capture to `Booking.balanceDue`, removing the increment
- * that was added when the charge was raised. Centralises the decrement so
- * the three capture paths (capture-pending job, bookingSettlement.captureNow,
- * the Stripe payment_intent.succeeded webhook) cannot drift.
+ * Apply a charge capture to the booking ledger: remove the amount from
+ * `balanceDue` (the increment added when the charge was raised) and add the
+ * same amount to `amountPaid` so the two stay paired. Without the amountPaid
+ * half, off-session captures (recurring long-term charges + ancillary charges
+ * settled by the capture job/webhook) silently understate collected money and
+ * skew the cancellation-credit math (`retained = amountPaid − refundAmount`).
+ * Centralises both writes so the three capture paths (capture-pending job,
+ * bookingSettlement.captureNow, the Stripe payment_intent.succeeded webhook)
+ * cannot drift.
  *
  * Idempotent and safe to over-call:
  *   - skips non-balance-affecting types (deposit / bond / refund / …),
@@ -82,14 +90,18 @@ export async function applyCaptureToBalanceDue(
 
   const booking = await db.booking.findUnique({
     where: { id: charge.bookingId },
-    select: { balanceDue: true },
+    select: { balanceDue: true, amountPaid: true },
   });
   if (!booking) return { applied: false };
 
-  const next = Math.max(0, round2(Number(booking.balanceDue) - Number(charge.amount)));
+  const amount = Number(charge.amount);
+  const next = Math.max(0, round2(Number(booking.balanceDue) - amount));
+  // Mirror the decrement onto amountPaid so collected money is always
+  // reflected, regardless of which capture path ran (job / console / webhook).
+  const nextPaid = round2(Number(booking.amountPaid) + amount);
   await db.booking.update({
     where: { id: charge.bookingId },
-    data: { balanceDue: next },
+    data: { balanceDue: next, amountPaid: nextPaid },
   });
   return { applied: true, newBalanceDue: next };
 }

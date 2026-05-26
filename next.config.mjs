@@ -165,11 +165,15 @@ const sentryBuildOptions = {
   org: process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
   authToken: process.env.SENTRY_AUTH_TOKEN,
-  disableLogger: true,
   hideSourceMaps: true,
   widenClientFileUpload: true,
-  reactComponentAnnotation: { enabled: false },
   tunnelRoute: "/monitoring",
+  webpack: {
+    // disableLogger → webpack.treeshake.removeDebugLogging (Sentry SDK move)
+    treeshake: { removeDebugLogging: true },
+    // reactComponentAnnotation → webpack.reactComponentAnnotation
+    reactComponentAnnotation: { enabled: false },
+  },
 };
 
 export default process.env.SENTRY_DSN

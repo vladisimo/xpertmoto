@@ -213,6 +213,13 @@ const STATUS_TONE_MAP = {
   AGREEMENT:             { tone: "info",     label: "Agreement" },
   ASSESSMENT:            { tone: "info",     label: "Assessment" },
   SWAP_AGREEMENT:        { tone: "neutral",  label: "Swap agreement" },
+  // Finance reconciliation row states (ReconStatus) — book ↔ Stripe matching.
+  MATCHED:               { tone: "success",  label: "Matched" },
+  AMOUNT_MISMATCH:       { tone: "danger",   label: "Amount mismatch" },
+  MISSING_IN_STRIPE:     { tone: "danger",   label: "Missing in Stripe" },
+  MISSING_IN_BOOK:       { tone: "danger",   label: "Missing in book" },
+  NON_CASH:              { tone: "neutral",  label: "Non-cash" },
+  UNLINKED:              { tone: "info",     label: "Unlinked" },
 } as const satisfies Record<string, { tone: Tone; label: string }>;
 
 export type StatusKey = keyof typeof STATUS_TONE_MAP;

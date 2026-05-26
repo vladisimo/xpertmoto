@@ -4,6 +4,13 @@ import { useState } from "react";
 import { trpc } from "@/lib/trpc/client";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
@@ -12,6 +19,7 @@ import { DepotSelect } from "@/components/admin/depot-select";
 import { ExportMenu } from "@/components/admin/export-menu";
 import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
 import { formatCurrency } from "@/lib/utils";
+import { basQuarterOf, recentBasQuarters } from "@/lib/finance/bas-quarter";
 
 type Row = {
   depotId: string;
@@ -21,11 +29,15 @@ type Row = {
 };
 
 export default function FinanceGstPage() {
-  const today = new Date();
-  const startQuarter = new Date(today.getFullYear(), Math.floor(today.getMonth() / 3) * 3, 1);
-  const [from, setFrom] = useState(startQuarter.toISOString().slice(0, 10));
-  const [to, setTo] = useState(today.toISOString().slice(0, 10));
+  // Default to the current Australian financial-year (BAS) quarter.
+  const quarters = recentBasQuarters(new Date(), 8);
+  const currentQuarter = basQuarterOf(new Date());
+  const [from, setFrom] = useState(currentQuarter.from);
+  const [to, setTo] = useState(currentQuarter.to);
   const [depotId, setDepotId] = useState<string | undefined>(undefined);
+
+  // Which preset (if any) the current From/To range matches.
+  const selectedQuarter = quarters.find((q) => q.from === from && q.to === to);
 
   const { data, isLoading } = trpc.admin.financeGst.useQuery({
     from: new Date(from + "T00:00:00.000Z"),
@@ -52,6 +64,35 @@ export default function FinanceGstPage() {
       <FinanceTabsBar />
 
       <div className="flex flex-wrap items-end gap-3 [&>div]:w-full sm:[&>div]:w-auto">
+        <div className="space-y-1">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">BAS quarter</Label>
+          <Select
+            value={selectedQuarter ? selectedQuarter.label : "__custom__"}
+            onValueChange={(label) => {
+              const q = quarters.find((x) => x.label === label);
+              if (q) {
+                setFrom(q.from);
+                setTo(q.to);
+              }
+            }}
+          >
+            <SelectTrigger className="w-full sm:w-[230px]">
+              <SelectValue placeholder="Custom range" />
+            </SelectTrigger>
+            <SelectContent>
+              {!selectedQuarter && (
+                <SelectItem value="__custom__" disabled>
+                  Custom range
+                </SelectItem>
+              )}
+              {quarters.map((q) => (
+                <SelectItem key={q.label} value={q.label}>
+                  {q.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div className="space-y-1">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">From</Label>
           <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="w-full sm:w-[160px]" />

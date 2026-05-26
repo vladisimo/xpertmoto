@@ -91,6 +91,47 @@ const inspectionPayloadSchema = z.object({
   damageMarkers: z.array(damageMarkerSchema).default([]),
 });
 
+/**
+ * Shape of the wizard's resumable state, persisted to `BookingSwap.draftState`
+ * while the swap is in DRAFT. Mirrors the client-side wizard state so a
+ * reopened draft rehydrates onto the exact step the author left off at. Kept
+ * deliberately lenient — it is replayed into React state, never trusted for
+ * the committed write (that still flows through `confirmSwap`'s own schemas).
+ */
+const swapDraftInspectionSchema = z.object({
+  odometerKm: z.string(),
+  fuelLevel: z.number(),
+  overallCondition: z.enum(["EXCELLENT", "GOOD", "FAIR", "POOR"]),
+  notes: z.string(),
+  markers: z
+    .array(
+      z.object({
+        id: z.string().optional(),
+        x: z.number(),
+        y: z.number(),
+        severity: z.enum(["MINOR", "MODERATE", "MAJOR"]),
+        note: z.string().optional(),
+        source: z.enum(["staff", "customer"]).optional(),
+        view: z.enum(["LEFT", "RIGHT", "FRONT", "REAR"]).optional(),
+        addedAt: z.string().optional(),
+      }),
+    )
+    .default([]),
+  activeSeverity: z.enum(["MINOR", "MODERATE", "MAJOR"]),
+});
+
+const swapDraftStateSchema = z.object({
+  step: z.enum(["reason", "outgoing", "select", "incoming", "review"]),
+  outgoing: swapDraftInspectionSchema,
+  incoming: swapDraftInspectionSchema,
+  incomingVehicleId: z.string(),
+  includeCrossCategory: z.boolean(),
+  customerSignatureUrl: z.string().nullable(),
+  staffSignatureUrl: z.string().nullable(),
+  incidentSeverity: z.enum(["MINOR", "MODERATE", "MAJOR", "TOTAL_LOSS"]),
+  workOrderPriority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]),
+});
+
 /** Odometer-rollback guard replicated from `inspectionRouter.create`. */
 async function assertNoOdometerRollback(
   tx: Prisma.TransactionClient | PrismaClient,
@@ -156,13 +197,22 @@ export const bookingSwapRouter = createTRPCRouter({
           id: true,
           internalCode: true,
           rego: true,
+          make: true,
+          model: true,
+          year: true,
+          colour: true,
           condition: true,
           currentOdometerKm: true,
           regoExpiry: true,
           ctpExpiry: true,
           insuranceExpiry: true,
           categoryId: true,
-          category: { select: { id: true, name: true } },
+          category: { select: { id: true, name: true, engineCapacity: true } },
+          depot: { select: { name: true } },
+          images: {
+            select: { url: true, isPrimary: true, displayOrder: true, caption: true },
+            orderBy: [{ isPrimary: "desc" }, { displayOrder: "asc" }],
+          },
         },
       });
       const candidates = await Promise.all(
@@ -183,10 +233,17 @@ export const bookingSwapRouter = createTRPCRouter({
             id: v.id,
             internalCode: v.internalCode,
             rego: v.rego,
+            make: v.make,
+            model: v.model,
+            year: v.year,
+            colour: v.colour,
             condition: v.condition,
             currentOdometerKm: v.currentOdometerKm,
             categoryId: v.categoryId,
             categoryName: v.category.name,
+            engineCapacity: v.category.engineCapacity,
+            depotName: v.depot.name,
+            images: v.images,
             isSameCategory: v.categoryId === b.categoryId,
             free,
             docsExpiringDuringRental,
@@ -342,6 +399,101 @@ export const bookingSwapRouter = createTRPCRouter({
         newData: { swapId: draft.id, reason: input.reason, origin: input.origin },
       });
       return draft;
+    }),
+
+  /**
+   * The booking's open DRAFT swap, if any. The wizard calls this on mount to
+   * resume an abandoned draft instead of starting fresh — returning the
+   * persisted reason fields plus the saved `draftState` so the UI rehydrates
+   * onto the step the author left off at. Null when no draft is open.
+   */
+  activeDraft: staffProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .query(({ ctx, input }) =>
+      ctx.prisma.bookingSwap.findFirst({
+        where: { bookingId: input.bookingId, status: "DRAFT" },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          reason: true,
+          origin: true,
+          reasonNotes: true,
+          originDetails: true,
+          draftState: true,
+          swappedById: true,
+        },
+      }),
+    ),
+
+  /**
+   * Persist the wizard's in-progress state onto an open DRAFT so it survives
+   * the staff member closing the tab mid-swap. Updates the reason fields
+   * (editable until commit) and the `draftState` blob. Author-or-manager only,
+   * and only while still a DRAFT — committed/voided swaps are immutable here.
+   * Transient bookkeeping, so no audit row.
+   */
+  saveDraftProgress: staffProcedure
+    .input(
+      z.object({
+        swapId: z.string(),
+        reason: z
+          .enum([
+            "UPGRADE",
+            "DOWNGRADE",
+            "LATERAL",
+            "MECHANICAL_FAULT",
+            "ACCIDENT_DAMAGE",
+            "OPERATIONAL",
+          ])
+          .optional(),
+        origin: z
+          .enum([
+            "CUSTOMER_WALK_IN",
+            "CUSTOMER_PHONE_SUPPORT",
+            "CUSTOMER_SELF_SERVICE",
+            "ROADSIDE_ASSIST",
+            "STAFF_OBSERVED",
+            "TELEMATICS_ALERT",
+          ])
+          .optional(),
+        reasonNotes: z.string().min(1).optional(),
+        originDetails: z.string().nullable().optional(),
+        draftState: swapDraftStateSchema.optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      const draft = await ctx.prisma.bookingSwap.findUniqueOrThrow({
+        where: { id: input.swapId },
+        select: { id: true, status: true, swappedById: true },
+      });
+      if (draft.status !== "DRAFT") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Cannot edit swap in status ${draft.status}.`,
+        });
+      }
+      if (
+        draft.swappedById !== ctx.user.id &&
+        !["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)
+      ) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only the author or a manager can edit this draft.",
+        });
+      }
+      return ctx.prisma.bookingSwap.update({
+        where: { id: draft.id },
+        data: {
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.origin !== undefined ? { origin: input.origin } : {}),
+          ...(input.reasonNotes !== undefined ? { reasonNotes: input.reasonNotes } : {}),
+          ...(input.originDetails !== undefined ? { originDetails: input.originDetails } : {}),
+          ...(input.draftState !== undefined
+            ? { draftState: input.draftState as Prisma.InputJsonValue }
+            : {}),
+        },
+      });
     }),
 
   /**

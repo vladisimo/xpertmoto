@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { VehicleMakeLogo } from "./vehicle-make-logo";
 
 export type SortKey = "odometer-asc" | "year-desc" | "make-asc";
@@ -36,6 +37,9 @@ export function VehicleFilterBar({
   colourOptions,
   resultCount,
   onClear,
+  search,
+  onSearchChange,
+  searchPlaceholder = "Search…",
 }: {
   filters: VehicleFilters;
   onChange: (next: VehicleFilters) => void;
@@ -44,7 +48,12 @@ export function VehicleFilterBar({
   colourOptions: string[];
   resultCount: number;
   onClear: () => void;
+  /** When provided, renders a leading free-text search input. */
+  search?: string;
+  onSearchChange?: (value: string) => void;
+  searchPlaceholder?: string;
 }) {
+  const hasSearch = typeof search === "string" && typeof onSearchChange === "function";
   const isFiltered =
     filters.make !== "all" ||
     filters.model !== "all" ||
@@ -57,6 +66,18 @@ export function VehicleFilterBar({
        *  row. Each select gets `min-w-0 flex-1` so they share the row
        *  evenly and truncate before pushing siblings off-screen. */}
       <div className="flex flex-row items-center gap-2">
+        {hasSearch && (
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => onSearchChange!(e.target.value)}
+              placeholder={searchPlaceholder}
+              aria-label="Search vehicles"
+              className="h-9 pl-8"
+            />
+          </div>
+        )}
         <Select
           value={filters.make}
           onValueChange={(value) => onChange({ ...filters, make: value, model: "all" })}

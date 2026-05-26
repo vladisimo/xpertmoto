@@ -79,6 +79,9 @@ export default async function StaffBookingDetail({
       returnAssessments: { orderBy: { version: "desc" }, include: { damageCharges: true } },
       bondLedger: true,
       billingPlan: true,
+      // A DRAFT swap acts as a soft lock — surface it so the swap button can
+      // offer to resume the in-progress draft rather than start a new one.
+      swaps: { where: { status: "DRAFT" }, select: { id: true }, take: 1 },
       createdBy: { select: { firstName: true, lastName: true } },
       confirmedBy: { select: { firstName: true, lastName: true } },
       checkedOutBy: { select: { firstName: true, lastName: true } },
@@ -189,6 +192,7 @@ export default async function StaffBookingDetail({
           bookingId={b.id}
           status={b.status}
           hasVehicle={!!b.vehicleId}
+          hasPendingSwap={b.swaps.length > 0}
         />
       </div>
 

@@ -696,32 +696,43 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       const parsed = parseEventObject(paymentIntentFailedSchema, obj, event.type);
       if (!parsed) return;
       const id = parsed.id;
-      const released = await prisma.bondLedger.updateMany({
+      // A cancelled PI means the bond authorisation was voided — release the
+      // full outstanding amount. The `BondLedger_terminal_state_chk` CHECK
+      // requires capturedAmount + releasedAmount == heldAmount for a RELEASED
+      // row, so releasedAmount must net out the held amount (minus anything
+      // already captured), not be hardcoded to 0. updateMany can't reference
+      // heldAmount per-row, so fetch the HELD bonds first and update each.
+      const heldBonds = await prisma.bondLedger.findFirst({
         where: { stripePaymentIntentId: id, status: "HELD" },
-        data: { status: "RELEASED", releasedAmount: new Prisma.Decimal(0) },
+        select: {
+          id: true,
+          bookingId: true,
+          customerId: true,
+          heldAmount: true,
+          capturedAmount: true,
+          booking: { select: { pickupDepot: { select: { slug: true } } } },
+        },
       });
-      if (released.count > 0) {
-        const bond = await prisma.bondLedger.findFirst({
-          where: { stripePaymentIntentId: id },
-          select: {
-            bookingId: true,
-            customerId: true,
-            heldAmount: true,
-            booking: { select: { pickupDepot: { select: { slug: true } } } },
+      if (heldBonds) {
+        await prisma.bondLedger.update({
+          where: { id: heldBonds.id },
+          data: {
+            status: "RELEASED",
+            releasedAmount: new Prisma.Decimal(heldBonds.heldAmount).minus(
+              heldBonds.capturedAmount,
+            ),
           },
         });
-        if (bond) {
-          await trackServer({
-            event: SERVER_EVENTS.bondReleased,
-            distinctId: bond.customerId,
-            properties: {
-              bookingId: bond.bookingId,
-              heldAud: Number(bond.heldAmount),
-              source: "stripe_webhook",
-            },
-            groups: { depot: bond.booking.pickupDepot.slug },
-          });
-        }
+        await trackServer({
+          event: SERVER_EVENTS.bondReleased,
+          distinctId: heldBonds.customerId,
+          properties: {
+            bookingId: heldBonds.bookingId,
+            heldAud: Number(heldBonds.heldAmount),
+            source: "stripe_webhook",
+          },
+          groups: { depot: heldBonds.booking.pickupDepot.slug },
+        });
       }
       return;
     }

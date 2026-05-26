@@ -82,3 +82,68 @@ export const POST_RENTAL_CHARGE_TYPES: ReadonlyArray<PaymentType> = [
 export function isPostRentalCharge(t: PaymentType): boolean {
   return POST_RENTAL_CHARGE_TYPES.includes(t);
 }
+
+/**
+ * Payment types that move real money OUT of the business. Every
+ * `Payment.amount` is stored as a positive Decimal — the direction lives in
+ * the `type`, not the sign — so any cash/revenue total that sums amounts must
+ * apply this sign or it double-counts refunds as income.
+ *
+ * Intentionally broader than the invoice-document `DECREASE_TYPES`
+ * ({REFUND, MANUAL_CREDIT}) in invoice-generate.ts: a partner payout never
+ * touches a customer invoice, but it does send cash out, so on a finance
+ * ledger it belongs here.
+ *
+ * GIFT_CARD_REDEMPTION is left as an inflow for now — its funding cash was
+ * already booked at GIFT_CARD_PURCHASE; revisit if redemptions start
+ * double-counting against booking payments.
+ */
+export const PAYMENT_OUTFLOW_TYPES: ReadonlySet<PaymentType> = new Set<PaymentType>([
+  "REFUND",
+  "MANUAL_CREDIT",
+  "PARTNER_COMMISSION_PAYOUT",
+]);
+
+/**
+ * Bond hold/release are Stripe *authorisations* (capture_method=manual), not
+ * cash: a hold places a temporary authorisation on the customer's card and a
+ * release cancels it — neither moves money through the business's account. So
+ * they carry ZERO weight on a cash/revenue total. (The hold isn't even
+ * written as a Payment row — it lives only in BondLedger — so a release would
+ * otherwise show up as a lone, unmatched outflow and skew the net.)
+ *
+ * BOND_CAPTURE is deliberately NOT here: capturing a held bond (damage /
+ * no-show) is the moment authorised funds become real money in.
+ */
+export const PAYMENT_NONCASH_TYPES: ReadonlySet<PaymentType> = new Set<PaymentType>([
+  "BOND_HOLD",
+  "BOND_RELEASE",
+]);
+
+/** True for bond authorisations (hold/release) — shown as rows but excluded from any cash total. */
+export function isNonCashPayment(t: PaymentType): boolean {
+  return PAYMENT_NONCASH_TYPES.has(t);
+}
+
+/**
+ * Weight of a payment on a cash/revenue total: +1 money in, -1 money out,
+ * 0 for non-cash bond authorisations. Use this — never a plain SUM — whenever
+ * summing `Payment.amount` or `Payment.gstAmount` into a net figure.
+ */
+export function paymentNetWeight(t: PaymentType): -1 | 0 | 1 {
+  if (PAYMENT_NONCASH_TYPES.has(t)) return 0;
+  return PAYMENT_OUTFLOW_TYPES.has(t) ? -1 : 1;
+}
+
+/**
+ * Amount for display: negative for cash outflows (refunds/credits/payouts),
+ * positive magnitude for inflows and for non-cash bond rows (which read as a
+ * neutral "$300 released" line, and are excluded from totals via
+ * `paymentNetWeight`). Callers that sum into a net MUST weight by
+ * `paymentNetWeight`, not by this value.
+ */
+export function signedPaymentAmount(t: PaymentType, amount: number): number {
+  if (PAYMENT_NONCASH_TYPES.has(t)) return amount;
+  // `+ 0` normalises -0 (from negating a zero amount) so it formats as "$0.00".
+  return (PAYMENT_OUTFLOW_TYPES.has(t) ? -amount : amount) + 0;
+}

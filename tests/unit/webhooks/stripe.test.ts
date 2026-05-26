@@ -7,6 +7,7 @@ const bookingFindMany = vi.fn().mockResolvedValue([]);
 const bookingFindUnique = vi.fn().mockResolvedValue(null);
 const bookingUpdate = vi.fn().mockResolvedValue({});
 const bondUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+const bondUpdate = vi.fn().mockResolvedValue({});
 const bondFindFirst = vi.fn().mockResolvedValue(null);
 const trackServerMock = vi.fn().mockResolvedValue(undefined);
 const profileUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -32,7 +33,7 @@ vi.mock("@/lib/prisma", () => ({
       findMany: paymentFindMany,
     },
     booking: { findMany: bookingFindMany, findUnique: bookingFindUnique, update: bookingUpdate },
-    bondLedger: { updateMany: bondUpdateMany, findFirst: bondFindFirst },
+    bondLedger: { updateMany: bondUpdateMany, update: bondUpdate, findFirst: bondFindFirst },
     customerProfile: { updateMany: profileUpdateMany },
     incident: { findFirst: incidentFindFirst, create: incidentCreate },
     user: { findMany: userFindMany },
@@ -83,6 +84,8 @@ beforeEach(() => {
   bookingFindUnique.mockResolvedValue(null);
   bookingUpdate.mockClear();
   bondUpdateMany.mockClear();
+  bondUpdate.mockClear();
+  bondUpdate.mockResolvedValue({});
   profileUpdateMany.mockClear();
   incidentFindFirst.mockClear();
   incidentFindFirst.mockResolvedValue(null);
@@ -139,7 +142,7 @@ describe("Stripe webhook", () => {
         status: "PENDING",
       })
       .mockResolvedValueOnce(null);
-    bookingFindUnique.mockResolvedValueOnce({ balanceDue: 904.97 });
+    bookingFindUnique.mockResolvedValueOnce({ balanceDue: 904.97, amountPaid: 100 });
     constructMock.mockResolvedValue({
       id: "evt_cap",
       type: "payment_intent.succeeded",
@@ -148,9 +151,10 @@ describe("Stripe webhook", () => {
 
     const res = await post({});
     expect(res.status).toBe(200);
+    // balanceDue 904.97 − 854.97 = 50; amountPaid 100 + 854.97 = 954.97.
     expect(bookingUpdate).toHaveBeenCalledWith({
       where: { id: "b1" },
-      data: { balanceDue: 50 },
+      data: { balanceDue: 50, amountPaid: 954.97 },
     });
   });
 
@@ -272,11 +276,12 @@ describe("Stripe webhook", () => {
   });
 
   it("emits bond.released when a held bond is cancelled", async () => {
-    bondUpdateMany.mockResolvedValueOnce({ count: 1 });
     bondFindFirst.mockResolvedValueOnce({
+      id: "bond_1",
       bookingId: "b1",
       customerId: "cust_1",
       heldAmount: 500,
+      capturedAmount: 0,
       booking: { pickupDepot: { slug: "brisbane-cbd" } },
     });
     constructMock.mockResolvedValue({
@@ -290,15 +295,43 @@ describe("Stripe webhook", () => {
     );
   });
 
+  it("releases the full held amount (not 0) so the terminal-state CHECK holds", async () => {
+    // Regression: the canceled handler used to hardcode releasedAmount: 0,
+    // which violates BondLedger_terminal_state_chk (captured + released must
+    // equal held for a RELEASED row). Release must net out the held amount.
+    bondFindFirst.mockResolvedValueOnce({
+      id: "bond_1",
+      bookingId: "b1",
+      customerId: "cust_1",
+      heldAmount: 300,
+      capturedAmount: 0,
+      booking: { pickupDepot: { slug: "brisbane-cbd" } },
+    });
+    constructMock.mockResolvedValue({
+      id: "evt_pi_cancel_amount",
+      type: "payment_intent.canceled",
+      data: { object: { id: "pi_bond" } },
+    });
+    await post({});
+    expect(bondUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "bond_1" },
+        data: expect.objectContaining({ status: "RELEASED" }),
+      }),
+    );
+    const releasedArg = bondUpdate.mock.calls[0]?.[0]?.data?.releasedAmount;
+    expect(Number(releasedArg)).toBe(300);
+  });
+
   it("does not emit bond.released when no held bond was cancelled", async () => {
-    bondUpdateMany.mockResolvedValueOnce({ count: 0 });
+    bondFindFirst.mockResolvedValueOnce(null);
     constructMock.mockResolvedValue({
       id: "evt_pi_cancel_noop",
       type: "payment_intent.canceled",
       data: { object: { id: "pi_bond" } },
     });
     await post({});
-    expect(bondFindFirst).not.toHaveBeenCalled();
+    expect(bondUpdate).not.toHaveBeenCalled();
     expect(trackServerMock).not.toHaveBeenCalled();
   });
 

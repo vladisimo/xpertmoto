@@ -9,6 +9,9 @@ vi.mock("../../../src/lib/prisma", () => ({
     payment: {
       create: vi.fn(),
     },
+    booking: {
+      update: vi.fn(),
+    },
     $transaction: vi.fn(),
   },
 }));
@@ -20,6 +23,7 @@ type MockFn = ReturnType<typeof vi.fn>;
 const mockedFindMany = prisma.bookingBillingPlan.findMany as unknown as MockFn;
 const mockedUpdate = prisma.bookingBillingPlan.update as unknown as MockFn;
 const mockedPaymentCreate = prisma.payment.create as unknown as MockFn;
+const mockedBookingUpdate = prisma.booking.update as unknown as MockFn;
 const mockedTx = prisma.$transaction as unknown as MockFn;
 
 function makePlan(overrides: Partial<{
@@ -102,6 +106,19 @@ describe("runBookingBilling", () => {
     expect(new Date(updateArgs.data.nextChargeAt).toISOString()).toBe(
       expectedNext.toISOString(),
     );
+  });
+
+  it("never touches Booking.balanceDue when enqueuing a charge (F2 regression)", async () => {
+    // The full recurring balance is pre-loaded into balanceDue at confirmation;
+    // this job must only create the PENDING Payment and advance the plan.
+    // Incrementing balanceDue here would double-count — applyCaptureToBalanceDue
+    // is the sole place the recurring balance is netted out, on capture.
+    const plan = makePlan();
+    mockedFindMany.mockResolvedValue([plan]);
+    await runBookingBilling({ now: new Date("2026-04-17T11:00:00Z") });
+
+    expect(mockedPaymentCreate).toHaveBeenCalledOnce();
+    expect(mockedBookingUpdate).not.toHaveBeenCalled();
   });
 
   it("marks the plan COMPLETED after the last recurring period fires", async () => {

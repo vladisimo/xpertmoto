@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { isNonCashPayment, paymentTypeLabel, signedPaymentAmount } from "@/lib/payment-labels";
+import { reconcilePayments } from "@/server/services/finance-reconciliation";
+import { computeGstSummary } from "@/server/services/gst-bas-export";
+import {
+  netCashByBooking,
+  reconcileInvoice,
+} from "@/lib/finance/invoice-reconciliation";
 import type { ColumnDef, ExportFilter, ExportMeta } from "./index";
 import { DEFAULT_BRAND } from "./index";
 
@@ -194,17 +201,23 @@ const financeTransactions: ReportRegistration<z.infer<typeof baseInput>, Transac
       },
       orderBy: { createdAt: "desc" },
     });
-    const rows: TransactionRow[] = payments.map((p) => ({
-      reference: p.reference,
-      createdAt: p.createdAt,
-      type: p.type,
-      method: p.method,
-      status: p.status,
-      amount: Number(p.amount),
-      gst: Number(p.gstAmount),
-      bookingReference: p.booking?.bookingReference ?? "",
-      customer: p.customer ? `${p.customer.firstName} ${p.customer.lastName}` : "",
-    }));
+    // Sign by direction so refunds subtract — the "sum" footer auto-sums this
+    // column, so signing keeps it a true cash net matching the on-screen view.
+    // Bond holds/releases are authorisations, not cash; they'd corrupt that
+    // footer (and have their own Bonds report), so they're excluded here.
+    const rows: TransactionRow[] = payments
+      .filter((p) => !isNonCashPayment(p.type))
+      .map((p) => ({
+        reference: p.reference,
+        createdAt: p.createdAt,
+        type: p.type,
+        method: p.method,
+        status: p.status,
+        amount: signedPaymentAmount(p.type, Number(p.amount)),
+        gst: signedPaymentAmount(p.type, Number(p.gstAmount)),
+        bookingReference: p.booking?.bookingReference ?? "",
+        customer: p.customer ? `${p.customer.firstName} ${p.customer.lastName}` : "",
+      }));
     const depotName = await resolveDepotName(input.depotId);
     return {
       rows,
@@ -225,15 +238,18 @@ const financeTransactions: ReportRegistration<z.infer<typeof baseInput>, Transac
 interface InvoiceRow {
   invoiceNumber: string;
   status: string;
+  bookingStatus: string;
   customer: string;
   bookingReference: string;
   subtotal: number;
   gstAmount: number;
   totalAmount: number;
-  creditNoteTotal: number;
+  adjustmentTotal: number;
+  netTotal: number;
+  collected: number;
+  outstanding: number;
   dueDate: Date | null;
   sentAt: Date | null;
-  paidAt: Date | null;
 }
 
 const invoiceColumns: ColumnDef<InvoiceRow>[] = [
@@ -243,11 +259,14 @@ const invoiceColumns: ColumnDef<InvoiceRow>[] = [
   { key: "subtotal", header: "Subtotal", format: "currency", width: 12, footer: "sum" },
   { key: "gstAmount", header: "GST", format: "currency", width: 10, footer: "sum" },
   { key: "totalAmount", header: "Total", format: "currency", width: 12, footer: "sum" },
-  { key: "creditNoteTotal", header: "Credited", format: "currency", width: 12, footer: "sum" },
+  { key: "adjustmentTotal", header: "Adjustments", format: "currency", width: 12, footer: "sum" },
+  { key: "netTotal", header: "Net", format: "currency", width: 12, footer: "sum" },
+  { key: "collected", header: "Collected", format: "currency", width: 12, footer: "sum" },
+  { key: "outstanding", header: "Outstanding", format: "currency", width: 12, footer: "sum" },
   { key: "status", header: "Status", width: 10 },
+  { key: "bookingStatus", header: "Booking", width: 12 },
   { key: "dueDate", header: "Due", format: "date", width: 12 },
   { key: "sentAt", header: "Sent", format: "datetime", width: 16 },
-  { key: "paidAt", header: "Paid", format: "datetime", width: 16 },
 ];
 
 const financeInvoices: ReportRegistration<z.infer<typeof baseInput>, InvoiceRow> = {
@@ -265,28 +284,76 @@ const financeInvoices: ReportRegistration<z.infer<typeof baseInput>, InvoiceRow>
         booking: {
           select: {
             bookingReference: true,
+            status: true,
+            balanceDue: true,
             customer: { select: { firstName: true, lastName: true } },
           },
         },
-        creditNotes: { select: { amount: true } },
+        adjustmentNotes: {
+          where: { status: { not: "VOID" }, deletedAt: null },
+          select: { type: true, totalAmount: true },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
-    const rows: InvoiceRow[] = invoices.map((i) => ({
-      invoiceNumber: i.invoiceNumber,
-      status: i.status,
-      customer: i.booking?.customer
-        ? `${i.booking.customer.firstName} ${i.booking.customer.lastName}`
-        : "",
-      bookingReference: i.booking?.bookingReference ?? "",
-      subtotal: Number(i.subtotal),
-      gstAmount: Number(i.gstAmount),
-      totalAmount: Number(i.totalAmount),
-      creditNoteTotal: i.creditNotes.reduce((a, c) => a + Number(c.amount), 0),
-      dueDate: i.dueDate,
-      sentAt: i.sentAt,
-      paidAt: i.paidAt,
-    }));
+    // Same reconciliation basis as the financeInvoices tRPC query: net cash
+    // from the Payment ledger (weighted) plus the adjustment-note delta.
+    // Payments fetched all-time for these bookings, not date-filtered.
+    const bookingIds = [
+      ...new Set(invoices.map((i) => i.bookingId).filter((id): id is string => !!id)),
+    ];
+    const paymentGroups = bookingIds.length
+      ? await prisma.payment.groupBy({
+          by: ["bookingId", "type"],
+          // Settled-cash statuses: a PARTIALLY_REFUNDED / REFUNDED original
+          // still counts as cash collected (refund is its own weighted row).
+          where: {
+            bookingId: { in: bookingIds },
+            status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"] },
+          },
+          _sum: { amount: true },
+        })
+      : [];
+    const netByBooking = netCashByBooking(
+      paymentGroups.map((g) => ({
+        bookingId: g.bookingId,
+        type: g.type,
+        amount: Number(g._sum.amount ?? 0),
+      })),
+    );
+    const rows: InvoiceRow[] = invoices.map((i) => {
+      const recon = reconcileInvoice(
+        {
+          bookingId: i.bookingId,
+          bookingStatus: i.booking?.status ?? null,
+          balanceDue: i.booking ? Number(i.booking.balanceDue) : null,
+          totalAmount: Number(i.totalAmount),
+          adjustments: i.adjustmentNotes.map((a) => ({
+            type: a.type,
+            totalAmount: Number(a.totalAmount),
+          })),
+        },
+        netByBooking,
+      );
+      return {
+        invoiceNumber: i.invoiceNumber,
+        status: i.status,
+        bookingStatus: i.booking?.status ?? "",
+        customer: i.booking?.customer
+          ? `${i.booking.customer.firstName} ${i.booking.customer.lastName}`
+          : "",
+        bookingReference: i.booking?.bookingReference ?? "",
+        subtotal: Number(i.subtotal),
+        gstAmount: Number(i.gstAmount),
+        totalAmount: Number(i.totalAmount),
+        adjustmentTotal: recon.adjustmentTotal,
+        netTotal: recon.netTotal,
+        collected: recon.collected,
+        outstanding: recon.outstanding,
+        dueDate: i.dueDate,
+        sentAt: i.sentAt,
+      };
+    });
     const depotName = await resolveDepotName(input.depotId);
     return {
       rows,
@@ -394,31 +461,18 @@ const financeGst: ReportRegistration<z.infer<typeof baseInput>, GstRow> = {
   inputSchema: baseInput,
   allowedRoles: ["ADMIN", "SUPER_ADMIN"],
   async fetch(_ctx, input) {
-    const where: Record<string, unknown> = {
-      createdAt: { gte: input.from, lte: input.to },
-      status: { notIn: ["CANCELLED", "NO_SHOW"] },
-    };
-    if (input.depotId) where.depotId = input.depotId;
-    const byDepotRaw = await prisma.booking.groupBy({
-      by: ["depotId"],
-      where: where as never,
-      _sum: { totalAmount: true, gstAmount: true },
+    // Payment-ledger basis, shared with the GST/BAS page (admin.financeGst).
+    const summary = await computeGstSummary({
+      from: input.from,
+      to: input.to,
+      depotId: input.depotId,
     });
-    const depots = await prisma.depot.findMany({
-      where: { id: { in: byDepotRaw.map((d) => d.depotId) } },
-      select: { id: true, name: true },
-    });
-    const nameOf = new Map(depots.map((d) => [d.id, d.name]));
-    const rows: GstRow[] = byDepotRaw.map((d) => {
-      const revenueInc = Number(d._sum.totalAmount ?? 0);
-      const gst = Number(d._sum.gstAmount ?? 0);
-      return {
-        depotName: nameOf.get(d.depotId) ?? "Unknown",
-        revenueInc,
-        revenueEx: revenueInc - gst,
-        gst,
-      };
-    });
+    const rows: GstRow[] = summary.byDepot.map((d) => ({
+      depotName: d.depotName,
+      revenueInc: d.revenue,
+      revenueEx: d.revenue - d.gst,
+      gst: d.gst,
+    }));
     const depotName = await resolveDepotName(input.depotId);
     return {
       rows,
@@ -437,20 +491,33 @@ const financeGst: ReportRegistration<z.infer<typeof baseInput>, GstRow> = {
 // ---------------------------------------------------------------------------
 
 interface ReconciliationRow {
-  bucket: string;
-  stripeGross: number;
-  bookGross: number;
-  refunds: number;
-  variance: number;
+  reference: string;
+  type: string;
+  status: string;
+  stripeChargeId: string;
+  bookingReference: string;
+  bookAmount: number | null;
+  stripeAmount: number | null;
 }
 
 const reconColumns: ColumnDef<ReconciliationRow>[] = [
-  { key: "bucket", header: "Source", width: 20 },
-  { key: "stripeGross", header: "Stripe gross", format: "currency", width: 14, footer: "sum" },
-  { key: "bookGross", header: "Book gross", format: "currency", width: 14, footer: "sum" },
-  { key: "refunds", header: "Refunds", format: "currency", width: 12, footer: "sum" },
-  { key: "variance", header: "Variance", format: "currency", width: 12, footer: "sum" },
+  { key: "reference", header: "Reference", width: 18 },
+  { key: "type", header: "Type", width: 16 },
+  { key: "status", header: "Status", width: 18 },
+  { key: "stripeChargeId", header: "Stripe reference", width: 24 },
+  { key: "bookingReference", header: "Booking", width: 16 },
+  { key: "bookAmount", header: "Book", format: "currency", width: 12, footer: "sum" },
+  { key: "stripeAmount", header: "Stripe", format: "currency", width: 12, footer: "sum" },
 ];
+
+const RECON_STATUS_LABEL: Record<string, string> = {
+  MATCHED: "Matched",
+  AMOUNT_MISMATCH: "Amount mismatch",
+  MISSING_IN_STRIPE: "Missing in Stripe",
+  MISSING_IN_BOOK: "Missing in book",
+  NON_CASH: "Non-cash",
+  UNLINKED: "Unlinked",
+};
 
 const financeReconciliation: ReportRegistration<z.infer<typeof baseInput>, ReconciliationRow> = {
   id: "finance.reconciliation",
@@ -459,44 +526,29 @@ const financeReconciliation: ReportRegistration<z.infer<typeof baseInput>, Recon
   inputSchema: baseInput,
   allowedRoles: ["ADMIN", "SUPER_ADMIN"],
   async fetch(_ctx, input) {
-    const whereSt: Record<string, unknown> = {
-      createdAt: { gte: input.from, lte: input.to },
-      status: "SUCCEEDED",
-      stripeChargeId: { not: null },
-    };
-    const whereAll: Record<string, unknown> = {
-      createdAt: { gte: input.from, lte: input.to },
-      status: "SUCCEEDED",
-    };
-    if (input.depotId) {
-      whereSt.booking = { depotId: input.depotId };
-      whereAll.booking = { depotId: input.depotId };
-    }
-    const [stripe, book, refunds] = await Promise.all([
-      prisma.payment.aggregate({ where: whereSt as never, _sum: { amount: true } }),
-      prisma.payment.aggregate({ where: whereAll as never, _sum: { amount: true } }),
-      prisma.payment.aggregate({
-        where: { type: "REFUND", createdAt: { gte: input.from, lte: input.to } },
-        _sum: { amount: true },
-      }),
-    ]);
-    const stripeGross = Number(stripe._sum.amount ?? 0);
-    const bookGross = Number(book._sum.amount ?? 0);
-    const rows: ReconciliationRow[] = [
-      {
-        bucket: "Period total",
-        stripeGross,
-        bookGross,
-        refunds: Number(refunds._sum.amount ?? 0),
-        variance: bookGross - stripeGross,
-      },
-    ];
+    // Exports run server-side (typically prod) → read the Stripe mirror as
+    // maintained by the nightly stripe-reconcile job; never refresh live here.
+    const report = await reconcilePayments({
+      from: input.from,
+      to: input.to,
+      depotId: input.depotId,
+      live: false,
+    });
+    const rows: ReconciliationRow[] = report.rows.map((r) => ({
+      reference: r.reference ?? (r.stripeChargeId ?? "—"),
+      type: r.type ? paymentTypeLabel(r.type) : "Stripe charge",
+      status: RECON_STATUS_LABEL[r.status] ?? r.status,
+      stripeChargeId: r.stripeChargeId ?? "",
+      bookingReference: r.bookingReference ?? "",
+      bookAmount: r.bookAmount,
+      stripeAmount: r.stripeAmount,
+    }));
     const depotName = await resolveDepotName(input.depotId);
     return {
       rows,
       meta: {
         title: "Reconciliation",
-        subtitle: `Stripe vs book-side`,
+        subtitle: `${report.summary.matchedCount} matched · ${report.summary.unmatchedCount} unmatched · variance ${report.summary.variance.toFixed(2)}`,
         filters: dateRangeFilters(input.from, input.to, depotName),
         brand: DEFAULT_BRAND,
       },

@@ -398,18 +398,35 @@ export default async function WhyXpertPage() {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <SnapSection className="space-y-3">
-        <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
-          Platform comparison · Scooter & motorbike hire (Australia)
-        </p>
-        <h1 className="h-display">Why {siteName}</h1>
-        <p className="max-w-3xl text-muted-foreground">
-          One Australian-built platform replacing Shopify, eFleetPass and a
-          third-party helpdesk — plus AI, analytics, GST and ABN-compliant
-          invoicing, and a built-in toll and infringement workflow that turns
-          a recurring cost line into a revenue line.
-        </p>
-      </SnapSection>
+      <div className="pointer-events-none fixed inset-y-0 left-0 z-20 hidden w-[22rem] items-center justify-center overflow-hidden lg:flex">
+        <div className="w-[80svh] shrink-0 origin-center -rotate-90 space-y-3 px-2">
+          <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
+            Platform comparison · Scooter & motorbike hire (Australia)
+          </p>
+          <h1 className="h-display">Why {siteName}</h1>
+          <p className="text-muted-foreground">
+            One Australian-built platform replacing Shopify, eFleetPass and a
+            third-party helpdesk — plus AI, analytics, GST and ABN-compliant
+            invoicing, and a built-in toll and infringement workflow that turns
+            a recurring cost line into a revenue line.
+          </p>
+        </div>
+      </div>
+
+      <div className="lg:hidden">
+        <SnapSection className="space-y-3">
+          <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
+            Platform comparison · Scooter & motorbike hire (Australia)
+          </p>
+          <h1 className="h-display">Why {siteName}</h1>
+          <p className="max-w-3xl text-muted-foreground">
+            One Australian-built platform replacing Shopify, eFleetPass and a
+            third-party helpdesk — plus AI, analytics, GST and ABN-compliant
+            invoicing, and a built-in toll and infringement workflow that turns
+            a recurring cost line into a revenue line.
+          </p>
+        </SnapSection>
+      </div>
 
       <SnapSection className="space-y-4">
         <DividedTitle>Current stack vs. {siteName}</DividedTitle>
@@ -774,23 +791,6 @@ export default async function WhyXpertPage() {
         </div>
       </SnapSection>
 
-      <SnapSection className="space-y-3">
-        <DividedTitle>The headline numbers</DividedTitle>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            { label: "Data models", value: "117" },
-            { label: "Typed API routers", value: "44" },
-            { label: "Branded email templates", value: "27" },
-            { label: "Background jobs", value: "BullMQ" },
-          ].map((s) => (
-            <div key={s.label} className="rounded-md border border-border bg-card p-4">
-              <div className="text-3xl font-semibold tabular-nums text-foreground">{s.value}</div>
-              <div className="caption mt-1 text-muted-foreground">{s.label}</div>
-            </div>
-          ))}
-        </div>
-      </SnapSection>
-
       <SnapSection>
         <IntegrationsGrid siteName={siteName} />
       </SnapSection>
@@ -800,17 +800,17 @@ export default async function WhyXpertPage() {
         <FaqList items={faqItems} />
       </SnapSection>
 
-      <SnapSection className="text-xs text-muted-foreground">
-        <p>
+      <div className="pointer-events-none fixed inset-y-0 right-0 z-20 hidden w-[18rem] items-center justify-center overflow-hidden lg:flex">
+        <p className="w-[80svh] shrink-0 origin-center rotate-90 px-2 text-xs leading-relaxed text-muted-foreground">
           {siteName} is a dFortix.ai deployment operated by {legalName}
           {abn ? ` (ABN ${abn})` : ""}. Platform technology by Mercury Road
           Equipment Pty Ltd (ABN 36 614 422 187). All AUD figures GST-inclusive
           and indicative — final quote on signed proposal. Statutory NSW toll
-          amounts are set by the operator (Transurban / Linkt or NSW
-          Government) and adjusted quarterly; the {siteName} platform passes
-          them through at face value and never marks them up.
+          amounts are set by the operator (Transurban / Linkt or NSW Government)
+          and adjusted quarterly; the {siteName} platform passes them through at
+          face value and never marks them up.
         </p>
-      </SnapSection>
+      </div>
     </div>
   );
 }

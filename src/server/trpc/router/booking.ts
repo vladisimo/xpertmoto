@@ -11,6 +11,7 @@ import {
   quote as quotePricing,
   quoteExtension,
   OneWayDisallowedError,
+  MinimumRentalPeriodError,
 } from "@/server/services/pricing";
 import {
   countAvailable,
@@ -47,6 +48,7 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { trackServer } from "@/lib/analytics";
+import { gstFromInclusive } from "@/lib/money";
 import { generateBookingReference, withUniqueRetry } from "@/lib/id-gen";
 import { applyReferral } from "@/server/services/referral";
 import { attachByTrackingCode } from "@/server/services/partner";
@@ -254,7 +256,10 @@ export const bookingRouter = createTRPCRouter({
             },
           }),
           ctx.prisma.bookingSwap.findMany({
-            where: { bookingId: booking.id, deletedAt: null },
+            // Only committed swaps produce an agreement document. DRAFT (still
+            // in the wizard) and VOIDED (cancelled) swaps have no document and
+            // must not show up as phantom "Pending" rows.
+            where: { bookingId: booking.id, deletedAt: null, status: "COMMITTED" },
             select: {
               id: true,
               swappedAt: true,
@@ -468,7 +473,15 @@ export const bookingRouter = createTRPCRouter({
         deliveryFee: input.deliveryFee ?? 0,
       });
     } catch (err) {
-      if (err instanceof OneWayDisallowedError) {
+      // Pricing-cascade validation outcomes (one-way not allowed, vehicle's
+      // minimum-rental period not met) are normal customer-input rejections,
+      // not server faults. Surface them as BAD_REQUEST so the wizard can show
+      // the message — leaving them to escape turns a 1-day-on-a-2-day-minimum
+      // bike into a 500 and a Sentry exception (see MIN_RENTAL_PERIOD noise).
+      if (
+        err instanceof OneWayDisallowedError ||
+        err instanceof MinimumRentalPeriodError
+      ) {
         throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
       }
       throw err;
@@ -608,7 +621,10 @@ export const bookingRouter = createTRPCRouter({
           deliveryFee: input.deliveryFee ?? 0,
         });
       } catch (err) {
-        if (err instanceof OneWayDisallowedError) {
+        if (
+          err instanceof OneWayDisallowedError ||
+          err instanceof MinimumRentalPeriodError
+        ) {
           throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
         }
         throw err;
@@ -1014,8 +1030,9 @@ export const bookingRouter = createTRPCRouter({
             const nextChargeAt = new Date(
               booking.pickupDateTime.getTime() + periodDays * 24 * 60 * 60 * 1000,
             );
-            // Per-period GST is recurringAmount / 11 (GST-inclusive).
-            const perPeriodGst = Math.round((snapshot.recurringAmount / 11) * 100) / 100;
+            // Per-period GST is recurringAmount / 11 (GST-inclusive) — via the
+            // shared money utility, never an inline divide-by-11.
+            const perPeriodGst = gstFromInclusive(snapshot.recurringAmount).toNumber();
             await tx.bookingBillingPlan.upsert({
               where: { bookingId: booking.id },
               update: {},

@@ -2014,6 +2014,13 @@ model BookingSwap {
   // Set when the new category's bond amount differs from the old — we do
   // NOT resize the Stripe hold; we surface the variance here for audit.
   bondVarianceAmount       Decimal?           @db.Decimal(10, 2)
+  // Wizard resume state while status == DRAFT. Holds the staff member's
+  // in-progress, not-yet-committed inputs (current step, outgoing/incoming
+  // inspection drafts, chosen replacement vehicle, signatures, severities)
+  // so an abandoned-then-reopened swap lands back where it was left. Null
+  // once committed — the authoritative data then lives in the real columns
+  // and the linked Inspection rows.
+  draftState               Json?
   status                   BookingSwapStatus  @default(DRAFT)
   createdAt                DateTime           @default(now())
   updatedAt                DateTime           @updatedAt
@@ -4027,19 +4034,24 @@ model PaymentEvent {
 // ============================================================================
 
 model StripeFeeLedger {
-  id                  String    @id @default(cuid())
-  stripeChargeId      String    @unique
-  stripePayoutId      String?
-  feeType             String
-  feeAmountCents      Int
-  netAmountCents      Int
-  currency            String    @default("aud")
-  balanceTxnCreatedAt DateTime
-  payoutArrivedAt     DateTime?
-  createdAt           DateTime  @default(now())
+  id                    String    @id @default(cuid())
+  stripeChargeId        String    @unique
+  // Payment-intent the charge belongs to. Lets reconciliation join a Payment
+  // that only carries a payment-intent id (charge id not yet backfilled by the
+  // payment_intent.succeeded webhook) to its Stripe charge.
+  stripePaymentIntentId String?
+  stripePayoutId        String?
+  feeType               String
+  feeAmountCents        Int
+  netAmountCents        Int
+  currency              String    @default("aud")
+  balanceTxnCreatedAt   DateTime
+  payoutArrivedAt       DateTime?
+  createdAt             DateTime  @default(now())
 
   @@index([stripePayoutId])
   @@index([balanceTxnCreatedAt])
+  @@index([stripePaymentIntentId])
 }
 
 // ============================================================================
