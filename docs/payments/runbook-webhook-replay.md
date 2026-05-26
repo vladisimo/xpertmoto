@@ -30,7 +30,7 @@ If last event > 30 min ago AND there was traffic on Stripe (check https://dashbo
 
 - Check firewall / WAF hasn't blocked `api.stripe.com` inbound path.
 - Verify endpoint health: `curl -I https://<prod-host>/api/webhooks/stripe` → 405 expected (POST only).
-- Check `SystemSetting.integration:stripe:webhookSecret` is set; if null, endpoint returns 503 and Stripe will retry.
+- Check the `STRIPE_WEBHOOK_SECRET` env var is set; if missing, endpoint returns 503 and Stripe will retry.
 
 ### 2. Has a specific event failed?
 

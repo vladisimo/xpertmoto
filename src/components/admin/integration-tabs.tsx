@@ -4,8 +4,6 @@ import { useState } from "react";
 import type { inferRouterOutputs } from "@trpc/server";
 import { trpc } from "@/lib/trpc/client";
 import type { AppRouter } from "@/server/trpc/router";
-import { INTEGRATION_SERVICES } from "@/lib/integration-fields";
-import { IntegrationConfigEditor } from "@/components/admin/integration-config-editor";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,6 +83,32 @@ function KV({ label, value, muted }: { label: string; value: React.ReactNode; mu
   );
 }
 
+/**
+ * Credentials are configured via environment variables only — there is no
+ * in-app editor. This note tells admins which env vars back a given service so
+ * they know what to set on the host / in the deployment secrets.
+ */
+function EnvCredentialsNote({ envVars }: { envVars: string[] }) {
+  return (
+    <Card>
+      <CardContent className="p-4 text-sm">
+        <p className="text-muted-foreground">
+          Credentials are read from environment variables — set them in your
+          deployment&apos;s <code>.env</code> / secrets, then restart. There is
+          no in-app editor.
+        </p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {envVars.map((v) => (
+            <code key={v} className="rounded bg-muted px-1.5 py-0.5 text-xs">
+              {v}
+            </code>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function stripeLevel(o: Overview): StatusLevel {
   return o.stripe.configured ? (o.stripe.webhookConfigured ? "ok" : "partial") : "off";
 }
@@ -160,10 +184,6 @@ export function IntegrationsTabOverview({ overview }: { overview: Overview }) {
   );
 }
 
-function fieldsFor(serviceId: string) {
-  return INTEGRATION_SERVICES.find((s) => s.id === serviceId)?.fields ?? [];
-}
-
 export function IntegrationsTabPayments({ overview }: { overview: Overview }) {
   return (
     <div className="space-y-4">
@@ -180,13 +200,7 @@ export function IntegrationsTabPayments({ overview }: { overview: Overview }) {
           </p>
         </IntegrationCard>
       </div>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">Credentials</h3>
-        <p className="text-xs text-muted-foreground mb-2">
-          Storing Stripe secrets in the database is higher-risk than env vars — changes are audit-logged. SUPER_ADMIN only.
-        </p>
-        <IntegrationConfigEditor fields={fieldsFor("stripe")} serviceId="stripe" />
-      </div>
+      <EnvCredentialsNote envVars={["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"]} />
     </div>
   );
 }
@@ -213,14 +227,16 @@ export function IntegrationsTabMessaging({ overview }: { overview: Overview }) {
           <div><div className="text-xs text-muted-foreground">Failed (7 days)</div><div className="text-2xl font-semibold text-destructive">{overview.notifications.failedLast7d}</div></div>
         </CardContent>
       </Card>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">Twilio credentials</h3>
-        <IntegrationConfigEditor fields={fieldsFor("twilio")} serviceId="twilio" />
-      </div>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">Resend credentials</h3>
-        <IntegrationConfigEditor fields={fieldsFor("resend")} serviceId="resend" />
-      </div>
+      <EnvCredentialsNote
+        envVars={[
+          "TWILIO_ACCOUNT_SID",
+          "TWILIO_AUTH_TOKEN",
+          "TWILIO_FROM_NUMBER",
+          "RESEND_API_KEY",
+          "RESEND_WEBHOOK_SECRET",
+          "EMAIL_FROM",
+        ]}
+      />
     </div>
   );
 }
@@ -257,8 +273,7 @@ export function IntegrationsTabAccounting({ overview }: { overview: Overview }) 
         </p>
       </IntegrationCard>
       <div className="md:col-span-2">
-        <h3 className="text-sm font-semibold mb-2">Xero OAuth credentials</h3>
-        <IntegrationConfigEditor fields={fieldsFor("xero")} serviceId="xero" />
+        <EnvCredentialsNote envVars={["XERO_CLIENT_ID", "XERO_CLIENT_SECRET"]} />
       </div>
     </div>
   );
@@ -302,10 +317,7 @@ export function IntegrationsTabCustomer({ overview }: { overview: Overview }) {
           <KV label="Delivered (24h)" value={overview.push.deliveredLast24h} />
         </IntegrationCard>
       </div>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">Web push (VAPID) keys</h3>
-        <IntegrationConfigEditor fields={fieldsFor("push")} serviceId="push" />
-      </div>
+      <EnvCredentialsNote envVars={["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_CONTACT"]} />
     </div>
   );
 }
@@ -326,14 +338,14 @@ export function IntegrationsTabOperations({ overview }: { overview: Overview }) 
           <KV label="Host" value={overview.posthog.host} />
         </IntegrationCard>
       </div>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">GPS telemetry ingest token</h3>
-        <IntegrationConfigEditor fields={fieldsFor("telemetry")} serviceId="telemetry" />
-      </div>
-      <div>
-        <h3 className="text-sm font-semibold mb-2">PostHog credentials</h3>
-        <IntegrationConfigEditor fields={fieldsFor("posthog")} serviceId="posthog" />
-      </div>
+      <EnvCredentialsNote
+        envVars={[
+          "TELEMETRY_INGEST_TOKEN",
+          "POSTHOG_KEY",
+          "NEXT_PUBLIC_POSTHOG_KEY",
+          "POSTHOG_HOST",
+        ]}
+      />
     </div>
   );
 }

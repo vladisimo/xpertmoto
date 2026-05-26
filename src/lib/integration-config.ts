@@ -4,19 +4,21 @@ import { encryptSecret, decryptSecret, type EncryptedSecret } from "@/lib/crypto
 import { logger } from "@/lib/logger";
 
 /**
- * Admin-managed integration configuration. Values are stored in the
- * `SystemSetting` table keyed `integration:<service>:<field>`, with plain
- * strings saved as `{ type: "string", value }` and secrets as
- * `{ type: "secret", enc, iv, tag }` (AES-256-GCM, same helper that
- * protects E-Toll passwords).
+ * Typed accessor over the `SystemSetting` key/value store, with plain strings
+ * saved as `{ type: "string", value }` and secrets as
+ * `{ type: "secret", enc, iv, tag }` (AES-256-GCM, same helper that protects
+ * E-Toll passwords).
  *
- * Reads always fall back to `process.env.<envFallback>` so an unconfigured
- * DB row keeps the legacy env-driven workflow working. Writes go to the DB
- * only — the env is read-only from Node's POV.
+ * **Integration credentials (`integration:*` keys) are env-only.** The admin
+ * WebUI for editing them was removed — `.env` is now the single source of
+ * truth, so reads of `integration:*` keys bypass the DB entirely and resolve
+ * straight from `process.env.<envFallback>`. This keeps stale `integration:*`
+ * rows (left over from the old WebUI) from silently overriding the environment.
  *
- * A small in-memory cache (5s TTL) reduces Prisma hits on hot paths like
- * sendEmail / sendSms; the TTL is short enough that a just-saved value
- * picks up on the next tick.
+ * All other keys (runtime state like the Stripe reconcile checkpoint
+ * `reconcile:*` or the toll admin fee `infringement:*`) still use the DB
+ * store with an env fallback. A small in-memory cache (5s TTL) reduces Prisma
+ * hits on hot paths.
  */
 
 type PlainValue = { type: "string"; value: string };
@@ -80,8 +82,12 @@ export async function getString(
   key: string,
   envFallback?: string,
 ): Promise<string | null> {
-  const db = await readRaw(key);
-  if (db != null && db !== "") return db;
+  // Integration credentials are env-only — never read their DB row (see file
+  // JSDoc). Other keys keep the DB-first-with-env-fallback behaviour.
+  if (!key.startsWith("integration:")) {
+    const db = await readRaw(key);
+    if (db != null && db !== "") return db;
+  }
   if (envFallback && process.env[envFallback]) return process.env[envFallback]!;
   return null;
 }
@@ -164,50 +170,15 @@ export async function getSource(
   key: string,
   envFallback?: string,
 ): Promise<"db-string" | "db-secret" | "env" | "unset"> {
-  const row = await prisma.systemSetting.findUnique({ where: { key } }).catch(() => null);
-  if (row) {
-    const v = row.value as unknown as ConfigValue | null;
-    if (v?.type === "string" && v.value) return "db-string";
-    if (v?.type === "secret") return "db-secret";
+  // Integration credentials never resolve from the DB (see file JSDoc).
+  if (!key.startsWith("integration:")) {
+    const row = await prisma.systemSetting.findUnique({ where: { key } }).catch(() => null);
+    if (row) {
+      const v = row.value as unknown as ConfigValue | null;
+      if (v?.type === "string" && v.value) return "db-string";
+      if (v?.type === "secret") return "db-secret";
+    }
   }
   if (envFallback && process.env[envFallback]) return "env";
   return "unset";
-}
-
-/**
- * List every integration config row for the admin UI. Returns keys + source
- * only — never raw secret values.
- */
-export async function listConfigSources(keys: Array<{ key: string; envFallback?: string }>) {
-  const rows = await prisma.systemSetting.findMany({
-    where: { key: { in: keys.map((k) => k.key) } },
-    select: { key: true, value: true, updatedAt: true },
-  });
-  const byKey = new Map(rows.map((r) => [r.key, r]));
-  return keys.map(({ key, envFallback }) => {
-    const row = byKey.get(key);
-    const v = (row?.value as unknown as ConfigValue | null) ?? null;
-    const hasDb = v?.type === "string" ? !!v.value : v?.type === "secret";
-    const hasEnv = !!(envFallback && process.env[envFallback]);
-    return {
-      key,
-      source:
-        v?.type === "secret"
-          ? ("db-secret" as const)
-          : v?.type === "string" && v.value
-            ? ("db-string" as const)
-            : hasEnv
-              ? ("env" as const)
-              : ("unset" as const),
-      hasValue: hasDb || hasEnv,
-      updatedAt: row?.updatedAt ?? null,
-      preview:
-        v?.type === "string" && v.value ? maskPreview(v.value) : null,
-    };
-  });
-}
-
-function maskPreview(s: string): string {
-  if (s.length <= 8) return "•".repeat(s.length);
-  return `${s.slice(0, 4)}…${s.slice(-2)}`;
 }

@@ -27,7 +27,7 @@ Numbers 1–4 are the ones that can lose or duplicate money if they fail wrong; 
 
 ### Configuration
 
-- **Secret key** (`STRIPE_SECRET_KEY` env, or `SystemSetting.integration:stripe:secretKey` AES-256-GCM encrypted).
+- **Secret key** (`STRIPE_SECRET_KEY` env — credentials are environment-only; there is no in-app editor).
 - **Publishable key** (`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`) — client-side only.
 - **API version**: `2024-09-30.acacia` (pinned in `getStripeClient`).
 - **Loader**: lazy `eval("require")` so webpack doesn't bundle the SDK; returns `null` if unconfigured → the rest of the code falls into **stub mode**.
@@ -55,9 +55,8 @@ Numbers 1–4 are the ones that can lose or duplicate money if they fail wrong; 
 
 ### Secrets lifecycle
 
-- Rotated via `SystemSetting` write (admin UI) — 5-second in-memory cache in `integration-config.ts` ensures fast takeover.
-- Env fallback for local dev.
-- No audit of secret rotation currently [suggest adding to Phase 4 P2].
+- Rotated by updating `STRIPE_SECRET_KEY` in the deployment environment and restarting — `integration-config.ts` reads `integration:*` keys straight from `process.env` (no DB row, no in-app editor).
+- See the secret-rotation runbook for the full procedure.
 
 ### Test harness
 

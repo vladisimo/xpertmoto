@@ -35,12 +35,14 @@ Pick one path before you start:
 
 ### 0.2 Three things that bite on a clone (read before §6)
 
-1. **Encryption key continuity.** Integration secrets (Stripe/Twilio/e-toll keys)
-   live in `SystemSetting` rows encrypted with `SECRET_ENC_KEY` (legacy
+1. **Encryption key continuity.** Integration credentials (Stripe/Twilio/Resend/
+   Xero/etc.) are **environment variables** — set them fresh in prod's `.env`,
+   not the database. But e-toll account passwords and a few encrypted
+   `SystemSetting` rows are still sealed with `SECRET_ENC_KEY` (legacy
    `ETOLL_ENC_KEY`) — see [src/lib/env.ts:35](../../src/lib/env.ts#L35). If you
    clone those rows but boot prod with a **different** key, decryption fails at
-   runtime. Either reuse the same key, or plan to re-enter every integration
-   secret in `/admin/integrations` after migrating (cleaner — do this).
+   runtime. Either reuse the same key, or re-enter the affected e-toll account
+   credentials after migrating.
 2. **Seeded passwords.** The dev seed ships known weak logins. A full clone puts
    them live. You **must** rotate `admin@…/admin1234` and purge/disable demo
    users before exposing the site (§6A step 5).
@@ -97,9 +99,10 @@ openssl rand -base64 32   # → IP_HASH_SALT
 openssl rand -base64 24   # → POSTGRES_PASSWORD
 ```
 
-> If you chose **Path A (full clone)** AND want to keep the cloned integration
-> secrets decryptable, set `SECRET_ENC_KEY` to the **same value as your dev
-> `.env`** instead of a fresh one. See §0.2.
+> If you chose **Path A (full clone)** AND want to keep cloned encrypted
+> `SystemSetting` rows (e.g. e-toll account passwords) decryptable, set
+> `SECRET_ENC_KEY` to the **same value as your dev `.env`** instead of a fresh
+> one. Integration credentials are env vars, so they're unaffected. See §0.2.
 
 Create `/opt/xpertmoto/.env.prod` (root-owned, `chmod 600`). Minimum that
 [src/lib/env.ts](../../src/lib/env.ts) **requires in production**:
@@ -288,8 +291,10 @@ DELETE FROM "User" WHERE email LIKE '%@example.com';
 SQL
 ```
 Then sign in once as the admin and **change the password** (or re-create the
-admin via the seed with a strong value). If you did *not* reuse the dev
-`SECRET_ENC_KEY`, re-enter every secret in `/admin/integrations` now.
+admin via the seed with a strong value). Integration credentials come from
+prod's `.env`, so there's nothing to re-enter in the app; if you did *not*
+reuse the dev `SECRET_ENC_KEY`, re-enter any encrypted `SystemSetting` rows
+(e.g. e-toll account passwords) now.
 
 ### Path B — Schema + curated data (recommended)
 
@@ -317,9 +322,10 @@ cat /tmp/xpertmoto-reference.sql | docker compose -f docker-compose.prod.yml exe
 docker compose -f docker-compose.prod.yml run --rm web npx tsx prisma/seed-minimal.ts
 ```
 
-> If `SystemSetting` carries encrypted integration secrets and you used a new
-> `SECRET_ENC_KEY`, exclude it from the dump and re-enter secrets in
-> `/admin/integrations` instead.
+> Integration credentials are env vars, not `SystemSetting` rows. If
+> `SystemSetting` carries other encrypted rows (e.g. e-toll account passwords)
+> and you used a new `SECRET_ENC_KEY`, exclude it from the dump and re-enter
+> those values instead.
 
 ### Verify the migrated data (both paths)
 
