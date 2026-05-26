@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { inferRouterOutputs } from "@trpc/server";
 import { trpc } from "@/lib/trpc/client";
@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTablePagination } from "@/components/ui/data-table-pagination";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Dialog,
@@ -98,6 +99,8 @@ export default function PricingPage() {
     id: string;
     label: string;
   } | null>(null);
+  const [modelPage, setModelPage] = useState(1);
+  const [modelPageSize, setModelPageSize] = useState(25);
 
   const filteredModels = (modelData?.models ?? []).filter((m) => {
     if (modelCategory !== "__all" && m.category?.id !== modelCategory) return false;
@@ -115,6 +118,19 @@ export default function PricingPage() {
     }
     return true;
   });
+
+  // Reset to the first page whenever the filtered set or page size changes,
+  // so the visible slice never points past the end of the list.
+  useEffect(() => {
+    setModelPage(1);
+  }, [modelSearch, modelCategory, modelFleetFilter, modelPageSize]);
+
+  const modelPageCount = Math.max(1, Math.ceil(filteredModels.length / modelPageSize));
+  const modelSafePage = Math.min(modelPage, modelPageCount);
+  const pagedModels = filteredModels.slice(
+    (modelSafePage - 1) * modelPageSize,
+    modelSafePage * modelPageSize,
+  );
 
   const modelColumns: DataTableColumn<ModelRow>[] = [
     {
@@ -472,7 +488,7 @@ export default function PricingPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full={tab === "models"}>
       <PageHeader
         eyebrow="Administration"
         title="Pricing"
@@ -543,15 +559,15 @@ export default function PricingPage() {
       {tab === "categories" && <CategoriesManager />}
 
       {tab === "models" && (
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
+        <div className="flex min-h-0 flex-1 flex-col gap-4">
+          <p className="shrink-0 text-sm text-muted-foreground">
             Per-model (make + model) base rate and base period. When set, these
             override the category default for every vehicle of that model. Leave
             base rate empty to fall back to the category daily rate. Set period
             to 48 h for premium bikes that rent in 2-day minimums.
           </p>
 
-          <div className="grid gap-3 md:grid-cols-[1fr_12rem_12rem]">
+          <div className="grid shrink-0 gap-3 md:grid-cols-[1fr_12rem_12rem]">
             <Input
               placeholder="Search make or model…"
               value={modelSearch}
@@ -588,31 +604,48 @@ export default function PricingPage() {
             </Select>
           </div>
 
-          <div className="text-xs text-muted-foreground">
+          <div className="shrink-0 text-xs text-muted-foreground">
             Showing {filteredModels.length} of {modelData?.models.length ?? 0} models
           </div>
 
-          <DataTable
-            columns={modelColumns}
-            data={filteredModels}
-            getRowId={(m) => m.id}
-            rowActions={(m) => (
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() =>
-                  setEditingModel({
-                    id: m.id,
-                    label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
-                  })
-                }
-              >
-                {(tierCountByModel[m.id] ?? 0) > 0 ? "Edit tiers" : "Add tiers"}
-              </Button>
-            )}
-            empty="No models match the current filters."
-            mobileMode="cards"
-          />
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+            <div className="flex-1 overflow-auto">
+              <DataTable
+                columns={modelColumns}
+                data={pagedModels}
+                getRowId={(m) => m.id}
+                rowActions={(m) => (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      setEditingModel({
+                        id: m.id,
+                        label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
+                      })
+                    }
+                  >
+                    {(tierCountByModel[m.id] ?? 0) > 0 ? "Edit tiers" : "Add tiers"}
+                  </Button>
+                )}
+                empty="No models match the current filters."
+                className="rounded-none border-0 shadow-none"
+                stickyHeader
+                mobileMode="cards"
+              />
+            </div>
+            <div className="shrink-0 border-t bg-muted/30 px-4 py-2">
+              <DataTablePagination
+                page={modelSafePage}
+                pageSize={modelPageSize}
+                totalCount={filteredModels.length}
+                pageCount={modelPageCount}
+                onPageChange={setModelPage}
+                onPageSizeChange={setModelPageSize}
+                emptyLabel="No models"
+              />
+            </div>
+          </div>
 
           <Dialog
             open={editingModel !== null}
