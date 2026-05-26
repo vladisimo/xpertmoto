@@ -28,6 +28,7 @@ import {
   type DetectedLicenceMetadata,
   type DetectedPassportMetadata,
 } from "@/server/services/document-extract";
+import { computeCustomerRewards } from "@/server/services/customer-rewards";
 import {
   applyLatestDocumentToProfile,
   PROJECTABLE_IDENTITY_TYPES,
@@ -397,6 +398,20 @@ export const staffCustomerRouter = createTRPCRouter({
         user.customerProfile.passportNumber,
         user.customerProfile.passportNumberEnc,
       );
+      // Reward counters (totalSpend / totalBookings / loyaltyPoints / tier) on the
+      // profile are denormalized — only refreshed by the nightly rewards-recompute
+      // and the booking-completion / no-show triggers. A customer whose only
+      // bookings are in-flight (CONFIRMED/ACTIVE) would otherwise show stale zeros
+      // on the detail card. Overlay a live, read-only snapshot so the card always
+      // reflects truth; the persisted counters still serve the leaderboard.
+      const rewards = await computeCustomerRewards(ctx.prisma, user.id);
+      user.customerProfile.totalSpend = rewards.totalSpend;
+      user.customerProfile.totalBookings = rewards.totalBookings;
+      user.customerProfile.completedBookings = rewards.completedBookings;
+      user.customerProfile.lastBookingAt = rewards.lastBookingAt;
+      user.customerProfile.lifetimePoints = rewards.lifetimePoints;
+      user.customerProfile.loyaltyPoints = rewards.loyaltyPoints;
+      user.customerProfile.loyaltyTier = rewards.loyaltyTier;
     }
     return user;
   }),

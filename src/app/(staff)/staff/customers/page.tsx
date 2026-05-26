@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { HydrationBoundary, dehydrate } from "@tanstack/react-query";
+import { auth } from "@/lib/auth";
 import { getSSRHelpers } from "@/lib/trpc/ssr";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
@@ -16,8 +17,12 @@ import { CustomerOverviewTab } from "@/components/staff/customer-overview-tab";
 import { CustomerRiskTab } from "@/components/staff/customer-risk-tab";
 import { CustomerSettingsTab } from "@/components/staff/customer-settings-tab";
 import { CustomerVerificationTab } from "@/components/staff/customer-verification-tab";
+import { CustomerUsersTab } from "@/components/staff/customer-users-tab";
 import { CustomersClient } from "./customers-client";
+import { isAdminOnlyCustomerTab } from "@/lib/customers/tabs";
 import { STATUS_FILTERS, type StatusFilter } from "@/lib/customers/filters";
+
+const ADMIN_ROLES = new Set(["ADMIN", "SUPER_ADMIN"]);
 
 const DEFAULT_STATUS: StatusFilter = "ALL";
 const DEFAULT_PAGE_SIZE = 25;
@@ -65,7 +70,16 @@ export default async function CustomersPage({
     redirect("/staff/customers?tab=settings");
   }
 
+  const session = await auth();
+  const isAdmin = ADMIN_ROLES.has(session?.user?.role ?? "");
+
   const activeTab = parseTab(asString(sp.tab));
+
+  // The Users & Roles tab wraps the admin-gated user management surface.
+  // Non-admin staff can't use it, so bounce them back to the default tab.
+  if (isAdminOnlyCustomerTab(activeTab) && !isAdmin) {
+    redirect("/staff/customers");
+  }
 
   // Only the Directory tab benefits from server prefetch — other tabs
   // each manage their own queries.
@@ -93,7 +107,7 @@ export default async function CustomersPage({
         description="Browse, filter, and triage customers across depots."
         actions={<CustomersHeaderActions />}
       />
-      <CustomersTabsBar activeTab={activeTab} />
+      <CustomersTabsBar activeTab={activeTab} isAdmin={isAdmin} />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {activeTab === "overview" && <CustomerOverviewTab />}
@@ -108,6 +122,7 @@ export default async function CustomersPage({
         {activeTab === "communications" && <CustomerCommunicationsTab />}
         {activeTab === "documents" && <CustomerDocumentsTab />}
         {activeTab === "settings" && <CustomerSettingsTab />}
+        {activeTab === "users" && isAdmin && <CustomerUsersTab />}
       </div>
     </PageShell>
   );

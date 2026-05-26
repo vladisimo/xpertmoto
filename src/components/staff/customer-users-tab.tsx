@@ -5,11 +5,12 @@ import { useSession } from "next-auth/react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Form,
@@ -32,8 +33,6 @@ import {
   type DataTableSortState,
 } from "@/components/ui/data-table";
 import { DataTablePagination } from "@/components/ui/data-table-pagination";
-import { PageHeader } from "@/components/layout/page-header";
-import { PageShell } from "@/components/layout/page-section";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { FormGrid, FormGridRow } from "@/components/forms/form-grid";
 import { UsersStats } from "@/components/admin/users-stats";
@@ -67,7 +66,7 @@ function parseSort(value: string | null): DataTableSortState | null {
   return { id, dir };
 }
 
-export function AdminUsersClient() {
+export function CustomerUsersTab() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const util = trpc.useUtils();
@@ -85,7 +84,7 @@ export function AdminUsersClient() {
         if (value === null || value === "" || value === undefined) next.delete(key);
         else next.set(key, String(value));
       }
-      router.replace(`/admin/users?${next.toString()}`, { scroll: false });
+      router.replace(`/staff/customers?${next.toString()}`, { scroll: false });
     },
     [router, searchParams],
   );
@@ -131,6 +130,7 @@ export function AdminUsersClient() {
   const currentUserId = session?.user?.id;
 
   const [showInvite, setShowInvite] = React.useState(false);
+  const [showSessions, setShowSessions] = React.useState(false);
   const [lastInvite, setLastInvite] = React.useState<
     { email: string; expiresAt: Date; action: "sent" | "resent" } | null
   >(null);
@@ -304,19 +304,7 @@ export function AdminUsersClient() {
   const rows = listQuery.data?.items;
 
   return (
-    <PageShell full>
-      <PageHeader
-        eyebrow="Administration"
-        title="Users & roles"
-        description="Invite staff, manage access, and assign depots."
-        actions={
-          <Button onClick={() => setShowInvite(true)}>
-            <Plus className="h-4 w-4" />
-            Invite staff
-          </Button>
-        }
-      />
-
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
       <UsersStats data={stats} loading={statsLoading} />
 
       {lastInvite && (
@@ -348,6 +336,69 @@ export function AdminUsersClient() {
           </CardContent>
         </Card>
       )}
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+          <Input
+            placeholder="Search name or email…"
+            value={search}
+            onChange={(e) => setParams({ q: e.target.value || null, page: null })}
+            className="pl-9"
+          />
+        </div>
+        <div className="w-full sm:w-48">
+          <Select
+            value={role || "__all__"}
+            onValueChange={(v) => setParams({ role: v === "__all__" ? null : v, page: null })}
+          >
+            <SelectTrigger><SelectValue placeholder="All roles" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All roles</SelectItem>
+              {ROLES.map((r) => (
+                <SelectItem key={r} value={r}>{formatRole(r)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Button variant="outline" onClick={() => setShowSessions(true)}>
+          <KeyRound className="h-4 w-4" />
+          Sessions
+        </Button>
+        <Button onClick={() => setShowInvite(true)}>
+          <Plus className="h-4 w-4" />
+          Invite staff
+        </Button>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden md:gap-0 md:rounded-md md:border md:bg-card md:shadow-sm">
+        <DataTable
+          columns={userColumns}
+          data={listQuery.isLoading ? undefined : rows}
+          isLoading={listQuery.isLoading}
+          mobileMode="cards"
+          getRowId={(u) => u.id}
+          empty="No users match your filters."
+          sort={sort}
+          onSortChange={(next) =>
+            setParams({ sort: next ? `${next.id}:${next.dir}` : null, page: null })
+          }
+          className="min-h-0 flex-1 overflow-auto rounded-none border-0 shadow-none [&>div]:overflow-visible [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10 [&_thead]:bg-foreground [&_thead_tr]:border-foreground/60 [&_thead_tr:hover]:bg-foreground [&_thead_th]:text-background/80"
+        />
+        <div className="shrink-0 px-1 py-2 md:border-t md:px-4 md:py-2.5">
+          <DataTablePagination
+            page={listQuery.data?.page ?? page}
+            pageSize={listQuery.data?.pageSize ?? pageSize}
+            totalCount={listQuery.data?.totalCount ?? 0}
+            pageCount={listQuery.data?.pageCount ?? 1}
+            onPageChange={(next) => setParams({ page: next === 1 ? null : next })}
+            onPageSizeChange={(next) =>
+              setParams({ size: next === DEFAULT_PAGE_SIZE ? null : next, page: null })
+            }
+            emptyLabel="No users"
+          />
+        </div>
+      </div>
 
       <Sheet
         open={showInvite}
@@ -472,61 +523,145 @@ export function AdminUsersClient() {
         </SheetContent>
       </Sheet>
 
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-          <Input
-            placeholder="Search name or email…"
-            value={search}
-            onChange={(e) => setParams({ q: e.target.value || null, page: null })}
-            className="pl-9"
-          />
-        </div>
-        <div className="w-full sm:w-48">
-          <Select
-            value={role || "__all__"}
-            onValueChange={(v) => setParams({ role: v === "__all__" ? null : v, page: null })}
-          >
-            <SelectTrigger><SelectValue placeholder="All roles" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All roles</SelectItem>
-              {ROLES.map((r) => (
-                <SelectItem key={r} value={r}>{formatRole(r)}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+      <UserSessionsSheet open={showSessions} onOpenChange={setShowSessions} />
+    </div>
+  );
+}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden md:gap-0 md:rounded-md md:border md:bg-card md:shadow-sm">
-        <DataTable
-          columns={userColumns}
-          data={listQuery.isLoading ? undefined : rows}
-          isLoading={listQuery.isLoading}
-          mobileMode="cards"
-          getRowId={(u) => u.id}
-          empty="No users match your filters."
-          sort={sort}
-          onSortChange={(next) =>
-            setParams({ sort: next ? `${next.id}:${next.dir}` : null, page: null })
-          }
-          className="min-h-0 flex-1 overflow-auto rounded-none border-0 shadow-none [&>div]:overflow-visible [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10 [&_thead]:bg-foreground [&_thead_tr]:border-foreground/60 [&_thead_tr:hover]:bg-foreground [&_thead_th]:text-background/80"
-        />
-        <div className="shrink-0 px-1 py-2 md:border-t md:px-4 md:py-2.5">
-          <DataTablePagination
-            page={listQuery.data?.page ?? page}
-            pageSize={listQuery.data?.pageSize ?? pageSize}
-            totalCount={listQuery.data?.totalCount ?? 0}
-            pageCount={listQuery.data?.pageCount ?? 1}
-            onPageChange={(next) => setParams({ page: next === 1 ? null : next })}
-            onPageSizeChange={(next) =>
-              setParams({ size: next === DEFAULT_PAGE_SIZE ? null : next, page: null })
-            }
-            emptyLabel="No users"
-          />
+/**
+ * Look up any user's active NextAuth sessions and revoke them — useful for
+ * suspected compromise, terminated staff, or support requests. Moved here from
+ * the former standalone /admin/users/sessions page.
+ */
+function UserSessionsSheet({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [userIdInput, setUserIdInput] = React.useState("");
+  const [userId, setUserId] = React.useState<string | null>(null);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  const sessions = trpc.session.listForUser.useQuery(
+    { userId: userId ?? "" },
+    { enabled: !!userId, retry: false },
+  );
+  const utils = trpc.useUtils();
+
+  const revokeOne = trpc.session.revokeForUser.useMutation({
+    onSuccess: () => userId && utils.session.listForUser.invalidate({ userId }),
+    onError: (e) => setErr(e.message),
+  });
+  const revokeAll = trpc.session.revokeAllForUser.useMutation({
+    onSuccess: () => userId && utils.session.listForUser.invalidate({ userId }),
+    onError: (e) => setErr(e.message),
+  });
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-[480px]">
+        <SheetHeader className="text-left">
+          <SheetTitle>User sessions</SheetTitle>
+          <p className="text-sm text-muted-foreground">
+            Look up a user&apos;s active NextAuth sessions and revoke them.
+            Useful for suspected compromise, terminated staff, or logging a
+            customer out everywhere.
+          </p>
+        </SheetHeader>
+
+        <div className="mt-6 space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="sessionUserId">User id</Label>
+            <div className="flex gap-2">
+              <Input
+                id="sessionUserId"
+                value={userIdInput}
+                onChange={(e) => setUserIdInput(e.target.value)}
+                placeholder="cmo…abc"
+                className="font-mono"
+              />
+              <Button
+                onClick={() => {
+                  setUserId(userIdInput.trim() || null);
+                  setErr(null);
+                }}
+              >
+                <Search className="mr-1.5 h-4 w-4" aria-hidden />
+                Load
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Copy the user id from a customer detail URL or an audit log row.
+              Works for staff, admin, and customer accounts.
+            </p>
+          </div>
+
+          {userId && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium">Active sessions</h3>
+              {sessions.isLoading ? (
+                <div className="text-sm text-muted-foreground">Loading…</div>
+              ) : sessions.error ? (
+                <div className="text-sm text-destructive">{sessions.error.message}</div>
+              ) : !sessions.data || sessions.data.length === 0 ? (
+                <Card>
+                  <CardContent className="py-6 text-center text-sm text-muted-foreground">
+                    No active sessions for this user.
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card>
+                  <CardContent className="space-y-3 p-4">
+                    <ul className="divide-y">
+                      {sessions.data.map((s) => (
+                        <li
+                          key={s.id}
+                          className="flex items-center justify-between py-2 text-sm"
+                        >
+                          <div>
+                            <div className="font-mono text-xs">{s.id}</div>
+                            <div className="text-xs text-muted-foreground">
+                              Expires {new Date(s.expires).toLocaleString("en-AU")}
+                            </div>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={revokeOne.isPending}
+                            onClick={() => revokeOne.mutate({ sessionId: s.id, userId })}
+                          >
+                            {revokeOne.isPending && (
+                              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+                            )}
+                            Revoke
+                          </Button>
+                        </li>
+                      ))}
+                    </ul>
+
+                    <div className="flex justify-end border-t pt-3">
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={revokeAll.isPending}
+                        onClick={() => revokeAll.mutate({ userId })}
+                      >
+                        <KeyRound className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                        Revoke all sessions
+                      </Button>
+                    </div>
+
+                    {err && <div className="text-sm text-destructive">{err}</div>}
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          )}
         </div>
-      </div>
-    </PageShell>
+      </SheetContent>
+    </Sheet>
   );
 }
 

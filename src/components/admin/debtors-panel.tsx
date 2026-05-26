@@ -40,7 +40,7 @@ export function DebtorsPanel({ debtors }: { debtors: Debtor[] }) {
       header: "Customer",
       cell: (r) => (
         <Link
-          href={`/admin/users/${r.customerId}`}
+          href={`/staff/customers/${r.customerId}`}
           className="block hover:underline"
         >
           <div className="font-medium">

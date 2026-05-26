@@ -23,7 +23,7 @@ export function AdminSupportTab() {
           <Link href="/staff/support">Support inbox →</Link>
         </Button>
         <Button asChild variant="secondary" size="sm">
-          <Link href="/admin/notification-templates">Templates →</Link>
+          <Link href="/staff/communications/templates">Templates →</Link>
         </Button>
         <Button asChild variant="secondary" size="sm">
           <Link href="/admin/integrations">Integrations →</Link>

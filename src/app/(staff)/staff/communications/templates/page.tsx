@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Plus } from "lucide-react";
 
+import { CommsTabs } from "@/components/communications/comms-tabs";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
 import { Button } from "@/components/ui/button";
@@ -87,12 +88,12 @@ export default function NotificationTemplatesPage() {
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Administration"
+        eyebrow="Operations · Templates"
         title="Notification templates"
         description="Central library of templates driving every outbound email, SMS, push, and in-app notification."
         actions={
           <Button asChild>
-            <Link href="/admin/notification-templates/new">
+            <Link href="/staff/communications/templates/new">
               <Plus className="h-4 w-4" />
               New template
             </Link>
@@ -100,12 +101,14 @@ export default function NotificationTemplatesPage() {
         }
       />
 
+      <CommsTabs />
+
       <PageSection flush>
         <DataTable<Row>
           columns={columns}
           data={isLoading ? undefined : rows}
           getRowId={(r) => r.id}
-          getRowHref={(r) => `/admin/notification-templates/${r.id}`}
+          getRowHref={(r) => `/staff/communications/templates/${r.id}`}
           empty="No templates yet. Create one to start using it in compose and campaigns."
         />
       </PageSection>

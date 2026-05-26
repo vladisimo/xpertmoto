@@ -66,7 +66,7 @@ export async function AdminOverviewTab() {
           <Link href="/admin/pricing">Pricing →</Link>
         </Button>
         <Button asChild variant="secondary" size="sm">
-          <Link href="/admin/users">Users →</Link>
+          <Link href="/staff/customers?tab=users">Users →</Link>
         </Button>
       </div>
     </div>

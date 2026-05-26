@@ -1,5 +1,14 @@
-import { describe, expect, test } from "vitest";
-import { buildCustomerListWhere } from "@/server/trpc/router/staff-customer";
+import { describe, expect, test, vi } from "vitest";
+import { Prisma } from "@prisma/client";
+import { buildCustomerListWhere, staffCustomerRouter } from "@/server/trpc/router/staff-customer";
+
+// The detail card's reward counters are overlaid from a live computeCustomerRewards
+// snapshot. Mock the compute (its own derivation is unit-tested separately) so we
+// assert only the overlay: stale persisted counters get replaced with the snapshot.
+const computeCustomerRewards = vi.fn();
+vi.mock("@/server/services/customer-rewards", () => ({
+  computeCustomerRewards: (...args: unknown[]) => computeCustomerRewards(...args),
+}));
 
 const NOW = new Date("2026-04-17T00:00:00.000Z");
 
@@ -62,5 +71,58 @@ describe("buildCustomerListWhere", () => {
     const w = buildCustomerListWhere({ status: "PENDING_HIRE", search: "lee" }, NOW);
     expect(w.OR).toHaveLength(4);
     expect(w.bookings).toBeDefined();
+  });
+});
+
+describe("staffCustomer.detail reward overlay", () => {
+  type Caller = ReturnType<typeof staffCustomerRouter.createCaller>;
+
+  function buildCtx(user: unknown) {
+    return {
+      prisma: { user: { findUnique: vi.fn().mockResolvedValue(user) } },
+      user: { id: "staff1", role: "STAFF" as const },
+      session: { user: { id: "staff1", role: "STAFF" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["detail"]>[0];
+  }
+
+  test("overlays a live rewards snapshot over the stale persisted counters", async () => {
+    // Persisted profile is stale (e.g. only in-flight bookings → never recomputed).
+    const user = {
+      id: "cust-1",
+      customerProfile: {
+        totalSpend: new Prisma.Decimal(0),
+        totalBookings: 0,
+        completedBookings: 0,
+        lastBookingAt: null,
+        lifetimePoints: 0,
+        loyaltyPoints: 0,
+        loyaltyTier: "SILVER",
+        licenceNumber: null,
+        licenceNumberEnc: null,
+        passportNumber: null,
+        passportNumberEnc: null,
+      },
+    };
+    computeCustomerRewards.mockResolvedValue({
+      totalSpend: new Prisma.Decimal("1857.36"),
+      completedBookings: 1,
+      totalBookings: 3,
+      lastBookingAt: new Date("2026-05-26T00:00:00.000Z"),
+      lifetimePoints: 1857,
+      loyaltyPoints: 1857,
+      loyaltyTier: "GOLD",
+    });
+
+    const ctx = buildCtx(user);
+    const result = await staffCustomerRouter.createCaller(ctx as never).detail({ id: "cust-1" });
+
+    expect(computeCustomerRewards).toHaveBeenCalledWith(expect.anything(), "cust-1");
+    expect(result?.customerProfile?.totalSpend.toFixed(2)).toBe("1857.36");
+    expect(result?.customerProfile?.totalBookings).toBe(3);
+    expect(result?.customerProfile?.completedBookings).toBe(1);
+    expect(result?.customerProfile?.loyaltyPoints).toBe(1857);
+    expect(result?.customerProfile?.loyaltyTier).toBe("GOLD");
   });
 });

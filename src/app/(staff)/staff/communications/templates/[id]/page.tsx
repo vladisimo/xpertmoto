@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 
+import { CommsTabs } from "@/components/communications/comms-tabs";
 import { TemplateEditor } from "@/components/communications/template-editor";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
@@ -26,10 +27,13 @@ export default async function TemplateDetailPage({
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Administration · Templates"
+        eyebrow="Operations · Templates"
         title={template.name}
         description={template.description ?? `Type: ${template.type ?? "—"} · Key: ${template.key}`}
       />
+
+      <CommsTabs />
+
       <PageSection>
         <TemplateEditor
           template={{

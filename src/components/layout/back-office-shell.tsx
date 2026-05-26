@@ -9,8 +9,8 @@ import {
   ChevronRight,
   LogOut,
   Menu,
-  ChevronDown,
   User,
+  UserCircle,
   Search,
 } from "lucide-react";
 import {
@@ -90,14 +90,6 @@ const ACCENT: Record<ShellAccent, {
   },
 };
 
-/** Role badge styling — adapts the sidebar accent per role tier. */
-const ROLE_BADGE: Record<string, { bg: string; text: string; label: string }> = {
-  STAFF:       { bg: "bg-amber-500/20", text: "text-amber-300", label: "Staff" },
-  MANAGER:     { bg: "bg-amber-500/20", text: "text-amber-300", label: "Manager" },
-  ADMIN:       { bg: "bg-red-500/20",   text: "text-red-300",   label: "Admin" },
-  SUPER_ADMIN: { bg: "bg-red-500/20",   text: "text-red-300",   label: "Super Admin" },
-};
-
 function getInitials(name?: string | null, email?: string | null): string {
   if (name) {
     return name
@@ -112,6 +104,78 @@ function getInitials(name?: string | null, email?: string | null): string {
 
 function getProfilePath(accent: ShellAccent): string {
   return accent === "admin" ? "/admin/profile" : "/staff/profile";
+}
+
+/**
+ * Avatar + dropdown account menu. Lives in the top bar (top-right of the
+ * page) on both mobile and desktop — the desktop sidebar no longer carries a
+ * user footer.
+ */
+function UserMenu({
+  user,
+  accent,
+  onSignOut,
+  variant = "bar",
+}: {
+  user: BackOfficeUser;
+  accent: ShellAccent;
+  onSignOut: () => void;
+  /** `bar` = inside the dark mobile top bar. `floating` = standalone button
+   *  on the light page surface (desktop top-right corner). */
+  variant?: "bar" | "floating";
+}) {
+  const initials = getInitials(user.name, user.email);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label="Account menu"
+          className={cn(
+            "flex items-center gap-2 rounded-full p-1 transition-colors",
+            variant === "bar"
+              ? "hover:bg-white/10"
+              : "bg-background shadow-sm ring-1 ring-border hover:bg-muted",
+          )}
+        >
+          <Avatar className="h-8 w-8">
+            {user.avatarUrl && <AvatarImage src={user.avatarUrl} alt="" />}
+            <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
+              {initials}
+            </AvatarFallback>
+          </Avatar>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel className="font-normal">
+          <div className="flex flex-col space-y-1">
+            <p className="text-sm font-medium">{user.name}</p>
+            <p className="text-xs text-muted-foreground">{user.email}</p>
+          </div>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href={getProfilePath(accent)}>
+            <UserCircle className="mr-2 h-4 w-4" />
+            My Profile
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link href="/dashboard">
+            <User className="mr-2 h-4 w-4" />
+            Customer Portal
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={onSignOut}
+          className="text-destructive focus:text-destructive"
+        >
+          <LogOut className="mr-2 h-4 w-4" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 /**
@@ -179,18 +243,25 @@ function FlyoutNavItem({
         <ul className="space-y-0.5">
           {item.children?.map((child) => {
             const childActive = child.href === activeHref;
+            const ChildIcon = child.icon;
             return (
               <li key={child.href}>
                 <Link
                   href={child.href}
                   className={cn(
-                    "block rounded-md px-2 py-1.5 text-sm transition-colors",
+                    "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors",
                     childActive
                       ? "bg-white/10 font-medium text-white"
                       : "text-slate-300 hover:bg-white/5 hover:text-white",
                   )}
                 >
-                  {child.label}
+                  <ChildIcon
+                    className={cn(
+                      "h-4 w-4 shrink-0",
+                      childActive ? "text-white" : "text-slate-400",
+                    )}
+                  />
+                  <span className="truncate">{child.label}</span>
                 </Link>
               </li>
             );
@@ -239,9 +310,7 @@ function SidebarNav({
                   pathname.startsWith(item.href + "/") ||
                   (item.href === "/staff/calendar" && pathname.startsWith("/staff/bookings")) ||
                   (item.href === "/admin/finance" &&
-                    (pathname === "/admin/pricing" ||
-                      pathname.startsWith("/admin/pricing/") ||
-                      pathname === "/admin/webhooks" ||
+                    (pathname === "/admin/webhooks" ||
                       pathname.startsWith("/admin/webhooks/")));
                 const Icon = item.icon;
 
@@ -317,19 +386,15 @@ function SidebarContent({
   user,
   collapsed,
   onToggle,
-  onSignOut,
   onOpenSearch,
   accent,
 }: {
   user: BackOfficeUser;
   collapsed: boolean;
   onToggle: () => void;
-  onSignOut: () => void;
   onOpenSearch: () => void;
   accent: ShellAccent;
 }) {
-  const initials = getInitials(user.name, user.email);
-  const badge = ROLE_BADGE[user.role ?? "STAFF"] ?? { bg: "bg-slate-500/20", text: "text-slate-300", label: "Staff" };
   const accentStyle = ACCENT[accent];
   const branding = useBranding();
   const wideLogoSrc = branding.logoWideUrl ?? "/brand/xpert-logo-white.png";
@@ -391,7 +456,7 @@ function SidebarContent({
         ) : (
           <button
             onClick={onOpenSearch}
-            className="flex w-full items-center gap-2 rounded-lg border border-secondary bg-white/5 px-3 py-2 text-left text-sm text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
+            className="flex w-full items-center gap-2 rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-left text-sm text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
           >
             <Search className="h-4 w-4 shrink-0" />
             <span className="flex-1">Search…</span>
@@ -409,87 +474,6 @@ function SidebarContent({
         accent={accent}
       />
 
-      {/* User footer (desktop only — mobile uses top-bar avatar menu) */}
-      <div className="hidden border-t border-white/5 p-3 lg:block">
-        {collapsed ? (
-          <Tooltip delayDuration={0}>
-            <TooltipTrigger asChild>
-              <Link
-                href={getProfilePath(accent)}
-                className="mx-auto flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
-                aria-label="My Profile"
-              >
-                <Avatar className="h-8 w-8">
-                  {user.avatarUrl && (
-                    <AvatarImage src={user.avatarUrl} alt="" />
-                  )}
-                  <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
-                    {initials}
-                  </AvatarFallback>
-                </Avatar>
-              </Link>
-            </TooltipTrigger>
-            <TooltipContent
-              side="right"
-              className="bg-slate-800 text-white border-slate-700"
-            >
-              {user.name ?? user.email} — My Profile
-            </TooltipContent>
-          </Tooltip>
-        ) : (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button className="flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-white/5 transition-colors">
-                <Avatar className="h-9 w-9">
-                  {user.avatarUrl && (
-                    <AvatarImage src={user.avatarUrl} alt="" />
-                  )}
-                  <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
-                    {initials}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-white truncate">
-                    {user.name ?? "User"}
-                  </p>
-                  <p className="text-xs text-slate-400 truncate">
-                    {badge.label}
-                  </p>
-                </div>
-                <ChevronDown className="h-4 w-4 text-slate-500 shrink-0" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              side="top"
-              className="w-56 mb-1"
-            >
-              <DropdownMenuLabel className="font-normal">
-                <div className="flex flex-col space-y-1">
-                  <p className="text-sm font-medium">{user.name}</p>
-                  <p className="text-xs text-muted-foreground">{user.email}</p>
-                </div>
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem asChild>
-                <Link href={getProfilePath(accent)}>My Profile</Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <Link href="/dashboard">
-                  <User className="mr-2 h-4 w-4" />
-                  Customer Portal
-                </Link>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={onSignOut} className="text-destructive focus:text-destructive">
-                <LogOut className="mr-2 h-4 w-4" />
-                Sign out
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-
       {/* Collapse toggle — desktop only, anchored at the very bottom */}
       <div
         className={cn(
@@ -505,9 +489,6 @@ function SidebarContent({
           )}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          {!collapsed && (
-            <span className="text-xs font-medium">Collapse</span>
-          )}
           {collapsed ? (
             <ChevronRight className="h-4 w-4" />
           ) : (
@@ -593,7 +574,6 @@ export function BackOfficeShell({
             user={user}
             collapsed={collapsed}
             onToggle={() => setCollapsed((c) => !c)}
-            onSignOut={handleSignOut}
             onOpenSearch={() => setSearchOpen(true)}
             accent={accent}
           />
@@ -607,7 +587,6 @@ export function BackOfficeShell({
               user={user}
               collapsed={false}
               onToggle={() => setMobileOpen(false)}
-              onSignOut={handleSignOut}
               onOpenSearch={() => {
                 setMobileOpen(false);
                 setSearchOpen(true);
@@ -618,7 +597,7 @@ export function BackOfficeShell({
         </Sheet>
 
         {/* Main area */}
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="relative flex flex-1 flex-col overflow-hidden">
           {/* Mobile-only top bar. In PWA standalone on notched devices the
               status bar overlays the viewport, so we consume
               safe-area-inset-top here — otherwise the burger sits under
@@ -644,45 +623,20 @@ export function BackOfficeShell({
               <Search className="h-5 w-5" />
               <span className="sr-only">Search</span>
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="flex items-center gap-2 rounded-lg p-1.5 hover:bg-white/10 transition-colors">
-                  <Avatar className="h-8 w-8">
-                    {user.avatarUrl && (
-                      <AvatarImage src={user.avatarUrl} alt="" />
-                    )}
-                    <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
-                      {getInitials(user.name, user.email)}
-                    </AvatarFallback>
-                  </Avatar>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuLabel className="font-normal">
-                  <div className="flex flex-col space-y-1">
-                    <p className="text-sm font-medium">{user.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {user.email}
-                    </p>
-                  </div>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link href={getProfilePath(accent)}>My Profile</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/dashboard">
-                    <User className="mr-2 h-4 w-4" />
-                    Customer Portal
-                  </Link>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={handleSignOut} className="text-destructive focus:text-destructive">
-                  <LogOut className="mr-2 h-4 w-4" />
-                  Sign out
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <UserMenu user={user} accent={accent} onSignOut={handleSignOut} />
+          </div>
+
+          {/* Desktop account menu — floats in the top-right corner of the
+              page (no top bar). */}
+          <div className="pointer-events-none absolute right-4 top-3 z-30 hidden lg:block">
+            <div className="pointer-events-auto">
+              <UserMenu
+                user={user}
+                accent={accent}
+                onSignOut={handleSignOut}
+                variant="floating"
+              />
+            </div>
           </div>
 
           {/* Page content */}

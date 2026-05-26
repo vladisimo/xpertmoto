@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Webhook,
   CheckCircle2,
@@ -21,6 +21,7 @@ import {
   DataTable,
   type DataTableColumn,
 } from "@/components/ui/data-table";
+import { DataTablePagination } from "@/components/ui/data-table-pagination";
 import {
   Select,
   SelectContent,
@@ -42,6 +43,8 @@ type WebhookRow = {
 
 export default function AdminWebhookHealthPage() {
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   const summary = trpc.webhookHealth.summary.useQuery(undefined, {
     refetchInterval: 30_000,
@@ -56,6 +59,18 @@ export default function AdminWebhookHealthPage() {
     },
     { refetchInterval: 30_000 },
   );
+  const allRows = useMemo(
+    () => (recent.data ?? []) as WebhookRow[],
+    [recent.data],
+  );
+  const totalCount = allRows.length;
+  const pageCount = Math.max(1, Math.ceil(totalCount / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageRows = useMemo(
+    () => allRows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [allRows, currentPage, pageSize],
+  );
+
   const utils = trpc.useUtils();
   const reset = trpc.webhookHealth.reset.useMutation({
     onSuccess: () => {
@@ -116,7 +131,7 @@ export default function AdminWebhookHealthPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full>
       <PageHeader
         eyebrow="Administration · Finance"
         title="Stripe webhook health"
@@ -125,7 +140,7 @@ export default function AdminWebhookHealthPage() {
 
       <FinanceTabsBar />
 
-      <PageSection flush>
+      <PageSection flush className="shrink-0">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             label="Received in last 24h"
@@ -152,13 +167,23 @@ export default function AdminWebhookHealthPage() {
         </div>
       </PageSection>
 
-      <PageSection
-        title="Recent events"
-        description="Most recent 100 webhook events, most recent first."
-      >
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="flex shrink-0 flex-col gap-1">
+          <h2 className="h3">Recent events</h2>
+          <p className="text-caption text-muted-foreground">
+            Most recent 100 webhook events, most recent first.
+          </p>
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
           <span className="text-sm text-muted-foreground">Filter by status:</span>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <Select
+            value={statusFilter}
+            onValueChange={(v) => {
+              setStatusFilter(v);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="w-full sm:w-[180px]">
               <SelectValue />
             </SelectTrigger>
@@ -172,14 +197,18 @@ export default function AdminWebhookHealthPage() {
           </Select>
         </div>
 
-        <DataTable<WebhookRow>
-          columns={columns}
-          data={recent.data as WebhookRow[] | undefined}
-          isLoading={recent.isLoading}
-          getRowId={(r) => r.id}
-          empty="No events matching the filter."
-          mobileMode="cards"
-          rowActions={(row) => (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+          <div className="flex-1 overflow-auto">
+            <DataTable<WebhookRow>
+              columns={columns}
+              data={recent.isLoading ? undefined : pageRows}
+              isLoading={recent.isLoading}
+              getRowId={(r) => r.id}
+              empty="No events matching the filter."
+              mobileMode="cards"
+              stickyHeader
+              className="rounded-none border-0 shadow-none"
+              rowActions={(row) => (
             <div className="flex items-center gap-1">
               {(row.status === "FAILED" || row.status === "PROCESSING") && (
                 <Button
@@ -211,9 +240,25 @@ export default function AdminWebhookHealthPage() {
                 <ExternalLink className="h-3 w-3" aria-hidden />
               </a>
             </div>
-          )}
-        />
-      </PageSection>
+              )}
+            />
+          </div>
+          <div className="shrink-0 border-t bg-muted/30 px-4 py-2">
+            <DataTablePagination
+              page={currentPage}
+              pageSize={pageSize}
+              totalCount={totalCount}
+              pageCount={pageCount}
+              onPageChange={setPage}
+              onPageSizeChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+              emptyLabel="No events matching the filter"
+            />
+          </div>
+        </div>
+      </div>
     </PageShell>
   );
 }

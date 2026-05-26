@@ -38,8 +38,7 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DepotEditSheet } from "@/components/admin/depot-edit-sheet";
 import { FormGrid } from "@/components/forms/form-grid";
 import { useBranding } from "@/components/shared/branding-provider";
-import { PageHeader } from "@/components/layout/page-header";
-import { PageSection, PageShell } from "@/components/layout/page-section";
+import { PageSection } from "@/components/layout/page-section";
 import { DesktopRecommendedNotice } from "@/components/layout/desktop-recommended-notice";
 import type { DepotPin } from "@/components/maps/admin-depot-map";
 import type { inferRouterOutputs } from "@trpc/server";
@@ -78,7 +77,7 @@ const depotSchema = z.object({
 
 type DepotFormValues = z.infer<typeof depotSchema>;
 
-export default function AdminDepotsPage() {
+export function FleetDepotsTab() {
   const util = trpc.useUtils();
   const { siteName } = useBranding();
   const { data: depots } = trpc.admin.listDepots.useQuery();
@@ -198,18 +197,19 @@ export default function AdminDepotsPage() {
   ];
 
   return (
-    <PageShell>
-      <PageHeader
-        eyebrow="Administration"
-        title="Depots"
-        description="Manage depot locations, contact details, and operating hours."
-        actions={
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus className="h-4 w-4" />
-            New depot
-          </Button>
-        }
-      />
+    <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-foreground">Depots</h2>
+          <p className="text-sm text-muted-foreground">
+            Manage depot locations, contact details, and operating hours.
+          </p>
+        </div>
+        <Button onClick={() => setShowCreate(true)}>
+          <Plus className="h-4 w-4" />
+          New depot
+        </Button>
+      </div>
 
       <PageSection
         title="Locations"
@@ -444,6 +444,6 @@ export default function AdminDepotsPage() {
           )}
         </SheetContent>
       </Sheet>
-    </PageShell>
+    </div>
   );
 }

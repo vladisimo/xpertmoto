@@ -41,7 +41,7 @@ export default async function AdminAiInsightDetailPage({
         <InsightDetailClient
           insightId={insightId}
           basePath="/admin/ai-insights"
-          customerHrefTemplate="/admin/users?userId={id}"
+          customerHrefTemplate="/staff/customers/{id}"
         />
       </PageShell>
     </div>

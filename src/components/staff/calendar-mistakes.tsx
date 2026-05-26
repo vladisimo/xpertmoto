@@ -1,5 +1,12 @@
 import Link from "next/link";
-import { AlertOctagon, Calendar, FileWarning, Wrench } from "lucide-react";
+import {
+  AlertOctagon,
+  Calendar,
+  CheckCircle2,
+  FileWarning,
+  Wrench,
+  type LucideIcon,
+} from "lucide-react";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import type { CalendarMistakes } from "@/server/services/staff-ops-signals";
@@ -7,168 +14,158 @@ import type { CalendarMistakes } from "@/server/services/staff-ops-signals";
 export function CalendarMistakesView({ data }: { data: CalendarMistakes }) {
   if (data.total === 0) {
     return (
-      <p className="caption">
-        No calendar inconsistencies detected. Allocations, maintenance windows, vehicle
-        statuses, and document expiries all line up.
-      </p>
+      <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+        <CheckCircle2
+          className="h-5 w-5 text-muted-foreground/60"
+          aria-hidden
+        />
+        <p className="text-sm font-medium">No inconsistencies</p>
+        <p className="text-xs text-muted-foreground">
+          Allocations, maintenance, statuses and document expiries all line up.
+        </p>
+      </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {data.unallocated.length > 0 && (
-        <MistakeBlock
-          icon={<AlertOctagon className="h-4 w-4 text-destructive" aria-hidden />}
-          title="Active booking with no vehicle allocated"
-          hint="Staff forgot to allocate a vehicle at check-out. Open the booking to assign one."
+        <Section
+          icon={AlertOctagon}
+          title="No vehicle allocated"
+          count={data.unallocated.length}
         >
           {data.unallocated.map((b) => (
-            <Row
+            <AlertItem
               key={b.id}
               href={`/staff/bookings/${b.id}`}
-              left={
-                <span className="font-medium">
-                  {b.bookingReference} · {b.customerName}
-                </span>
+              title={`${b.bookingReference} · ${b.customerName}`}
+              detail={b.categoryName}
+              badge={
+                <StatusBadge status={b.status as "ACTIVE" | "CHECKED_OUT"} />
               }
-              mid={<span className="text-xs text-muted-foreground">{b.categoryName}</span>}
-              right={<StatusBadge status={b.status as "ACTIVE" | "CHECKED_OUT"} />}
             />
           ))}
-        </MistakeBlock>
+        </Section>
       )}
 
       {data.maintenanceConflicts.length > 0 && (
-        <MistakeBlock
-          icon={<Wrench className="h-4 w-4 text-destructive" aria-hidden />}
-          title="Confirmed booking conflicts with maintenance"
-          hint="A future booking overlaps a scheduled work order for the same vehicle. Re-allocate or reschedule."
+        <Section
+          icon={Wrench}
+          title="Maintenance conflict"
+          count={data.maintenanceConflicts.length}
         >
           {data.maintenanceConflicts.map((c) => (
-            <Row
+            <AlertItem
               key={`${c.bookingId}:${c.workOrderId}`}
               href={`/staff/bookings/${c.bookingId}`}
-              left={
-                <span className="font-medium">
-                  {c.bookingReference} · {c.vehicleCode}
-                </span>
-              }
-              mid={
-                <span className="text-xs text-muted-foreground">
-                  Work order {c.workOrderNumber} · {formatDate(c.scheduledStartAt)} → {formatDate(c.scheduledEndAt)}
-                </span>
-              }
-              right={
-                <span className="text-xs text-muted-foreground">
-                  Booking {formatDate(c.pickupDateTime)}
-                </span>
-              }
+              title={`${c.bookingReference} · ${c.vehicleCode}`}
+              detail={`WO ${c.workOrderNumber} · ${formatDate(c.scheduledStartAt)} → ${formatDate(
+                c.scheduledEndAt,
+              )} · booking ${formatDate(c.pickupDateTime)}`}
             />
           ))}
-        </MistakeBlock>
+        </Section>
       )}
 
       {data.statusMismatches.length > 0 && (
-        <MistakeBlock
-          icon={<Calendar className="h-4 w-4 text-destructive" aria-hidden />}
-          title="Vehicle status does not match booking state"
-          hint="Vehicle status drifted from what the bookings say. Review the vehicle to resync."
+        <Section
+          icon={Calendar}
+          title="Status mismatch"
+          count={data.statusMismatches.length}
         >
           {data.statusMismatches.map((m) => (
-            <Row
+            <AlertItem
               key={m.vehicleId}
               href={`/staff/fleet/${m.vehicleId}`}
-              left={<span className="font-medium">{m.vehicleCode}</span>}
-              mid={
-                <span className="text-xs text-muted-foreground">
-                  {m.observed === "AVAILABLE_BUT_ON_HIRE"
-                    ? `Marked AVAILABLE but booking ${m.bookingReference ?? "—"} is active`
-                    : "Marked RENTED but no active booking"}
-                </span>
+              title={m.vehicleCode}
+              detail={
+                m.observed === "AVAILABLE_BUT_ON_HIRE"
+                  ? `Marked AVAILABLE but booking ${m.bookingReference ?? "—"} is active`
+                  : "Marked RENTED but no active booking"
               }
-              right={<StatusBadge status={m.vehicleStatus as "AVAILABLE" | "RENTED"} />}
+              badge={
+                <StatusBadge
+                  status={m.vehicleStatus as "AVAILABLE" | "RENTED"}
+                />
+              }
             />
           ))}
-        </MistakeBlock>
+        </Section>
       )}
 
       {data.docsExpiringWithBooking.length > 0 && (
-        <MistakeBlock
-          icon={<FileWarning className="h-4 w-4 text-destructive" aria-hidden />}
-          title="Vehicle docs expire before booking ends"
-          hint="Rego / CTP / insurance lapses during the rental window. Renew or re-allocate."
+        <Section
+          icon={FileWarning}
+          title="Docs expire mid-booking"
+          count={data.docsExpiringWithBooking.length}
         >
           {data.docsExpiringWithBooking.map((d) => (
-            <Row
+            <AlertItem
               key={`${d.bookingId}:${d.expiringDoc}`}
               href={`/staff/fleet/${d.vehicleId}`}
-              left={
-                <span className="font-medium">
-                  {d.vehicleCode} · {d.bookingReference}
-                </span>
-              }
-              mid={
-                <span className="text-xs text-muted-foreground">
-                  {d.expiringDoc.toUpperCase()} expires {formatDate(d.expiresAt)}
-                </span>
-              }
-              right={
-                <span className="text-xs text-muted-foreground">
-                  Pickup {formatDateTime(d.pickupDateTime)}
-                </span>
-              }
+              title={`${d.vehicleCode} · ${d.bookingReference}`}
+              detail={`${d.expiringDoc.toUpperCase()} expires ${formatDate(
+                d.expiresAt,
+              )} · pickup ${formatDateTime(d.pickupDateTime)}`}
             />
           ))}
-        </MistakeBlock>
+        </Section>
       )}
     </div>
   );
 }
 
-function MistakeBlock({
-  icon,
+function Section({
+  icon: Icon,
   title,
-  hint,
+  count,
   children,
 }: {
-  icon: React.ReactNode;
+  icon: LucideIcon;
   title: string;
-  hint: string;
+  count: number;
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="flex items-start gap-2">
-        {icon}
-        <div className="min-w-0">
-          <div className="text-sm font-medium">{title}</div>
-          <div className="text-xs text-muted-foreground">{hint}</div>
-        </div>
+    <section className="space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <Icon className="h-3.5 w-3.5 text-destructive" aria-hidden />
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </h3>
+        <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-destructive/10 px-1.5 text-[10px] font-semibold text-destructive">
+          {count}
+        </span>
       </div>
-      <div className="space-y-2">{children}</div>
-    </div>
+      <div className="space-y-1.5">{children}</div>
+    </section>
   );
 }
 
-function Row({
+function AlertItem({
   href,
-  left,
-  mid,
-  right,
+  title,
+  detail,
+  badge,
 }: {
   href: string;
-  left: React.ReactNode;
-  mid: React.ReactNode;
-  right: React.ReactNode;
+  title: string;
+  detail: string;
+  badge?: React.ReactNode;
 }) {
   return (
     <Link
       href={href}
-      className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm transition-colors hover:bg-muted/50"
+      className="block rounded-md border border-border bg-background px-2.5 py-2 transition-colors hover:bg-muted/50"
     >
-      <div className="min-w-0 flex-1 truncate">{left}</div>
-      <div className="min-w-0 flex-1 truncate">{mid}</div>
-      <div className="shrink-0">{right}</div>
+      <div className="flex items-start justify-between gap-2">
+        <span className="truncate text-sm font-medium">{title}</span>
+        {badge && <span className="shrink-0">{badge}</span>}
+      </div>
+      <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+        {detail}
+      </p>
     </Link>
   );
 }

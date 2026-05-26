@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import { LicenceClassChips } from "@/components/staff/customer-tab-documents";
 import { ViewAsCustomerButton } from "@/components/staff/view-as-customer-button";
 import {
@@ -615,15 +615,15 @@ export function CustomerTabPersonal({
             <dl className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Total Bookings</dt>
-                <dd className="font-medium">{cp?.totalBookings ?? 0}</dd>
+                <dd className="font-medium">{(cp?.totalBookings ?? 0).toLocaleString("en-AU")}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Total Spend</dt>
-                <dd className="font-medium">${Number(cp?.totalSpend ?? 0).toFixed(2)}</dd>
+                <dd className="font-medium">{formatCurrency(Number(cp?.totalSpend ?? 0))}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Loyalty Points</dt>
-                <dd className="font-medium">{cp?.loyaltyPoints ?? 0}</dd>
+                <dd className="font-medium">{(cp?.loyaltyPoints ?? 0).toLocaleString("en-AU")}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Marketing Opt-In</dt>

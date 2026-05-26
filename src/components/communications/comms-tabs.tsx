@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  FileText,
   Inbox,
   MessageSquare,
   Send,
@@ -19,6 +20,7 @@ const TABS: Tab[] = [
   { href: "/staff/communications", label: "Log", icon: Inbox },
   { href: "/staff/communications/compose", label: "Compose", icon: Send },
   { href: "/staff/communications/campaigns", label: "Campaigns", icon: MessageSquare },
+  { href: "/staff/communications/templates", label: "Templates", icon: FileText },
   { href: "/staff/communications/segments", label: "Segments", icon: Target },
   { href: "/staff/communications/preferences", label: "Preferences", icon: ShieldCheck },
   { href: "/staff/communications/automations", label: "Automations", icon: Zap },

@@ -5,13 +5,11 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeftRight,
   FileText,
-  Layers,
   LayoutDashboard,
   Lock,
   Receipt,
   Repeat,
   Scale,
-  Tags,
   Webhook,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -26,8 +24,6 @@ const TABS: Tab[] = [
   { href: "/admin/finance/gst", label: "GST / BAS", icon: Receipt },
   { href: "/admin/finance/reconciliation", label: "Reconciliation", icon: Scale },
   { href: "/admin/finance/recurring", label: "Recurring", icon: Repeat },
-  { href: "/admin/pricing", label: "Pricing", icon: Tags },
-  { href: "/admin/finance/categories", label: "Categories", icon: Layers },
   { href: "/admin/webhooks", label: "Webhook health", icon: Webhook },
 ];
 

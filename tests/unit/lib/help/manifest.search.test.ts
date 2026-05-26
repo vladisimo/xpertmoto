@@ -43,7 +43,7 @@ describe("getContextualHelpSlug", () => {
 
   it("resolves a top-level section route", () => {
     expect(getContextualHelpSlug("/staff/fleet")).toBe("fleet");
-    expect(getContextualHelpSlug("/admin/users")).toBe("users-and-roles");
+    expect(getContextualHelpSlug("/staff/customers")).toBe("customers");
   });
 
   it("prefers the longest matching prefix", () => {
@@ -61,7 +61,7 @@ describe("getContextualHelpSlug", () => {
 describe("navLabelForHref", () => {
   it("uses the nav label for a known route", () => {
     expect(navLabelForHref("/staff/fleet")).toBe("Fleet");
-    expect(navLabelForHref("/admin/users")).toBe("Users & Roles");
+    expect(navLabelForHref("/staff/customers")).toBe("Customers");
   });
 
   it("humanises routes that are not in the sidebar", () => {

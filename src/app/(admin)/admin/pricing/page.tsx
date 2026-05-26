@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import type { inferRouterOutputs } from "@trpc/server";
 import { trpc } from "@/lib/trpc/client";
 import type { AppRouter } from "@/server/trpc/router";
@@ -23,11 +24,31 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
-import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
 import { TieredPricingPanel } from "@/components/admin/pricing/tiered-pricing-panel";
 import { TierEditor } from "@/components/admin/pricing/tier-editor";
+import { CategoriesManager } from "@/components/admin/categories-manager";
+import {
+  Bike,
+  CalendarRange,
+  DollarSign,
+  Percent,
+  PlusCircle,
+  Shapes,
+  Umbrella,
+  type LucideIcon,
+} from "lucide-react";
 
-type Tab = "rates" | "models" | "addons" | "insurance" | "discounts" | "seasons";
+type Tab = "rates" | "categories" | "models" | "addons" | "insurance" | "discounts" | "seasons";
+
+const TABS: { value: Tab; label: string; icon: LucideIcon }[] = [
+  { value: "rates", label: "Rates", icon: DollarSign },
+  { value: "categories", label: "Categories", icon: Shapes },
+  { value: "models", label: "Models", icon: Bike },
+  { value: "addons", label: "Add-ons", icon: PlusCircle },
+  { value: "insurance", label: "Insurance", icon: Umbrella },
+  { value: "discounts", label: "Discounts", icon: Percent },
+  { value: "seasons", label: "Seasons", icon: CalendarRange },
+];
 type RatesView = "base" | "tiered";
 
 type PricingSummary = inferRouterOutputs<AppRouter>["admin"]["pricingSummary"];
@@ -54,7 +75,11 @@ export default function PricingPage() {
   const upsertDiscount = trpc.admin.upsertDiscount.useMutation({ onSuccess: invalidate });
   const upsertSeason = trpc.admin.upsertSeason.useMutation({ onSuccess: invalidate });
 
-  const [tab, setTab] = useState<Tab>("rates");
+  const searchParams = useSearchParams();
+  const urlTab = searchParams.get("tab") as Tab | null;
+  const [tab, setTab] = useState<Tab>(
+    urlTab && TABS.some((t) => t.value === urlTab) ? urlTab : "rates",
+  );
   const [ratesView, setRatesView] = useState<RatesView>("base");
   const [newDiscount, setNewDiscount] = useState({ code: "", type: "PERCENTAGE" as "PERCENTAGE" | "FIXED", value: 10, isActive: true });
   const [newSeason, setNewSeason] = useState({ name: "", startDate: "", endDate: "", multiplier: 1.2, isActive: true });
@@ -449,27 +474,29 @@ export default function PricingPage() {
   return (
     <PageShell>
       <PageHeader
-        eyebrow="Administration · Finance"
+        eyebrow="Administration"
         title="Pricing"
         description="Base rates, add-ons, insurance tiers, discounts, and seasonal multipliers."
       />
 
-      <FinanceTabsBar />
-
       <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0">
-        {(["rates", "models", "addons", "insurance", "discounts", "seasons"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`shrink-0 border-b-2 px-4 py-2 text-sm font-medium ${
-              tab === t
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t[0]!.toUpperCase() + t.slice(1)}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.value}
+              onClick={() => setTab(t.value)}
+              className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium ${
+                tab === t.value
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden />
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {tab === "rates" && (
@@ -512,6 +539,8 @@ export default function PricingPage() {
           {ratesView === "tiered" && <TieredPricingPanel />}
         </div>
       )}
+
+      {tab === "categories" && <CategoriesManager />}
 
       {tab === "models" && (
         <div className="space-y-4">

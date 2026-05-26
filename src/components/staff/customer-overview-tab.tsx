@@ -169,7 +169,7 @@ export function CustomerOverviewTab() {
           </ul>
         </header>
         <div className="px-2 pb-2 pt-3" style={{ height: 188 }}>
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height: 188 }}>
             <BarChart data={trendData} margin={{ top: 8, right: 16, left: 8, bottom: 8 }}>
               <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" vertical={false} />
               <XAxis

@@ -39,15 +39,7 @@ const BRANDING_SETTING_KEYS = new Set([
   "org.logoSquareUrl",
   "org.faviconUrl",
 ]);
-import {
-  clearValue,
-  getSecret,
-  getString,
-  listConfigSources,
-  setSecret,
-  setString,
-} from "@/lib/integration-config";
-import { findField, flattenFields } from "@/lib/integration-fields";
+import { getSecret, getString } from "@/lib/integration-config";
 import { skipAutoAudit, writeAudit } from "@/server/services/audit";
 import { buildAuditWhere } from "@/server/services/audit-query";
 import {
@@ -3577,86 +3569,5 @@ export const adminRouter = createTRPCRouter({
       .delete({ where: { key: "xero:tokens" } })
       .catch(() => null);
     return { ok: true };
-  }),
-
-  // ----- Integration credential management (SUPER_ADMIN) -----
-  listIntegrationConfig: superAdminProcedure.query(async () => {
-    const fields = flattenFields();
-    const sources = await listConfigSources(
-      fields.map((f) => ({ key: f.key, envFallback: f.envFallback })),
-    );
-    return sources;
-  }),
-
-  setIntegrationConfig: superAdminProcedure
-    .input(z.object({ key: z.string().min(1), value: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      skipAutoAudit(ctx);
-      const field = findField(input.key);
-      if (!field) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown integration field" });
-
-      if (field.secret) {
-        await setSecret(input.key, input.value);
-      } else {
-        await setString(input.key, input.value);
-      }
-
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "INTEGRATION_CONFIG_SET",
-        entity: "SystemSetting",
-        entityId: input.key,
-        newData: { key: input.key, secret: field.secret },
-      });
-
-      return { ok: true };
-    }),
-
-  clearIntegrationConfig: superAdminProcedure
-    .input(z.object({ key: z.string().min(1) }))
-    .mutation(async ({ ctx, input }) => {
-      skipAutoAudit(ctx);
-      const field = findField(input.key);
-      if (!field) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown integration field" });
-
-      await clearValue(input.key);
-
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "INTEGRATION_CONFIG_CLEARED",
-        entity: "SystemSetting",
-        entityId: input.key,
-      });
-
-      return { ok: true };
-    }),
-
-  generateVapidKeys: superAdminProcedure.mutation(async ({ ctx }) => {
-    skipAutoAudit(ctx);
-    const webpushMod = await import("web-push");
-    const webpush = (webpushMod as unknown as { default?: typeof webpushMod }).default ?? webpushMod;
-    const pair = webpush.generateVAPIDKeys();
-    await setString("integration:vapid:publicKey", pair.publicKey);
-    await setSecret("integration:vapid:privateKey", pair.privateKey);
-    await writeAudit(ctx.prisma, {
-      userId: ctx.user.id,
-      action: "INTEGRATION_VAPID_ROTATED",
-      entity: "SystemSetting",
-      entityId: "integration:vapid",
-    });
-    return { publicKey: pair.publicKey };
-  }),
-
-  generateTelemetryToken: superAdminProcedure.mutation(async ({ ctx }) => {
-    skipAutoAudit(ctx);
-    const token = crypto.randomBytes(32).toString("base64url");
-    await setSecret("integration:telemetry:ingestToken", token);
-    await writeAudit(ctx.prisma, {
-      userId: ctx.user.id,
-      action: "INTEGRATION_TELEMETRY_TOKEN_ROTATED",
-      entity: "SystemSetting",
-      entityId: "integration:telemetry:ingestToken",
-    });
-    return { token };
   }),
 });
