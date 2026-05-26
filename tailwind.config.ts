@@ -98,6 +98,13 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      // Named transition-duration so callers can avoid `duration-[1200ms]`,
+      // which tailwindcss-animate makes ambiguous (it also registers a
+      // `duration-*` namespace for animation-duration). A named key that
+      // exists only here resolves unambiguously to transition-duration.
+      transitionDuration: {
+        "1200": "1200ms",
+      },
     },
   },
   plugins: [require("tailwindcss-animate")],

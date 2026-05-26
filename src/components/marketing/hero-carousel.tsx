@@ -83,7 +83,7 @@ export function HeroCarousel({
             key={s.imageSrc}
             aria-hidden={i !== active}
             className={cn(
-              "absolute inset-0 transition-opacity duration-[1200ms] ease-in-out",
+              "absolute inset-0 transition-opacity duration-1200 ease-in-out",
               i === active ? "opacity-100" : "opacity-0",
             )}
           >
