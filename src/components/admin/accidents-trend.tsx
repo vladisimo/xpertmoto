@@ -30,7 +30,7 @@ export function AccidentsTrend({ data }: { data: AccidentsTrendPoint[] }) {
   return (
     <div className="space-y-3">
       <div className="h-48 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height: 192 }}>
           <BarChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -16 }}>
             <CartesianGrid vertical={false} stroke="hsl(var(--border))" strokeDasharray="3 3" />
             <XAxis

@@ -48,7 +48,7 @@ export function FinanceRevenueTrend({
 
   return (
     <div style={height ? { height } : undefined} className={cn("w-full", height ? "" : "h-full")}>
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height: height ?? 280 }}>
         <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 12, left: 12 }}>
           <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" opacity={0.5} vertical={false} />
           <XAxis

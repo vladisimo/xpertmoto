@@ -42,7 +42,7 @@ export function StackedConversion({ payload, height = 260 }: Props) {
 
   return (
     <div style={{ height }} className="w-full">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height }}>
         <BarChart
           data={data}
           layout="vertical"
