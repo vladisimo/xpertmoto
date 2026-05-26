@@ -6,6 +6,7 @@ import { DividedTitle } from "@/components/marketing/divided-title";
 import { FaqList } from "@/components/marketing/faq-list";
 import { IntegrationsGrid } from "@/components/marketing/integrations-grid";
 import { SnapSection } from "@/components/marketing/snap-section";
+import { TechStackGrid } from "@/components/marketing/tech-stack-grid";
 import {
   LiveCostComparison,
   type StaticCostRow,
@@ -789,6 +790,10 @@ export default async function WhyXpertPage() {
             </div>
           ))}
         </div>
+      </SnapSection>
+
+      <SnapSection>
+        <TechStackGrid siteName={siteName} />
       </SnapSection>
 
       <SnapSection>
