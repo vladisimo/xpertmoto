@@ -103,7 +103,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",
     "date-fns": "^4.3.0",
-    "ioredis": "^5.11.0",
+    "ioredis": "^5.10.1",
     "lucide-react": "^0.453.0",
     "maplibre-gl": "^5.24.0",
     "next": "^16.2.4",
