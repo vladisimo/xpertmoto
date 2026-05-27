@@ -29,6 +29,7 @@ type PrismaMock = {
     findUnique: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
   };
+  booking: { update: ReturnType<typeof vi.fn> };
   auditLog: { create: ReturnType<typeof vi.fn> };
   $transaction: ReturnType<typeof vi.fn>;
 };
@@ -48,14 +49,19 @@ function makePrisma(overrides: Partial<PrismaMock> = {}): PrismaMock {
     amount: 150,
   });
   const paymentFindUnique = vi.fn().mockResolvedValue(null);
+  // Raising a new PENDING charge increments Booking.balanceDue inside the tx
+  // (balance-due invariant) — the capture later nets it out.
+  const bookingUpdate = vi.fn().mockResolvedValue({ id: "book_1", balanceDue: 150 });
   const prisma: PrismaMock = {
     damageCharge: { findUniqueOrThrow: vi.fn(), update: damageChargeUpdate },
     payment: { findUnique: paymentFindUnique, create: paymentCreate },
+    booking: { update: bookingUpdate },
     auditLog: { create: vi.fn().mockResolvedValue({}) },
     $transaction: vi.fn(async (cb: (tx: unknown) => unknown) =>
       cb({
         payment: { findUnique: paymentFindUnique, create: paymentCreate },
         damageCharge: { update: damageChargeUpdate },
+        booking: { update: bookingUpdate },
       }),
     ),
     ...overrides,
@@ -123,6 +129,13 @@ describe("return.confirmCharge", () => {
         }),
       }),
     );
+    // balance-due invariant: the newly-raised PENDING charge bumps balanceDue.
+    expect(prisma.booking.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "book_1" },
+        data: { balanceDue: { increment: 150 } },
+      }),
+    );
   });
 
   it("is idempotent — re-running on CONFIRMED returns current paymentId without writing", async () => {
@@ -146,6 +159,8 @@ describe("return.confirmCharge", () => {
     expect(r.paymentId).toBe("pay_existing");
     expect(prisma.payment.create).not.toHaveBeenCalled();
     expect(prisma.damageCharge.update).not.toHaveBeenCalled();
+    // Re-confirming an already-raised charge must not double-count balanceDue.
+    expect(prisma.booking.update).not.toHaveBeenCalled();
   });
 
   it("zero-amount charges move to CONFIRMED with no Payment row", async () => {

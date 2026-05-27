@@ -120,7 +120,10 @@ describe("runCartRecovery", () => {
     mocks.booking.findMany.mockResolvedValue([
       mockBooking({ recoveryStage: 1, ageMinutes: 60 }),
     ]);
-    const result = await runCartRecovery();
+    // Pin "now" to the same instant the fixture is built from — otherwise the
+    // 60-min-old booking ages past the stage-2 threshold against the wall clock.
+    const now = new Date("2026-05-01T10:00:00Z");
+    const result = await runCartRecovery(now);
     expect(result.stage2).toBe(0);
     expect(sendNotification).not.toHaveBeenCalled();
   });
