@@ -53,6 +53,7 @@ export default function CommsLogPage() {
     category: l.category,
     channel: l.channel,
     status: l.status,
+    errorMessage: l.errorMessage,
     subject: l.subject,
     templateUsed: l.templateUsed,
     customer: l.customer

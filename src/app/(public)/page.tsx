@@ -15,6 +15,7 @@ import {
 } from "@/components/fleet/home-fleet-preview";
 import { prisma } from "@/lib/prisma";
 import { getBranding } from "@/lib/branding";
+import { RENTABLE_MODEL_WHERE } from "@/lib/fleet/consumer-visibility";
 
 const HERO_SLIDES = [
   { imageSrc: "/landing_hero_sllides/xpert-motorcycle-tours-desktop-homepage.webp",   imageAlt: "Riders on a guided motorcycle tour" },
@@ -25,7 +26,7 @@ const HERO_SLIDES = [
 async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
   const models = await prisma.vehicleModel.findMany({
     where: {
-      vehicles: { some: { isActive: true } },
+      ...RENTABLE_MODEL_WHERE,
       useCases: { isEmpty: false },
     },
     select: {
@@ -36,6 +37,7 @@ async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
       year: true,
       tagline: true,
       useCases: true,
+      riderLevels: true,
       category: {
         select: {
           id: true,
@@ -71,6 +73,7 @@ async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
         year: m.year,
         tagline: m.tagline,
         useCases: m.useCases,
+        riderLevels: m.riderLevels,
         category: {
           id: m.category?.id ?? "",
           licenceRequired: m.category?.licenceRequired ?? "",
@@ -124,6 +127,10 @@ export default async function HomePage() {
           title={<>Premium rides for<br/>unforgettable adventures</>}
           description="Australia's largest range of Motorcycles, with 11 brands and over 30 models to select from! Enter your dates below to see what's ready to ride — and don't worry, there are even more bikes to choose from on other dates. Your next adventure starts here!"
           secondaryCta={{ label: "View fleet", href: "/fleet" }}
+          // Drop the encoded clip into /public/hero/ then enable the video hero.
+          // The first HERO_SLIDES image stays as the poster / reduced-motion fallback.
+          // videoWebm="/hero/xpert-hero.webm"
+          // videoMp4="/hero/xpert-hero.mp4"
         />
       </div>
 

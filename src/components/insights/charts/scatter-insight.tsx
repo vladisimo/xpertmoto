@@ -36,7 +36,7 @@ export function ScatterInsight({ payload, height = 280 }: Props) {
 
   return (
     <div style={{ height }} className="w-full">
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height }}>
         <ScatterChart margin={{ top: 8, right: 16, bottom: 16, left: 16 }}>
           <CartesianGrid
             stroke="hsl(var(--border))"

@@ -43,7 +43,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { FormGrid, FormGridRow } from "@/components/forms/form-grid";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, cn } from "@/lib/utils";
+import { BikeType, FleetUseCase, RiderLevel } from "@prisma/client";
+import { BIKE_TYPES, BIKE_TYPE_LABELS } from "@/lib/bike-types";
+import { RIDER_LEVELS, RIDER_LEVEL_LABELS } from "@/lib/rider-levels";
+import { USE_CASES, USE_CASE_LABELS } from "@/lib/fleet-use-cases";
+import { ccToBand, ENGINE_BAND_LABELS } from "@/lib/engine-bands";
+import { FleetClassificationMatrix } from "@/components/fleet/fleet-classification-matrix";
 
 type ModelRow = {
   id: string;
@@ -75,6 +81,7 @@ export function FleetMakesModelsTab() {
   const [selected, setSelected] = useState<ModelRow | null>(null);
   const [search, setSearch] = useState("");
   const [confidence, setConfidence] = useState<string>("");
+  const [view, setView] = useState<"list" | "matrix">("list");
 
   const enrich = trpc.vehicleModel.enqueueEnrichment.useMutation({
     onSuccess: () => util.vehicleModel.list.invalidate(),
@@ -185,6 +192,72 @@ export function FleetMakesModelsTab() {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
       <PageSection flush>
+        <div className="mb-3 inline-flex rounded-md border border-border p-0.5">
+          <button
+            type="button"
+            onClick={() => setView("list")}
+            className={cn(
+              "rounded px-3 py-1 text-sm transition-colors",
+              view === "list" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+            )}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("matrix")}
+            className={cn(
+              "rounded px-3 py-1 text-sm transition-colors",
+              view === "matrix" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+            )}
+          >
+            Classification matrix
+          </button>
+        </div>
+
+        {view === "matrix" ? (
+          <FleetClassificationMatrix />
+        ) : (
+          <ModelListView
+            rows={filteredRows}
+            isLoading={isLoading}
+            columns={columns}
+            search={search}
+            setSearch={setSearch}
+            confidence={confidence}
+            setConfidence={setConfidence}
+          />
+        )}
+      </PageSection>
+
+      <Sheet open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
+        <SheetContent side="right" className="w-full sm:max-w-2xl">
+          {selected && <ModelManage modelId={selected.id} />}
+        </SheetContent>
+      </Sheet>
+    </div>
+  );
+}
+
+function ModelListView({
+  rows,
+  isLoading,
+  columns,
+  search,
+  setSearch,
+  confidence,
+  setConfidence,
+}: {
+  rows: ModelRow[] | undefined;
+  isLoading: boolean;
+  columns: DataTableColumn<ModelRow>[];
+  search: string;
+  setSearch: (v: string) => void;
+  confidence: string;
+  setConfidence: (v: string) => void;
+}) {
+  return (
+    <>
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Search
@@ -215,18 +288,11 @@ export function FleetMakesModelsTab() {
 
         <DataTable
           columns={columns}
-          data={filteredRows}
+          data={rows}
           getRowId={(r) => r.id}
           empty={isLoading ? "Loading…" : "No models registered yet."}
         />
-      </PageSection>
-
-      <Sheet open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
-        <SheetContent side="right" className="w-full sm:max-w-2xl">
-          {selected && <ModelManage modelId={selected.id} />}
-        </SheetContent>
-      </Sheet>
-    </div>
+    </>
   );
 }
 
@@ -418,6 +484,14 @@ function ModelManage({ modelId }: { modelId: string }) {
           </Form>
         </section>
 
+        <ClassificationEditor
+          modelId={modelId}
+          engineCapacityCc={data.engineCapacityCc}
+          initialBikeTypes={data.bikeTypes}
+          initialRiderLevels={data.riderLevels}
+          initialUseCases={data.useCases}
+        />
+
         <section className="mt-8 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="h3">Documents</h3>
@@ -492,6 +566,148 @@ function ModelManage({ modelId }: { modelId: string }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Per-model browse/filter taxonomy editor. Deliberately separate from the
+ * Specifications form: toggling a classification tag must NOT bump
+ * `specsFetchedAt` / `specsConfidence` (the catalogue should never claim the
+ * manufacturer specs were re-verified just because someone ticked "Sport").
+ * Engine band is shown read-only — it's derived from the entered cc.
+ */
+function ClassificationEditor({
+  modelId,
+  engineCapacityCc,
+  initialBikeTypes,
+  initialRiderLevels,
+  initialUseCases,
+}: {
+  modelId: string;
+  engineCapacityCc: number | null;
+  initialBikeTypes: BikeType[];
+  initialRiderLevels: RiderLevel[];
+  initialUseCases: FleetUseCase[];
+}) {
+  const util = trpc.useUtils();
+  const [bikeTypes, setBikeTypes] = useState<BikeType[]>(initialBikeTypes);
+  const [riderLevels, setRiderLevels] = useState<RiderLevel[]>(initialRiderLevels);
+  const [useCases, setUseCases] = useState<FleetUseCase[]>(initialUseCases);
+
+  const save = trpc.vehicleModel.updateClassification.useMutation({
+    onSuccess: () => {
+      util.vehicleModel.get.invalidate({ id: modelId });
+      util.vehicleModel.list.invalidate();
+    },
+  });
+
+  const dirty =
+    !sameSet(bikeTypes, initialBikeTypes) ||
+    !sameSet(riderLevels, initialRiderLevels) ||
+    !sameSet(useCases, initialUseCases);
+
+  const band = ccToBand(engineCapacityCc);
+
+  return (
+    <section className="mt-8 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <h3 className="h3">Classification</h3>
+        <span className="caption text-muted-foreground">
+          Browse &amp; filter tags — does not affect pricing
+        </span>
+      </div>
+
+      <TogglePillGroup
+        label="Use cases"
+        options={USE_CASES}
+        labels={USE_CASE_LABELS}
+        selected={useCases}
+        onToggle={(v) => setUseCases((prev) => toggle(prev, v))}
+      />
+      <TogglePillGroup
+        label="Rider levels"
+        options={RIDER_LEVELS}
+        labels={RIDER_LEVEL_LABELS}
+        selected={riderLevels}
+        onToggle={(v) => setRiderLevels((prev) => toggle(prev, v))}
+      />
+      <TogglePillGroup
+        label="Bike types"
+        options={BIKE_TYPES}
+        labels={BIKE_TYPE_LABELS}
+        selected={bikeTypes}
+        onToggle={(v) => setBikeTypes((prev) => toggle(prev, v))}
+      />
+
+      <div className="text-sm">
+        <span className="font-medium">Engine band: </span>
+        <span className="text-muted-foreground">
+          {band ? ENGINE_BAND_LABELS[band] : "— (set engine cc above)"}
+        </span>
+      </div>
+
+      <div className="flex justify-end">
+        <Button
+          disabled={!dirty || save.isPending}
+          onClick={() => save.mutate({ id: modelId, bikeTypes, riderLevels, useCases })}
+        >
+          {save.isPending ? "Saving…" : "Save classification"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function TogglePillGroup<T extends string>({
+  label,
+  options,
+  labels,
+  selected,
+  onToggle,
+}: {
+  label: string;
+  options: readonly T[];
+  labels: Record<T, string>;
+  selected: T[];
+  onToggle: (value: T) => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-sm font-medium">{label}</p>
+      <div className="flex flex-wrap gap-2">
+        {options.map((opt) => {
+          const active = selected.includes(opt);
+          return (
+            <button
+              key={opt}
+              type="button"
+              role="checkbox"
+              aria-checked={active}
+              aria-label={`${label}: ${labels[opt]}`}
+              onClick={() => onToggle(opt)}
+              className={cn(
+                "rounded-full border px-3 py-1 text-sm transition-colors",
+                active
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {labels[opt]}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function toggle<T>(arr: T[], value: T): T[] {
+  return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
+}
+
+function sameSet<T>(a: T[], b: T[]): boolean {
+  if (a.length !== b.length) return false;
+  const setB = new Set(b);
+  return a.every((v) => setB.has(v));
 }
 
 function UploadDocumentButton({

@@ -32,7 +32,7 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn().mockResolvedValue([]),
     },
     booking: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
-    bondLedger: { updateMany: bondUpdateMany },
+    bondLedger: { updateMany: bondUpdateMany, findFirst: vi.fn().mockResolvedValue(null) },
     customerProfile: { updateMany: vi.fn() },
     incident: { findFirst: vi.fn(), create: vi.fn() },
     user: { findMany: vi.fn().mockResolvedValue([]) },

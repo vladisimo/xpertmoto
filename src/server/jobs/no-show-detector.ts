@@ -5,7 +5,10 @@ import { logger } from "@/lib/logger";
 import { getSettings } from "@/lib/settings";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { sendNotification } from "@/server/services/notification-sender";
-import { getQueue, registerWorker } from "./queue";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
+import { recomputeCustomerRewards } from "@/server/services/customer-rewards";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 /**
  * G22 — no-show detector.
@@ -61,6 +64,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
       vehicleId: true,
       pickupDateTime: true,
       bondAmount: true,
+      pickupDepot: { select: { slug: true } },
       bondLedger: {
         select: {
           id: true,
@@ -95,6 +99,15 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
               },
             },
           },
+        });
+
+        // Cancel any long-term recurring billing plan in the same transaction,
+        // mirroring booking-cancellation.ts — don't rely on the hourly
+        // booking-billing tick to notice the NO_SHOW status, which would leave
+        // an ACTIVE plan able to queue a charge against a no-show in between.
+        await tx.bookingBillingPlan.updateMany({
+          where: { bookingId: b.id, status: { notIn: ["CANCELLED", "COMPLETED"] } },
+          data: { status: "CANCELLED", cancelReason: "Booking marked as no-show" },
         });
 
         if (canForfeitBond && ledger) {
@@ -138,6 +151,13 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
               status: "PENDING",
               notes: `No-show fee (pickup ${b.pickupDateTime.toISOString()})`,
             },
+          });
+          // Owed until the capture-pending job collects it. Add to balanceDue
+          // so applyCaptureToBalanceDue nets it out on capture, keeping the
+          // raise→add / collect→remove invariant (see balance-due.ts).
+          await tx.booking.update({
+            where: { id: b.id },
+            data: { balanceDue: { increment: feeAud } },
           });
         }
 
@@ -183,8 +203,53 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
             fallbackFeeAud: canForfeitBond ? 0 : feeAud,
           },
         });
+        await trackServer({
+          event: SERVER_EVENTS.bookingNoShowDetected,
+          distinctId: b.customerId,
+          properties: {
+            bookingId: b.id,
+            reference: b.bookingReference,
+            graceHours,
+            bondForfeitedAud: canForfeitBond ? forfeitedAmount : 0,
+            noShowFeeAud: canForfeitBond ? 0 : feeAud,
+          },
+          groups: { depot: b.pickupDepot.slug },
+        });
       }
       marked += 1;
+
+      // Credit the rental invoice down to $0 — the supply was never
+      // provided. The no-show fee / bond forfeiture is a separate punitive
+      // charge with its own document, NOT retained rental consideration, so
+      // `retained: 0`. Best-effort + idempotent (one CANCELLATION credit per
+      // invoice); the weekly sweep is the backstop.
+      try {
+        const { tryIssueCancellationAdjustment } = await import(
+          "@/server/services/invoice-lifecycle"
+        );
+        await tryIssueCancellationAdjustment({
+          bookingId: b.id,
+          retained: 0,
+          refundAmount: 0,
+          detail: `No-show — pickup ${b.pickupDateTime.toISOString()}`,
+          description: "Cancellation credit — booking marked as no-show (rental not provided)",
+        });
+      } catch {
+        // tryIssueCancellationAdjustment already swallows + logs.
+      }
+
+      // Reflect any forfeited/retained money in the rewards counters
+      // promptly. Best-effort — the nightly recompute is the backstop.
+      if (b.customerId) {
+        try {
+          await recomputeCustomerRewards(prisma, b.customerId);
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
+            "no-show-detector: rewards recompute failed",
+          );
+        }
+      }
     } catch (err) {
       logger.warn(
         { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
@@ -199,6 +264,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
 
 export function startNoShowDetectorScheduler() {
   registerWorker(QUEUE, async () => runNoShowDetector());
+  monitorCron(QUEUE, "0 * * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   // Every hour. Cheap scan, low-cardinality candidates.

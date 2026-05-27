@@ -16,6 +16,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { z } from "zod";
 import { recordOcrUsage, type OcrLogContext, type OcrUsage } from "./ocr-cost";
+import { trackAiGeneration } from "@/lib/analytics";
+import { USD_AUD_RATE } from "@/lib/constants";
 
 const MIN_CONFIDENCE = 0.7;
 
@@ -365,6 +367,7 @@ async function runVisionToolAnthropic(
   args: ToolRunArgs,
 ): Promise<VisionToolResult> {
   const client = new Anthropic({ apiKey: provider.apiKey });
+  const startedAt = performance.now();
   const response = await client.messages.create({
     model,
     max_tokens: 512,
@@ -399,6 +402,7 @@ async function runVisionToolAnthropic(
     outputTokens: response.usage.output_tokens ?? 0,
     cachedInputTokens: response.usage.cache_read_input_tokens ?? 0,
     cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
+    latencyMs: Math.round(performance.now() - startedAt),
   };
 
   for (const block of response.content) {
@@ -427,6 +431,7 @@ async function runVisionToolOpenRouter(
   const mediaType = detectMediaType(args.imageBuffer);
   const dataUrl = `data:${mediaType};base64,${args.imageBuffer.toString("base64")}`;
 
+  const startedAt = performance.now();
   const response = await client.chat.completions.create({
     model,
     max_tokens: 512,
@@ -473,6 +478,7 @@ async function runVisionToolOpenRouter(
     outputTokens: openRouterResp.usage?.completion_tokens ?? 0,
     cachedInputTokens: 0,
     cacheCreationTokens: 0,
+    latencyMs: Math.round(performance.now() - startedAt),
     ...(typeof openRouterResp.usage?.cost === "number"
       ? { upstreamCostUsd: openRouterResp.usage.cost }
       : {}),
@@ -504,7 +510,30 @@ async function maybeLogOcr(
   outcome: "SUCCESS" | "LOW_CONFIDENCE" | "NO_MATCH" | "ERROR",
 ): Promise<void> {
   if (!log || !usage) return;
-  await recordOcrUsage({ ...log, outcome }, usage);
+  const costAud = await recordOcrUsage({ ...log, outcome }, usage);
+  // Mirror the call into PostHog LLM observability. distinctId prefers the
+  // customer the document belongs to, falling back to the staff member who
+  // triggered it. PostHog wants USD; OpenRouter gives it directly, otherwise
+  // convert our AUD cost back at the same rate ocr-cost used.
+  const distinctId = log.customerId ?? log.triggeredById;
+  if (!distinctId) return;
+  const costUsd =
+    usage.provider === "openrouter" && typeof usage.upstreamCostUsd === "number"
+      ? usage.upstreamCostUsd
+      : costAud / USD_AUD_RATE;
+  await trackAiGeneration({
+    distinctId,
+    model: usage.model,
+    provider: usage.provider,
+    feature: "ocr",
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadTokens: usage.cachedInputTokens,
+    cacheCreationTokens: usage.cacheCreationTokens,
+    ...(usage.latencyMs != null ? { latencySeconds: usage.latencyMs / 1000 } : {}),
+    costUsd,
+    properties: { kind: log.kind, outcome, triggeredById: log.triggeredById ?? null },
+  });
 }
 
 /**

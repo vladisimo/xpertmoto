@@ -1,5 +1,10 @@
 import { z } from "zod";
 import { createTRPCRouter, superAdminProcedure } from "../trpc";
+import {
+  OBSERVABILITY_METRICS,
+  estimateCostAud,
+  hasCustomPricing,
+} from "@/lib/observability-pricing";
 
 /**
  * Platform router — SUPER_ADMIN cost-centre telemetry. Each procedure
@@ -370,34 +375,107 @@ export const platformRouter = createTRPCRouter({
         where: { date: { gte: since } },
         orderBy: { date: "asc" },
       });
-      const byMetric = new Map<string, { metric: string; quantity: number; costAud: number }>();
+
+      // Per-metric rollup: quantity, derived cost, and a day-over-day delta
+      // (most recent day vs the day before it) so the UI can show momentum.
+      const byMetric = new Map<
+        string,
+        { metric: string; quantity: number; costAud: number; lastDay: number; prevDay: number; lastDate: string }
+      >();
+      // date → metric → quantity, for charting + peak-day + day-over-day.
+      const byDate = new Map<string, Map<string, number>>();
+
       for (const row of snapshots) {
+        const dateKey = row.date.toISOString().slice(0, 10);
+        const qty = Number(row.quantity);
+        const costAud = estimateCostAud(row.metric, qty);
+
         const agg = byMetric.get(row.metric) ?? {
           metric: row.metric,
           quantity: 0,
           costAud: 0,
+          lastDay: 0,
+          prevDay: 0,
+          lastDate: "",
         };
-        agg.quantity += Number(row.quantity);
-        agg.costAud += Number(row.costAud ?? 0);
+        agg.quantity += qty;
+        agg.costAud += costAud;
+        // snapshots are date-asc, so each later row supersedes the "last day".
+        if (dateKey !== agg.lastDate) {
+          agg.prevDay = agg.lastDate ? agg.lastDay : 0;
+          agg.lastDay = qty;
+          agg.lastDate = dateKey;
+        }
         byMetric.set(row.metric, agg);
+
+        const dateBucket = byDate.get(dateKey) ?? new Map<string, number>();
+        dateBucket.set(row.metric, (dateBucket.get(row.metric) ?? 0) + qty);
+        byDate.set(dateKey, dateBucket);
       }
+
+      const daysWithData = byDate.size;
+
+      const metrics = Array.from(byMetric.values()).map((m) => ({
+        metric: m.metric,
+        quantity: m.quantity,
+        costAud: m.costAud,
+        avgPerDay: daysWithData > 0 ? m.quantity / daysWithData : 0,
+        deltaPct:
+          m.prevDay > 0 ? ((m.lastDay - m.prevDay) / m.prevDay) * 100 : null,
+      }));
+
+      const totalEvents = metrics.reduce((s, m) => s + m.quantity, 0);
+      const totalCostAud = metrics.reduce((s, m) => s + m.costAud, 0);
+
+      // One row per day with a column per metric — ready for a stacked chart.
+      const chartSeries = Array.from(byDate.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, bucket]) => {
+          const error = bucket.get("error") ?? 0;
+          const transaction = bucket.get("transaction") ?? 0;
+          const replay = bucket.get("replay") ?? 0;
+          const attachment = bucket.get("attachment") ?? 0;
+          const costAud =
+            estimateCostAud("error", error) +
+            estimateCostAud("transaction", transaction) +
+            estimateCostAud("replay", replay) +
+            estimateCostAud("attachment", attachment);
+          return {
+            date,
+            error,
+            transaction,
+            replay,
+            attachment,
+            total: error + transaction + replay + attachment,
+            costAud,
+          };
+        });
+
+      const peak = chartSeries.reduce<{ date: string; total: number } | null>(
+        (best, row) => (best === null || row.total > best.total ? { date: row.date, total: row.total } : best),
+        null,
+      );
+
       return {
         source: snapshots.length > 0 ? ("live" as const) : ("placeholder" as const),
         reason:
           snapshots.length > 0
             ? undefined
-            : "No Sentry snapshots yet. Set SENTRY_AUTH_TOKEN + SENTRY_ORG_SLUG; worker runs the pull nightly at 03:45 AEST.",
+            : "No Sentry snapshots yet. Set SENTRY_AUTH_TOKEN + SENTRY_ORG_SLUG; worker runs the pull nightly at 03:45 AEST. Seed history with scripts/backfill-sentry-stats.ts.",
         enableHint:
-          "The platform-sentry-stats worker calls Sentry Organizations Stats v2 API and upserts ObservabilityUsageSnapshot rows.",
+          "The platform-sentry-stats worker calls Sentry's Stats Summary API (/api/0/organizations/{org}/stats-summary/) nightly and upserts one ObservabilityUsageSnapshot row per metric. Cost is an estimate — override the per-event rate via SENTRY_PRICE_* env.",
         days,
-        metrics: Array.from(byMetric.values()),
-        dailySeries: snapshots.map((row) => ({
-          date: row.date.toISOString().slice(0, 10),
-          provider: row.provider,
-          metric: row.metric,
-          quantity: Number(row.quantity),
-          costAud: row.costAud != null ? Number(row.costAud) : null,
-        })),
+        pricingIsEstimate: !hasCustomPricing(),
+        totals: {
+          events: totalEvents,
+          costAud: totalCostAud,
+          // Normalise spend to a 30-day month from whatever history we have.
+          projectedMonthlyCostAud: daysWithData > 0 ? (totalCostAud / daysWithData) * 30 : 0,
+          daysWithData,
+        },
+        peak,
+        metrics,
+        chartSeries,
       };
     }),
 });

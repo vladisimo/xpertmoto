@@ -11,6 +11,7 @@ import { SupportWidgetDynamic } from "./support-widget-dynamic";
  *   - /login, /register, /forgot-password (auth flows)
  *   - /booking/** (the wizard owns its own bottom-bar UX; the floating
  *     chat bubble overlapping the sticky CTA is confusing on mobile)
+ *   - /why-xpert (standalone sales page rendered without site chrome)
  * Returns the client widget everywhere else (marketing, customer
  * portal).
  */
@@ -28,6 +29,7 @@ export async function SupportWidgetGate(): Promise<React.ReactElement | null> {
     path.startsWith("/register") ||
     path.startsWith("/forgot-password") ||
     path.startsWith("/booking") ||
+    path.startsWith("/why-xpert") ||
     path.startsWith("/api")
   ) {
     return null;

@@ -7,9 +7,12 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Gauge,
+  LayoutDashboard,
   LogOut,
   MoreHorizontal,
   Plus,
+  UserCircle,
 } from "lucide-react";
 import { BrandLogo } from "@/components/shared/brand-logo";
 import { CUSTOMER_NAV } from "@/lib/nav";
@@ -56,6 +59,40 @@ function getInitials(name?: string | null, email?: string | null): string {
 function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
   return pathname === href || pathname.startsWith(href + "/");
+}
+
+/**
+ * Role-gated links back to the back-office, mirroring the public header's
+ * account menu so a staff/admin user in the customer portal isn't stranded.
+ * Renders nothing for plain customers.
+ */
+function BackOfficeSwitchLinks({ role }: { role?: string }) {
+  const isStaffPlus =
+    role === "STAFF" ||
+    role === "MANAGER" ||
+    role === "ADMIN" ||
+    role === "SUPER_ADMIN";
+  if (!isStaffPlus) return null;
+  const isAdminPlus = role === "ADMIN" || role === "SUPER_ADMIN";
+  return (
+    <>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem asChild>
+        <Link href="/staff/dashboard">
+          <LayoutDashboard className="mr-2 h-4 w-4" />
+          Staff portal
+        </Link>
+      </DropdownMenuItem>
+      {isAdminPlus && (
+        <DropdownMenuItem asChild>
+          <Link href="/admin/dashboard">
+            <Gauge className="mr-2 h-4 w-4" />
+            Admin portal
+          </Link>
+        </DropdownMenuItem>
+      )}
+    </>
+  );
 }
 
 function SidebarNav({
@@ -238,8 +275,12 @@ function SidebarContent({
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuItem asChild>
-                <Link href="/dashboard/profile">My Profile</Link>
+                <Link href="/dashboard/profile">
+                  <UserCircle className="mr-2 h-4 w-4" />
+                  My Profile
+                </Link>
               </DropdownMenuItem>
+              <BackOfficeSwitchLinks role={user.role} />
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={onSignOut}
@@ -408,8 +449,12 @@ export function PortalShell({
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem asChild>
-                  <Link href="/dashboard/profile">My Profile</Link>
+                  <Link href="/dashboard/profile">
+                    <UserCircle className="mr-2 h-4 w-4" />
+                    My Profile
+                  </Link>
                 </DropdownMenuItem>
+                <BackOfficeSwitchLinks role={user.role} />
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={handleSignOut}

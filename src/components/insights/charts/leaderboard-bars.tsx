@@ -51,7 +51,7 @@ export function LeaderboardBars({
 
   return (
     <div className={cn("w-full", className)} style={{ height }}>
-      <ResponsiveContainer width="100%" height="100%">
+      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height }}>
         <BarChart
           data={data}
           layout="vertical"

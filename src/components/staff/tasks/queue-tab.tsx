@@ -1,13 +1,21 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ChevronDown } from "lucide-react";
 import type { StaffTaskTier } from "@prisma/client";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DataTablePagination } from "@/components/ui/data-table-pagination";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -36,6 +44,11 @@ type TaskListEntry = {
   dueAt?: Date | null;
   ageSeconds: number;
   metadata?: Record<string, unknown>;
+  links?: {
+    bookingId?: string;
+    customerId?: string;
+    vehicleId?: string;
+  };
   inProgress: {
     activityId: string;
     staffId: string;
@@ -165,12 +178,13 @@ export function QueueTab({
       id: "actions",
       header: "",
       align: "right",
-      width: "11rem",
+      width: "15rem",
       cell: (t) => {
+        let action: React.ReactNode;
         if (t.inProgress) {
           if (t.inProgress.isMine) {
-            return (
-              <div className="flex justify-end gap-1">
+            action = (
+              <>
                 <Button
                   size="sm"
                   onClick={() =>
@@ -190,34 +204,42 @@ export function QueueTab({
                 >
                   Abandon
                 </Button>
-              </div>
+              </>
+            );
+          } else {
+            action = (
+              <Button size="sm" variant="secondary" disabled>
+                Claimed
+              </Button>
             );
           }
-          return (
-            <Button size="sm" variant="secondary" disabled>
-              Claimed
+        } else {
+          action = (
+            <Button
+              size="sm"
+              onClick={() =>
+                start.mutate({
+                  taskType: t.taskType,
+                  targetEntityId: t.targetEntityId,
+                  targetEntityKind: t.targetEntityKind,
+                  tier: t.tier,
+                  actionUrl: t.actionUrl,
+                  depotId: t.depotId ?? undefined,
+                  metadata: t.metadata,
+                  actionableSince: t.actionableSince,
+                })
+              }
+              disabled={start.isPending}
+            >
+              Start
             </Button>
           );
         }
         return (
-          <Button
-            size="sm"
-            onClick={() =>
-              start.mutate({
-                taskType: t.taskType,
-                targetEntityId: t.targetEntityId,
-                targetEntityKind: t.targetEntityKind,
-                tier: t.tier,
-                actionUrl: t.actionUrl,
-                depotId: t.depotId ?? undefined,
-                metadata: t.metadata,
-                actionableSince: t.actionableSince,
-              })
-            }
-            disabled={start.isPending}
-          >
-            Start
-          </Button>
+          <div className="flex items-center justify-end gap-1">
+            <ViewMenu links={t.links} />
+            {action}
+          </div>
         );
       },
     },
@@ -309,5 +331,49 @@ export function QueueTab({
         />
       ) : null}
     </>
+  );
+}
+
+/**
+ * Read-only deep-links to the task's related entities. Unlike "Start", these
+ * navigate without claiming the task, so staff can peek at the booking,
+ * customer, or asset before committing to the work. Renders nothing when the
+ * task carries no linkable entities.
+ */
+function ViewMenu({ links }: { links?: TaskListEntry["links"] }) {
+  const items: { label: string; href: string }[] = [];
+  if (links?.bookingId) {
+    items.push({ label: "View booking", href: `/staff/bookings/${links.bookingId}` });
+  }
+  if (links?.customerId) {
+    items.push({
+      label: "View customer profile",
+      href: `/staff/customers/${links.customerId}`,
+    });
+  }
+  if (links?.vehicleId) {
+    items.push({
+      label: "View asset details",
+      href: `/staff/fleet/vehicles/${links.vehicleId}`,
+    });
+  }
+  if (items.length === 0) return null;
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="ghost" className="gap-1">
+          View
+          <ChevronDown className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {items.map((item) => (
+          <DropdownMenuItem key={item.href} asChild>
+            <Link href={item.href}>{item.label}</Link>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

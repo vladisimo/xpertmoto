@@ -1,9 +1,10 @@
 /**
  * Daily Sentry stats pull → ObservabilityUsageSnapshot.
  *
- * Calls Sentry's Organizations Stats v2 API for the previous UTC day and
- * upserts one row per metric. Cost is left null — set per-event pricing
- * in the Platform > Observability tab once your plan is known.
+ * Calls Sentry's Stats Summary API (/api/0/organizations/{org}/stats-summary/)
+ * once per metric for the previous UTC day and upserts one row per metric.
+ * Cost is NOT stored — it is derived on read from @/lib/observability-pricing
+ * so re-pricing is just an env change.
  *
  * Requires env:
  *   SENTRY_AUTH_TOKEN    — an auth token with `org:read` scope
@@ -11,22 +12,28 @@
  *   SENTRY_API_BASE_URL  — optional; defaults to https://sentry.io
  *
  * Schedule the queue `platform-sentry-stats` daily (03:45 Brisbane is a
- * good spot — after db-backup-retention at 03:15).
+ * good spot — after db-backup-retention at 03:15). Historical days can be
+ * seeded with scripts/backfill-sentry-stats.ts (uses backfillSentryStats).
  */
 
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
+import { OBSERVABILITY_METRICS } from "@/lib/observability-pricing";
 import { getQueue, registerWorker } from "./queue";
 
 const QUEUE = "platform-sentry-stats" as const;
 
-const CATEGORIES = ["error", "transaction", "replay", "attachment"] as const;
-
-type SentryStatsResponse = {
-  intervals: string[];
-  groups: Array<{
-    by: { category?: string; outcome?: string };
-    totals: { "sum(quantity)"?: number };
+type SentryStatsSummaryResponse = {
+  start: string;
+  end: string;
+  projects: Array<{
+    id: number;
+    slug: string;
+    stats: Array<{
+      category: string;
+      outcomes: Record<string, number>;
+      totals: { "sum(quantity)"?: number; dropped?: number };
+    }>;
   }>;
 };
 
@@ -36,67 +43,122 @@ export type SentryStatsJobResult = {
   skipped?: string;
 };
 
-export async function runPlatformSentryStats(): Promise<SentryStatsJobResult> {
-  const token = process.env.SENTRY_AUTH_TOKEN;
-  const org = process.env.SENTRY_ORG_SLUG;
-  if (!token || !org) {
-    return { snapshotted: 0, date: "", skipped: "missing SENTRY_AUTH_TOKEN / SENTRY_ORG_SLUG" };
+export type SentryStatsBackfillResult = {
+  days: number;
+  snapshotted: number;
+  from: string;
+  to: string;
+  skipped?: string;
+};
+
+/** Midnight-UTC `Date` for the day `offsetDays` before `from`. */
+function utcDayStart(from: Date, offsetDays = 0): Date {
+  return new Date(
+    Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate() - offsetDays),
+  );
+}
+
+/**
+ * Fetch the accepted-event count for one metric over [dayStart, dayStart+1d).
+ * Returns null on a non-OK response (logged) so callers can skip that metric.
+ */
+async function fetchAcceptedQuantity(opts: {
+  token: string;
+  org: string;
+  base: string;
+  category: string;
+  dayStart: Date;
+}): Promise<number | null> {
+  const { token, org, base, category, dayStart } = opts;
+  const url = new URL(`/api/0/organizations/${org}/stats-summary/`, base);
+  url.searchParams.set("field", "sum(quantity)");
+  url.searchParams.set("groupBy", "outcome");
+  url.searchParams.set("category", category);
+  url.searchParams.set("interval", "1d");
+  url.searchParams.set("start", dayStart.toISOString());
+  url.searchParams.set("end", new Date(dayStart.getTime() + 86_400_000).toISOString());
+
+  const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    logger.warn({ status: res.status, category }, "sentry stats pull failed");
+    return null;
   }
-  const base = process.env.SENTRY_API_BASE_URL ?? "https://sentry.io";
+  const json = (await res.json()) as SentryStatsSummaryResponse;
+  // stats-summary groups per project; sum the accepted quantity for this
+  // category across every project in the org.
+  return (json.projects ?? []).reduce(
+    (sum, project) =>
+      sum +
+      (project.stats ?? [])
+        .filter((stat) => stat.category === category)
+        .reduce((acc, stat) => acc + (stat.outcomes?.accepted ?? 0), 0),
+    0,
+  );
+}
 
-  const now = new Date();
-  const yesterday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1));
-  const start = yesterday.toISOString();
-  const end = new Date(yesterday.getTime() + 24 * 60 * 60 * 1000).toISOString();
-
-  let snapshotted = 0;
-
-  for (const category of CATEGORIES) {
-    const url = new URL(`/api/0/organizations/${org}/stats-summary/`, base);
-    url.searchParams.set("field", "sum(quantity)");
-    url.searchParams.set("groupBy", "outcome");
-    url.searchParams.set("category", category);
-    url.searchParams.set("interval", "1d");
-    url.searchParams.set("start", start);
-    url.searchParams.set("end", end);
-
-    const res = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      logger.warn({ status: res.status, category }, "sentry stats pull failed");
-      continue;
-    }
-    const json = (await res.json()) as SentryStatsResponse;
-    const total = json.groups
-      .filter((g) => g.by.outcome === "accepted" || g.by.outcome === undefined)
-      .reduce((sum, g) => sum + (g.totals["sum(quantity)"] ?? 0), 0);
-
-    const dateOnly = new Date(
-      Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), yesterday.getUTCDate()),
-    );
+/** Upsert every metric's snapshot for a single UTC day. Returns rows written. */
+async function snapshotDay(opts: {
+  token: string;
+  org: string;
+  base: string;
+  dayStart: Date;
+}): Promise<number> {
+  let written = 0;
+  for (const category of OBSERVABILITY_METRICS) {
+    const total = await fetchAcceptedQuantity({ ...opts, category });
+    if (total === null) continue;
+    const quantity = BigInt(Math.max(0, Math.round(total)));
     await prisma.observabilityUsageSnapshot.upsert({
       where: {
-        provider_metric_date: {
-          provider: "sentry",
-          metric: category,
-          date: dateOnly,
-        },
+        provider_metric_date: { provider: "sentry", metric: category, date: opts.dayStart },
       },
-      create: {
-        provider: "sentry",
-        metric: category,
-        date: dateOnly,
-        quantity: BigInt(Math.max(0, Math.round(total))),
-      },
-      update: {
-        quantity: BigInt(Math.max(0, Math.round(total))),
-      },
+      create: { provider: "sentry", metric: category, date: opts.dayStart, quantity },
+      update: { quantity },
     });
-    snapshotted += 1;
+    written += 1;
   }
+  return written;
+}
 
+function sentryEnv(): { token: string; org: string; base: string } | null {
+  const token = process.env.SENTRY_AUTH_TOKEN;
+  const org = process.env.SENTRY_ORG_SLUG;
+  if (!token || !org) return null;
+  return { token, org, base: process.env.SENTRY_API_BASE_URL ?? "https://sentry.io" };
+}
+
+export async function runPlatformSentryStats(): Promise<SentryStatsJobResult> {
+  const env = sentryEnv();
+  if (!env) {
+    return { snapshotted: 0, date: "", skipped: "missing SENTRY_AUTH_TOKEN / SENTRY_ORG_SLUG" };
+  }
+  const yesterday = utcDayStart(new Date(), 1);
+  const snapshotted = await snapshotDay({ ...env, dayStart: yesterday });
   return { snapshotted, date: yesterday.toISOString().slice(0, 10) };
+}
+
+/**
+ * Seed history: snapshot each of the `days` UTC days ending yesterday.
+ * Idempotent (upsert per day+metric), so safe to re-run.
+ */
+export async function backfillSentryStats(days: number): Promise<SentryStatsBackfillResult> {
+  const env = sentryEnv();
+  if (!env) {
+    return { days, snapshotted: 0, from: "", to: "", skipped: "missing SENTRY_AUTH_TOKEN / SENTRY_ORG_SLUG" };
+  }
+  const now = new Date();
+  let snapshotted = 0;
+  let from = "";
+  let to = "";
+  // Oldest → newest: day `days` ago through yesterday (offset 1).
+  for (let offset = days; offset >= 1; offset--) {
+    const dayStart = utcDayStart(now, offset);
+    const iso = dayStart.toISOString().slice(0, 10);
+    if (!from) from = iso;
+    to = iso;
+    snapshotted += await snapshotDay({ ...env, dayStart });
+  }
+  return { days, snapshotted, from, to };
 }
 
 export function startPlatformSentryStatsScheduler(): void {

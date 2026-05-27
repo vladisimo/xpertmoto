@@ -33,7 +33,7 @@ export async function collectReturnAssessmentTasks(
           returnDateTime: true,
           depotId: true,
           returnDepotId: true,
-          customer: { select: { firstName: true, lastName: true } },
+          customer: { select: { id: true, firstName: true, lastName: true } },
         },
       },
     },
@@ -57,6 +57,7 @@ export async function collectReturnAssessmentTasks(
       actionableSince: r.createdAt,
       dueAt: null,
       metadata: { bookingId: r.booking.id },
+      links: { bookingId: r.booking.id, customerId: r.booking.customer.id },
     };
   });
 }

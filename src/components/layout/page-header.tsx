@@ -2,9 +2,10 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { ChevronLeft, ChevronRight, MoreHorizontal } from "lucide-react";
+import { useRouter, usePathname } from "next/navigation";
+import { ChevronLeft, ChevronRight, MoreHorizontal, HelpCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getContextualHelpSlug } from "@/lib/help/manifest.search";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -39,6 +40,14 @@ export interface PageHeaderProps extends React.HTMLAttributes<HTMLElement> {
   /** Mobile only: hide eyebrow / breadcrumbs to save vertical space.
    *  Desktop still shows them. Defaults to `false`. */
   mobileCompact?: boolean;
+  /**
+   * Contextual help link rendered as a `?` beside the title.
+   * - omitted/`true`: auto-resolve the matching help article from the current
+   *   back-office route (no-op on customer pages and when none matches).
+   * - a string: force-link to that help-article slug.
+   * - `false`: never show the `?` (e.g. on the help pages themselves).
+   */
+  help?: boolean | string;
 }
 
 /**
@@ -60,6 +69,7 @@ export const PageHeader = React.forwardRef<HTMLElement, PageHeaderProps>(
       back,
       mobileActionsOverflow,
       mobileCompact,
+      help,
       className,
       ...props
     },
@@ -106,7 +116,10 @@ export const PageHeader = React.forwardRef<HTMLElement, PageHeaderProps>(
                   {eyebrow}
                 </p>
               )}
-              <h1 className="h1">{title}</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="h1">{title}</h1>
+                {help !== false && <ContextualHelpButton help={help} />}
+              </div>
               {description && (
                 <p
                   className={cn(
@@ -130,6 +143,32 @@ export const PageHeader = React.forwardRef<HTMLElement, PageHeaderProps>(
   },
 );
 PageHeader.displayName = "PageHeader";
+
+/**
+ * The `?` beside a page title. Resolves to the help article for the current
+ * back-office route (or the explicit slug). Renders nothing outside the
+ * back office or when no article maps — so customer pages stay clean.
+ */
+function ContextualHelpButton({ help }: { help?: boolean | string }) {
+  const pathname = usePathname();
+  const inBackOffice = pathname.startsWith("/staff") || pathname.startsWith("/admin");
+  if (!inBackOffice) return null;
+
+  const slug = typeof help === "string" ? help : getContextualHelpSlug(pathname);
+  if (!slug) return null;
+
+  const base = pathname.startsWith("/admin") ? "/admin/help" : "/staff/help";
+  return (
+    <Link
+      href={`${base}/${slug}`}
+      aria-label="Help for this page"
+      title="Help for this page"
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <HelpCircle className="h-4 w-4" aria-hidden />
+    </Link>
+  );
+}
 
 function BackButton({ back }: { back: true | string }) {
   const router = useRouter();

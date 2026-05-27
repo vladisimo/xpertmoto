@@ -661,8 +661,28 @@ export type StripeBalanceTransaction = {
   currency: string;
   created: number; // unix seconds
   source?: string | null; // charge id etc.
+  paymentIntent?: string | null; // payment-intent the charge belongs to (via data.source expand)
   reporting_category?: string | null;
 };
+
+/** Raw `source` after a `data.source` expand: a charge object or a bare id. */
+type ExpandedSource =
+  | string
+  | null
+  | { id?: string | null; payment_intent?: string | { id?: string | null } | null };
+
+function extractSourceIds(source: ExpandedSource): {
+  sourceId: string | null;
+  paymentIntent: string | null;
+} {
+  if (!source) return { sourceId: null, paymentIntent: null };
+  if (typeof source === "string") return { sourceId: source, paymentIntent: null };
+  const pi = source.payment_intent;
+  return {
+    sourceId: source.id ?? null,
+    paymentIntent: typeof pi === "string" ? pi : (pi?.id ?? null),
+  };
+}
 
 export type StripePage<T> = {
   data: T[];
@@ -681,13 +701,20 @@ export async function listBalanceTransactions(args: {
         balanceTransactions: {
           list: (
             params: Record<string, unknown>,
-          ) => Promise<{ data: StripeBalanceTransaction[]; has_more: boolean }>;
+          ) => Promise<{
+            data: (Omit<StripeBalanceTransaction, "source"> & { source?: ExpandedSource })[];
+            has_more: boolean;
+          }>;
         };
       }
     | null;
   if (!stripe) return { data: [], has_more: false };
   const res = await stripe.balanceTransactions.list({
     limit: args.limit ?? 100,
+    // Expand the charge behind each txn so we can record its payment-intent —
+    // the join key for Payments whose charge id isn't backfilled yet. Same
+    // request, no extra API calls.
+    expand: ["data.source"],
     ...(args.startingAfter ? { starting_after: args.startingAfter } : {}),
     ...(args.createdGte || args.createdLte
       ? {
@@ -698,8 +725,12 @@ export async function listBalanceTransactions(args: {
         }
       : {}),
   });
-  const last = res.data[res.data.length - 1];
-  return { data: res.data, has_more: res.has_more, last_id: last?.id };
+  const data: StripeBalanceTransaction[] = res.data.map((t) => {
+    const { sourceId, paymentIntent } = extractSourceIds(t.source ?? null);
+    return { ...t, source: sourceId, paymentIntent };
+  });
+  const last = data[data.length - 1];
+  return { data, has_more: res.has_more, last_id: last?.id };
 }
 
 export type StripeWebhookEvent = {

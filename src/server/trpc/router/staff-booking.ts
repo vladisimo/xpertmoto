@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, staffProcedure } from "../trpc";
 import {
@@ -19,12 +20,19 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { cancel as cancelBookingService } from "@/server/services/booking-cancellation";
 import { refundCharge } from "@/lib/stripe";
 import {
+  captureBookingId,
   captureCustomerId,
+  readCapturedBookingId,
   readCapturedCustomerId,
   skipAutoAudit,
   writeAudit,
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
+import {
+  AUDIT_CATEGORIES,
+  AUDIT_STATUSES,
+  buildAuditWhere,
+} from "@/server/services/audit-query";
 import { trackServer } from "@/lib/analytics";
 import { BOOKING_RULES, CANCELLATION_POLICY } from "@/lib/constants";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
@@ -192,6 +200,48 @@ export const staffBookingRouter = createTRPCRouter({
       return b;
     }),
 
+  /**
+   * Every AuditLog row tagged to this booking (entity='Booking',
+   * entityId=bookingId). Mirrors `staffCustomer.activityLog`. Booking-affecting
+   * mutations across the routers tag a companion 'Booking' row (via the
+   * auto-audit `bookingIdPath` hook or a manual `writeBookingAuditAsync`), so
+   * this single scope captures every event any user — staff or customer —
+   * performed against the booking.
+   */
+  activityLog: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        from: z.date().optional(),
+        to: z.date().optional(),
+        category: z.enum(AUDIT_CATEGORIES).optional(),
+        status: z.enum(AUDIT_STATUSES).optional(),
+        action: z.string().optional(),
+        cursor: z.object({ timestamp: z.date(), id: z.string() }).optional(),
+        take: z.number().int().min(1).max(200).default(50),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const where: Prisma.AuditLogWhereInput = {
+        AND: [buildAuditWhere(input), { entity: "Booking", entityId: input.bookingId }],
+      };
+      const rows = await ctx.prisma.auditLog.findMany({
+        where,
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, email: true } },
+        },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        take: input.take + 1,
+      });
+      const hasMore = rows.length > input.take;
+      const page = hasMore ? rows.slice(0, input.take) : rows;
+      const last = page[page.length - 1];
+      return {
+        rows: page,
+        nextCursor: hasMore && last ? { timestamp: last.timestamp, id: last.id } : null,
+      };
+    }),
+
   addNote: staffProcedure
     .input(
       z.object({
@@ -200,7 +250,7 @@ export const staffBookingRouter = createTRPCRouter({
         isInternal: z.boolean().default(true),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUnique({
         where: { id: input.bookingId },
@@ -225,7 +275,7 @@ export const staffBookingRouter = createTRPCRouter({
   // accidental double-clicks from spamming the customer inbox.
   resendConfirmation: staffProcedure
     .input(z.object({ bookingId: z.string() }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const now = Date.now();
       const last = resendConfirmationLastSent.get(input.bookingId);
@@ -384,6 +434,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   resendInvoice: staffProcedure
     .input(z.object({ invoiceId: z.string() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const now = Date.now();
       const last = resendInvoiceLastSent.get(input.invoiceId);
@@ -398,9 +449,10 @@ export const staffBookingRouter = createTRPCRouter({
       const inv = await ctx.prisma.invoice.findUniqueOrThrow({
         where: { id: input.invoiceId },
         include: {
-          booking: { select: { bookingReference: true, customerId: true } },
+          booking: { select: { id: true, bookingReference: true, customerId: true } },
         },
       });
+      captureBookingId(ctx, inv.bookingId ?? inv.booking?.id);
       const recipientId = inv.customerId ?? inv.booking?.customerId ?? null;
       if (!recipientId) {
         throw new TRPCError({
@@ -463,7 +515,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   confirmQuote: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string().optional() }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -501,7 +553,7 @@ export const staffBookingRouter = createTRPCRouter({
         notes: z.string().optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -573,7 +625,9 @@ export const staffBookingRouter = createTRPCRouter({
         reason: z.string().min(1, "Reason is required"),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({
+      audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: readCapturedBookingId },
+    })
     .mutation(async ({ ctx, input }) => {
       const source = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
@@ -582,6 +636,7 @@ export const staffBookingRouter = createTRPCRouter({
         },
       });
       captureCustomerId(ctx, source.customerId ?? source.booking?.customerId);
+      captureBookingId(ctx, source.bookingId ?? source.booking?.id);
       if (source.status !== "SUCCEEDED") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -638,6 +693,9 @@ export const staffBookingRouter = createTRPCRouter({
             reference: `REF-${Date.now()}`,
             customerId: source.customerId,
             bookingId: source.bookingId,
+            // Link the refund to the charge it reverses so the rewards
+            // aggregator can attribute it to the source PaymentType.
+            parentPaymentId: source.id,
             type: "REFUND",
             method: "STRIPE",
             amount: refundAmount,
@@ -651,6 +709,53 @@ export const staffBookingRouter = createTRPCRouter({
         });
       });
 
+      // Per system protocol, a processed refund produces a GST-compliant
+      // adjustment note (DECREASE / REFUND) and auto-emails the customer the
+      // document — the same pipeline cancellations, swaps and bond captures
+      // use. Gated on SUCCEEDED so we don't issue a credit document for a
+      // refund that failed at Stripe; best-effort and non-blocking.
+      if (paymentStatus === "SUCCEEDED" && source.bookingId) {
+        try {
+          const { tryIssueAdjustmentForBooking } = await import(
+            "@/server/services/invoice-lifecycle"
+          );
+          await tryIssueAdjustmentForBooking({
+            bookingId: source.bookingId,
+            type: "DECREASE",
+            reason: "REFUND",
+            description: `Refund of ${source.reference} — ${input.reason}`,
+            lineItems: [
+              {
+                description: `Refund of ${source.reference} — ${input.reason}`,
+                quantity: 1,
+                unitPrice: refundAmount,
+                totalPrice: refundAmount,
+                gstIncluded: true,
+              },
+            ],
+            paymentId: refund.id,
+            issuedById: ctx.user.id,
+          });
+        } catch {
+          // tryIssueAdjustmentForBooking already logs internal failures.
+        }
+      }
+
+      await trackServer({
+        event: "payment.refunded",
+        distinctId: source.customerId ?? source.booking?.customerId ?? ctx.user.id,
+        properties: {
+          paymentId: source.id,
+          bookingId: source.bookingId,
+          reference: source.booking?.bookingReference ?? null,
+          refundAud: refundAmount,
+          originalAud: originalAmount,
+          isPartial: refundAmount < originalAmount,
+          status: paymentStatus,
+          actorUserId: ctx.user.id,
+        },
+      });
+
       return { refund, status: paymentStatus };
     }),
 
@@ -662,7 +767,7 @@ export const staffBookingRouter = createTRPCRouter({
         reason: z.string().optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -711,7 +816,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   markOverdue: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string().optional() }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -747,7 +852,7 @@ export const staffBookingRouter = createTRPCRouter({
         notes: z.string().optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -818,7 +923,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   markDisputed: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string().min(1) }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -855,7 +960,7 @@ export const staffBookingRouter = createTRPCRouter({
         notes: z.string().optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -1289,7 +1394,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   completeFromReturned: staffProcedure
     .input(z.object({ bookingId: z.string(), notes: z.string().optional() }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -1301,21 +1406,39 @@ export const staffBookingRouter = createTRPCRouter({
           message: `Cannot complete from ${b.status}`,
         });
       }
-      const updated = await ctx.prisma.booking.update({
-        where: { id: b.id },
-        data: {
-          status: "COMPLETED",
-          checkedInById: ctx.user.id,
-          statusLog: {
-            create: {
-              previousStatus: b.status,
-              newStatus: "COMPLETED",
-              changedById: ctx.user.id,
-              reason: input.notes ?? "Settlement finalised",
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const row = await tx.booking.update({
+          where: { id: b.id },
+          data: {
+            status: "COMPLETED",
+            checkedInById: ctx.user.id,
+            statusLog: {
+              create: {
+                previousStatus: b.status,
+                newStatus: "COMPLETED",
+                changedById: ctx.user.id,
+                reason: input.notes ?? "Settlement finalised",
+              },
             },
           },
-        },
+        });
+        // Keep the customer's lifetime spend / completed-booking counters and
+        // daily revenue in lock-step with loyalty points. Every path that
+        // transitions a booking into COMPLETED must record completion, or the
+        // post-trip-review job awards points against spend that never lands.
+        await recordBookingCompletion(tx, {
+          id: b.id,
+          customerId: b.customerId,
+          depotId: b.depotId,
+          actualReturnDateTime: b.actualReturnDateTime ?? new Date(),
+          subtotal: b.subtotal,
+          addonTotal: b.addonTotal,
+          gstAmount: b.gstAmount,
+          totalAmount: b.totalAmount,
+        });
+        return row;
       });
+      await invalidateRevenueCaches(b.depotId);
       // Lever 4: flip any pending partner commission → PAYABLE now that
       // the booking is complete. Best-effort, never blocks completion.
       try {
@@ -1353,7 +1476,7 @@ export const staffBookingRouter = createTRPCRouter({
         notes: z.string().optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -1417,7 +1540,7 @@ export const staffBookingRouter = createTRPCRouter({
             });
           }
         }
-        return tx.booking.update({
+        const row = await tx.booking.update({
           where: { id: b.id },
           data: {
             status: "COMPLETED",
@@ -1435,7 +1558,22 @@ export const staffBookingRouter = createTRPCRouter({
             },
           },
         });
+        // Mirror the check-in completion path: keep lifetime spend /
+        // completed-booking counters and daily revenue in step with the
+        // loyalty points the post-trip-review job will later award.
+        await recordBookingCompletion(tx, {
+          id: b.id,
+          customerId: b.customerId,
+          depotId: b.depotId,
+          actualReturnDateTime: b.actualReturnDateTime ?? now,
+          subtotal: b.subtotal,
+          addonTotal: b.addonTotal,
+          gstAmount: b.gstAmount,
+          totalAmount: b.totalAmount,
+        });
+        return row;
       });
+      await invalidateRevenueCaches(b.depotId);
       try {
         await markPartnerTransactionsPayable(ctx.prisma, b.id);
       } catch {
@@ -1460,7 +1598,7 @@ export const staffBookingRouter = createTRPCRouter({
         customerIdVerified: z.boolean(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUnique({
         where: { id: input.bookingId },
@@ -2435,7 +2573,7 @@ export const staffBookingRouter = createTRPCRouter({
 
   cancel: staffProcedure
     .input(z.object({ bookingId: z.string(), reason: z.string() }))
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -2481,8 +2619,26 @@ export const staffBookingRouter = createTRPCRouter({
         method: z.enum(["CARD", "CASH"]),
       }),
     )
-    .meta({ audit: { customerIdPath: "customerId" } })
+    .meta({ audit: { customerIdPath: "customerId", bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
+      // The booking's customer must own a CustomerProfile. Booking.customer
+      // is an unconstrained FK to User, so guard the selected target here —
+      // otherwise a walk-in could be pinned to a user the back-office
+      // customer directory (any user with a profile) can't resolve. Identity
+      // is profile-based, not role-based: a back-office user who also carries
+      // a CustomerProfile is a valid target. Unlike booking.create (online
+      // self-serve), a walk-in does NOT require the target to have self-
+      // onboarded — staff verify licence at the counter.
+      const customer = await ctx.prisma.user.findUnique({
+        where: { id: input.customerId },
+        select: { customerProfile: { select: { id: true } } },
+      });
+      if (!customer?.customerProfile) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Walk-in bookings must be attached to a customer account.",
+        });
+      }
       await enforceBookingTimesWithinHours(ctx.prisma, {
         pickupDepotId: input.pickupDepotId,
         returnDepotId: input.returnDepotId,
@@ -2542,6 +2698,7 @@ export const staffBookingRouter = createTRPCRouter({
           },
         },
       });
+      captureBookingId(ctx, booking.id);
       await invalidateRevenueCaches(booking.depotId);
       return booking;
     }),

@@ -48,6 +48,15 @@ const redactPaths = [
   "*.utmSource",
   "*.utmMedium",
   "*.utmCampaign",
+  // PostHog person-property payloads. Identify `$set`/`$set_once` carry
+  // contact identifiers (email/name). They're only ever posted, never
+  // logged in full (the analytics catch logs the event name only), but
+  // redact the known shape defensively so a stray log of the payload
+  // can't leak them. Scoped to the `$set` keys to avoid over-redacting
+  // benign `name` fields (depot.name, category.name) across all logs.
+  '*["$set"].email',
+  '*["$set"].name',
+  '*["$set_once"].email',
 ];
 
 // HMR-safe singleton. Next.js dev re-imports this module across module

@@ -794,7 +794,7 @@ function SortablePhoto({
   return (
     <div ref={setNodeRef} style={style} className="relative group border rounded overflow-hidden">
       <div className="relative aspect-video bg-muted">
-        <Image src={photo.url} alt={photo.caption ?? "Vehicle photo"} fill className="object-cover" sizes="200px" />
+        <Image src={photo.url} alt={photo.caption ?? "Vehicle photo"} fill className="object-contain" sizes="200px" />
       </div>
       {index === 0 && (
         <span className="absolute top-1 left-1 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded">Primary</span>

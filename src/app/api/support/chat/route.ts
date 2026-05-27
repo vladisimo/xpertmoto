@@ -16,6 +16,8 @@ import {
 import { buildSupportFaqText } from "@/server/services/support-faq";
 import { getBranding } from "@/lib/branding";
 import { recordUsage, rollingDailyCostAud } from "@/server/services/support-cost";
+import { trackAiGeneration } from "@/lib/analytics";
+import { USD_AUD_RATE } from "@/lib/constants";
 import { routeTicket } from "@/server/services/support-routing";
 import { enqueueSupportNotify } from "@/server/jobs/support-notify";
 import { generateTicketNumber } from "@/server/services/support-ticket-number";
@@ -194,6 +196,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       }
 
       try {
+        const aiStartedAt = performance.now();
         const iter = provider.streamChat({
           system,
           messages: historyMessages,
@@ -239,6 +242,25 @@ export async function POST(req: NextRequest): Promise<Response> {
           } else if (chunk.kind === "usage") {
             const costAud = await recordUsage(prisma, conv.id, chunk.usage);
             emit({ type: "usage", costAud });
+            const u = chunk.usage;
+            const costUsd =
+              typeof u.upstreamCostUsd === "number"
+                ? u.upstreamCostUsd
+                : costAud / USD_AUD_RATE;
+            await trackAiGeneration({
+              distinctId: conv.customerId ?? conv.id,
+              model: u.model,
+              provider: u.provider,
+              feature: "support",
+              inputTokens: u.inputTokens,
+              outputTokens: u.outputTokens,
+              cacheReadTokens: u.cachedInputTokens,
+              cacheCreationTokens: u.cacheCreationTokens,
+              latencySeconds: (performance.now() - aiStartedAt) / 1000,
+              costUsd,
+              traceId: conv.id,
+              properties: { conversationId: conv.id },
+            });
           }
         }
         emit({ type: "done" });

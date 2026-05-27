@@ -4,6 +4,8 @@ import { createElement } from "react";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { getBranding } from "@/lib/branding";
 import CartRecoveryEmail, {
   type CartRecoveryStage,
@@ -157,6 +159,20 @@ export async function runCartRecovery(
       await prisma.booking.update({
         where: { id: booking.id },
         data: { recoveryStage: nextStage },
+      });
+
+      await trackServer({
+        event: SERVER_EVENTS.cartRecoveryEmailSent,
+        distinctId: booking.customerId,
+        properties: {
+          bookingId: booking.id,
+          reference: booking.bookingReference,
+          stage: nextStage,
+          stageName: stage,
+          discountCode: discountCode ?? null,
+          amountAtRiskAud: Number(booking.totalAmount),
+        },
+        groups: { depot: booking.pickupDepot.slug },
       });
 
       if (nextStage === 1) counters.stage1 += 1;

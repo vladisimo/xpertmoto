@@ -42,6 +42,7 @@ import { profileRouter } from "./profile";
 import { webhookHealthRouter } from "./webhook-health";
 import { platformRouter } from "./platform";
 import { onboardingRouter } from "./onboarding";
+import { globalSearchRouter } from "./global-search";
 
 export const appRouter = createTRPCRouter({
   health: publicProcedure.query(() => ({ status: "ok", time: new Date().toISOString() })),
@@ -88,6 +89,7 @@ export const appRouter = createTRPCRouter({
   webhookHealth: webhookHealthRouter,
   platform: platformRouter,
   onboarding: onboardingRouter,
+  globalSearch: globalSearchRouter,
 });
 
 export type AppRouter = typeof appRouter;

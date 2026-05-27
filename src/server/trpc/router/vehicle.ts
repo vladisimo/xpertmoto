@@ -2,13 +2,17 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { FleetUseCase } from "@prisma/client";
 import { createTRPCRouter, publicProcedure, staffProcedure } from "../trpc";
+import {
+  RENTABLE_MODEL_WHERE,
+  CATEGORY_HAS_RENTABLE_VEHICLE,
+} from "@/lib/fleet/consumer-visibility";
 
 const fleetUseCaseSchema = z.nativeEnum(FleetUseCase);
 
 export const vehicleRouter = createTRPCRouter({
   listCategories: publicProcedure.query(({ ctx }) =>
     ctx.prisma.vehicleCategory.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...CATEGORY_HAS_RENTABLE_VEHICLE },
       orderBy: { displayOrder: "asc" },
     }),
   ),
@@ -17,7 +21,7 @@ export const vehicleRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const models = await ctx.prisma.vehicleModel.findMany({
         where: {
-          vehicles: { some: { isActive: true } },
+          ...RENTABLE_MODEL_WHERE,
           ...(input.useCase ? { useCases: { has: input.useCase } } : {}),
         },
         select: {

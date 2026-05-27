@@ -10,7 +10,7 @@ The original CLAUDE.md spec listed 14 routers. The actual repo has **44 routers*
 
 ## Procedure layers — pick the right base
 
-Six procedure bases are defined in [trpc.ts:225-353](trpc.ts). Picking the wrong one silently breaks auth.
+Eight procedure bases are defined in [trpc.ts:273-411](trpc.ts). Picking the wrong one silently breaks auth.
 
 | Caller | Base | Notes |
 |---|---|---|
@@ -21,7 +21,7 @@ Six procedure bases are defined in [trpc.ts:225-353](trpc.ts). Picking the wrong
 | ADMIN / SUPER_ADMIN | `adminProcedure` | |
 | SUPER_ADMIN only | `superAdminProcedure` | Destructive ops, billing config, impersonation. |
 | TOTP step-up flow only | `stepUpProcedure` | **Hard rule:** only `auth.verifyOauthStepUp` may use it. Accepts `pending2fa` sessions. |
-| Customer onboarding wizard only | `onboardingProcedure` | **Hard rule:** only used inside the `onboarding` router. Accepts `requiresOnboarding` sessions, CUSTOMER role only. |
+| Onboarding wizard only | `onboardingProcedure` | **Hard rule:** only used inside the `onboarding` router. Accepts `requiresOnboarding` sessions. Admittance is profile-based, not role-based: any user whose `CustomerProfile` still needs onboarding may run it (incl. back-office users who now carry a profile); a fully-onboarded user of any role is rejected. |
 
 Don't inline `if (ctx.session.user.role !== ...)` checks after `protectedProcedure` — use `requireRole([...])` so the gate is visible at the import site.
 

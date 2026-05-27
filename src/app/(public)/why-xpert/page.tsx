@@ -4,6 +4,9 @@ import { Check, X } from "lucide-react";
 import { getBranding } from "@/lib/branding";
 import { DividedTitle } from "@/components/marketing/divided-title";
 import { FaqList } from "@/components/marketing/faq-list";
+import { IntegrationsGrid } from "@/components/marketing/integrations-grid";
+import { SnapSection } from "@/components/marketing/snap-section";
+import { TechStackGrid } from "@/components/marketing/tech-stack-grid";
 import {
   LiveCostComparison,
   type StaticCostRow,
@@ -138,6 +141,27 @@ const CAPABILITY_GROUPS: CapabilityGroup[] = [
     ],
   },
 ];
+
+// Split the capability groups into N side-by-side columns, balanced by total
+// feature-row count while preserving group order. 35 rows → 12 / 12 / 11.
+function splitGroupsBalanced(
+  groups: CapabilityGroup[],
+  columns: number,
+): CapabilityGroup[][] {
+  const totalRows = groups.reduce((n, g) => n + g.features.length, 0);
+  const target = totalRows / columns;
+  const result: CapabilityGroup[][] = Array.from({ length: columns }, () => []);
+  let col = 0;
+  let acc = 0;
+  for (const group of groups) {
+    result[col]?.push(group);
+    acc += group.features.length;
+    if (col < columns - 1 && acc >= target * (col + 1)) col += 1;
+  }
+  return result;
+}
+
+const STACK_COLUMNS = splitGroupsBalanced(CAPABILITY_GROUPS, 3);
 
 const STATIC_COST_ROWS: StaticCostRow[] = [
   {
@@ -370,102 +394,127 @@ export default async function WhyXpertPage() {
   ];
 
   return (
-    <div className="container max-w-5xl space-y-12 py-12">
+    <div className="h-[100svh] snap-y snap-mandatory overflow-y-auto overflow-x-clip overscroll-y-contain">
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <header className="space-y-3">
-        <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
-          Platform comparison · Scooter & motorbike hire (Australia)
-        </p>
-        <h1 className="h-display">Why {siteName}</h1>
-        <p className="max-w-3xl text-muted-foreground">
-          One Australian-built platform replacing Shopify, eFleetPass and a
-          third-party helpdesk — plus AI, analytics, GST and ABN-compliant
-          invoicing, and a built-in toll and infringement workflow that turns
-          a recurring cost line into a revenue line.
-        </p>
-      </header>
-
-      <section className="space-y-4">
-        <DividedTitle>Current stack vs. {siteName}</DividedTitle>
-        <div className="overflow-hidden rounded-md border border-border bg-card">
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left text-sm">
-              <thead className="bg-foreground text-background">
-                <tr>
-                  <th className="px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
-                    Feature
-                  </th>
-                  <th className="w-32 px-3 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em]">
-                    Current stack
-                  </th>
-                  <th className="w-32 px-3 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em]">
-                    <span className="inline-flex items-center gap-1.5">
-                      Proposed
-                      <span className="rounded-full bg-emerald-400 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-emerald-950">
-                        New
-                      </span>
-                    </span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {CAPABILITY_GROUPS.map((group) => (
-                  <React.Fragment key={group.capability}>
-                    <tr className="border-t border-border bg-muted/40">
-                      <th
-                        scope="colgroup"
-                        colSpan={3}
-                        className="px-3 py-1.5 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground"
-                      >
-                        {group.capability}
-                      </th>
-                    </tr>
-                    {group.features.map((f) => (
-                      <tr
-                        key={`${group.capability}-${f.feature}`}
-                        className="border-t border-border align-middle transition-colors hover:bg-foreground/[0.05] dark:hover:bg-foreground/[0.08]"
-                      >
-                        <td className="px-3 py-1.5 pl-5">{f.feature}</td>
-                        <td className="px-3 py-1.5 text-center">
-                          {f.legacy ? (
-                            <Check
-                              className="mx-auto h-3.5 w-3.5 text-foreground"
-                              aria-label="Included"
-                            />
-                          ) : (
-                            <X
-                              className="mx-auto h-3.5 w-3.5 text-muted-foreground/50"
-                              aria-label="Not included"
-                            />
-                          )}
-                        </td>
-                        <td className="px-3 py-1.5 text-center">
-                          {f.platform ? (
-                            <Check
-                              className="mx-auto h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400"
-                              aria-label="Included"
-                            />
-                          ) : (
-                            <X
-                              className="mx-auto h-3.5 w-3.5 text-muted-foreground/50"
-                              aria-label="Not included"
-                            />
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div className="pointer-events-none fixed inset-y-0 left-0 z-20 hidden w-[22rem] items-center justify-center overflow-hidden lg:flex">
+        <div className="w-[80svh] shrink-0 origin-center -rotate-90 space-y-3 px-2">
+          <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
+            Platform comparison · Scooter & motorbike hire (Australia)
+          </p>
+          <h1 className="h-display">Why {siteName}</h1>
+          <p className="text-muted-foreground">
+            One Australian-built platform replacing Shopify, eFleetPass and a
+            third-party helpdesk — plus AI, analytics, GST and ABN-compliant
+            invoicing, and a built-in toll and infringement workflow that turns
+            a recurring cost line into a revenue line.
+          </p>
         </div>
-      </section>
+      </div>
 
-      <section className="space-y-4">
+      <div className="lg:hidden">
+        <SnapSection className="space-y-3">
+          <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
+            Platform comparison · Scooter & motorbike hire (Australia)
+          </p>
+          <h1 className="h-display">Why {siteName}</h1>
+          <p className="max-w-3xl text-muted-foreground">
+            One Australian-built platform replacing Shopify, eFleetPass and a
+            third-party helpdesk — plus AI, analytics, GST and ABN-compliant
+            invoicing, and a built-in toll and infringement workflow that turns
+            a recurring cost line into a revenue line.
+          </p>
+        </SnapSection>
+      </div>
+
+      <SnapSection className="space-y-4">
+        <DividedTitle>Current stack vs. {siteName}</DividedTitle>
+        <p className="text-sm text-muted-foreground">
+          <span className="font-semibold text-foreground">Now</span> = your
+          current Shopify / eFleetPass / helpdesk stack.{" "}
+          <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+            New
+          </span>{" "}
+          = capabilities {siteName} adds.
+        </p>
+        <div className="grid gap-4 lg:grid-cols-3">
+          {STACK_COLUMNS.map((column, ci) => (
+            <div
+              key={ci}
+              className="overflow-hidden rounded-md border border-border bg-card"
+            >
+              <table className="w-full border-collapse text-left text-sm">
+                <thead className="bg-foreground text-background">
+                  <tr>
+                    <th className="px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
+                      Feature
+                    </th>
+                    <th className="w-14 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em]">
+                      Now
+                    </th>
+                    <th className="w-14 px-2 py-2 text-center text-[11px] font-semibold uppercase tracking-[0.08em] text-emerald-400">
+                      New
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {column.map((group) => (
+                    <React.Fragment key={group.capability}>
+                      <tr className="border-t border-border bg-muted/40">
+                        <th
+                          scope="colgroup"
+                          colSpan={3}
+                          className="px-3 py-1.5 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-foreground"
+                        >
+                          {group.capability}
+                        </th>
+                      </tr>
+                      {group.features.map((f) => (
+                        <tr
+                          key={`${group.capability}-${f.feature}`}
+                          className="border-t border-border align-middle transition-colors hover:bg-foreground/[0.05] dark:hover:bg-foreground/[0.08]"
+                        >
+                          <td className="px-3 py-1.5 pl-5">{f.feature}</td>
+                          <td className="px-2 py-1.5 text-center">
+                            {f.legacy ? (
+                              <Check
+                                className="mx-auto h-3.5 w-3.5 text-foreground"
+                                aria-label="Included"
+                              />
+                            ) : (
+                              <X
+                                className="mx-auto h-3.5 w-3.5 text-muted-foreground/50"
+                                aria-label="Not included"
+                              />
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            {f.platform ? (
+                              <Check
+                                className="mx-auto h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400"
+                                aria-label="Included"
+                              />
+                            ) : (
+                              <X
+                                className="mx-auto h-3.5 w-3.5 text-muted-foreground/50"
+                                aria-label="Not included"
+                              />
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      </SnapSection>
+
+      <SnapSection className="space-y-4">
         <DividedTitle>Live cost comparison (AUD / year)</DividedTitle>
         <LiveCostComparison
           siteName={siteName}
@@ -473,9 +522,9 @@ export default async function WhyXpertPage() {
           platformAnnual={PLATFORM_ANNUAL_LIST}
           platformAnnualPrepaid={PLATFORM_ANNUAL_PREPAID}
         />
-      </section>
+      </SnapSection>
 
-      <section className="space-y-4">
+      <SnapSection className="space-y-4">
         <DividedTitle>Why the toll line moves like that</DividedTitle>
         <div className="grid gap-4 lg:grid-cols-2">
           <p className="text-sm text-muted-foreground">
@@ -601,9 +650,9 @@ export default async function WhyXpertPage() {
           tolls remain identical across every provider — the difference is
           the admin layer wrapped around them.
         </p>
-      </section>
+      </SnapSection>
 
-      <section className="space-y-4">
+      <SnapSection className="space-y-4">
         <DividedTitle>
           Worked example — $1.2M turnover operator
         </DividedTitle>
@@ -729,9 +778,9 @@ export default async function WhyXpertPage() {
             vendor portals.
           </p>
         </div>
-      </section>
+      </SnapSection>
 
-      <section className="space-y-4">
+      <SnapSection className="space-y-4">
         <DividedTitle>Beyond parity — growth levers</DividedTitle>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {GROWTH_CARDS.map((c) => (
@@ -741,41 +790,32 @@ export default async function WhyXpertPage() {
             </div>
           ))}
         </div>
-      </section>
+      </SnapSection>
 
-      <section className="space-y-3">
-        <DividedTitle>The headline numbers</DividedTitle>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {[
-            { label: "Data models", value: "117" },
-            { label: "Typed API routers", value: "44" },
-            { label: "Branded email templates", value: "27" },
-            { label: "Background jobs", value: "BullMQ" },
-          ].map((s) => (
-            <div key={s.label} className="rounded-md border border-border bg-card p-4">
-              <div className="text-3xl font-semibold tabular-nums text-foreground">{s.value}</div>
-              <div className="caption mt-1 text-muted-foreground">{s.label}</div>
-            </div>
-          ))}
-        </div>
-      </section>
+      <SnapSection>
+        <TechStackGrid siteName={siteName} />
+      </SnapSection>
 
-      <section className="space-y-4">
+      <SnapSection>
+        <IntegrationsGrid siteName={siteName} />
+      </SnapSection>
+
+      <SnapSection className="space-y-4">
         <DividedTitle>Frequently asked questions</DividedTitle>
         <FaqList items={faqItems} />
-      </section>
+      </SnapSection>
 
-      <footer className="space-y-1 border-t border-border pt-6 text-xs text-muted-foreground">
-        <p>
+      <div className="pointer-events-none fixed inset-y-0 right-0 z-20 hidden w-[18rem] items-center justify-center overflow-hidden lg:flex">
+        <p className="w-[80svh] shrink-0 origin-center rotate-90 px-2 text-xs leading-relaxed text-muted-foreground">
           {siteName} is a dFortix.ai deployment operated by {legalName}
           {abn ? ` (ABN ${abn})` : ""}. Platform technology by Mercury Road
           Equipment Pty Ltd (ABN 36 614 422 187). All AUD figures GST-inclusive
           and indicative — final quote on signed proposal. Statutory NSW toll
-          amounts are set by the operator (Transurban / Linkt or NSW
-          Government) and adjusted quarterly; the {siteName} platform passes
-          them through at face value and never marks them up.
+          amounts are set by the operator (Transurban / Linkt or NSW Government)
+          and adjusted quarterly; the {siteName} platform passes them through at
+          face value and never marks them up.
         </p>
-      </footer>
+      </div>
     </div>
   );
 }

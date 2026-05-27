@@ -19,9 +19,9 @@ function mockDb(response: { pickups: unknown[]; returns: unknown[]; overdue: unk
 
 const now = new Date("2026-04-18T10:00:00Z");
 
-const customerStub = { firstName: "Jess", lastName: "Ng", phone: null };
+const customerStub = { id: "cust_1", firstName: "Jess", lastName: "Ng", phone: null };
 const categoryStub = { name: "150cc Scooter" };
-const vehicleStub = { internalCode: "SCT-V1", rego: "123ABC" };
+const vehicleStub = { id: "veh_1", internalCode: "SCT-V1", rego: "123ABC" };
 
 describe("collectBookingTasks", () => {
   it("emits BOOKING_PICKUP for today's pickups, with tier based on imminence", async () => {
@@ -65,6 +65,18 @@ describe("collectBookingTasks", () => {
     expect(byId.get("b_soon")?.tier).toBe("HIGH");
     expect(byId.get("b_later")?.tier).toBe("MEDIUM");
     expect(byId.get("b_past")?.actionUrl).toBe("/staff/bookings/b_past/check-out");
+    // Deep-link IDs for the queue's "View" menu.
+    expect(byId.get("b_past")?.links).toEqual({
+      bookingId: "b_past",
+      customerId: "cust_1",
+      vehicleId: "veh_1",
+    });
+    // A booking with no allocated vehicle still links booking + customer.
+    expect(byId.get("b_later")?.links).toEqual({
+      bookingId: "b_later",
+      customerId: "cust_1",
+      vehicleId: undefined,
+    });
   });
 
   it("emits BOOKING_RETURN and BOOKING_OVERDUE_CHASE with correct tiers", async () => {

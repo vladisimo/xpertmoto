@@ -30,6 +30,7 @@ interface LoyaltyRow {
   loyaltyTier: "SILVER" | "GOLD" | "PLATINUM";
   totalSpend: number;
   completedBookings: number;
+  totalBookings: number;
 }
 
 function formatAud(n: number): string {
@@ -133,8 +134,9 @@ export function CustomerLoyaltyTab() {
       {
         id: "bookings",
         header: "Bookings",
+        // Completed + in-flight engagements (excludes no-shows/cancellations).
         align: "right",
-        cell: (r) => <span className="tabular-nums">{r.completedBookings}</span>,
+        cell: (r) => <span className="tabular-nums">{r.totalBookings}</span>,
       },
     ],
     [kind, rankById],

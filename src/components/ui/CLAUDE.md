@@ -16,7 +16,7 @@ This contract exists because the app's UI was drifting — same feature rendered
   Reference implementations:
   - [staff customers](../../app/(staff)/staff/customers/page.tsx)
   - [customer bookings](../../app/(customer)/dashboard/bookings/page.tsx)
-  - [admin users](../../app/(admin)/admin/users/page.tsx)
+  - [users & roles tab](../staff/customer-users-tab.tsx)
 
 - **Forms**: use shadcn `<Form>` + `<FormField>` + `<FormItem>` + `<FormLabel>` + `<FormControl>` + `<FormMessage>` with `react-hook-form` and a `zod` `resolver`. Wrap the field set in `<FormGrid cols={2}>` (from [form-grid.tsx](../forms/form-grid.tsx)) and use `<FormGridRow>` for full-width rows. **Raw `<Input>` with a raw `<Label>` outside `<FormField>` is banned in new code.**
 - **Selects**: shadcn `<Select>` from [select.tsx](select.tsx). **Native `<select>` elements are banned.**
@@ -77,7 +77,7 @@ When in doubt, mirror the structure of these already-migrated pages:
 - Marketing: [src/app/(public)/page.tsx](../../app/(public)/page.tsx)
 - Ops dashboard: [src/app/(staff)/staff/dashboard/page.tsx](../../app/(staff)/staff/dashboard/page.tsx)
 - Detail page: [src/app/(staff)/staff/bookings/[id]/page.tsx](../../app/(staff)/staff/bookings/%5Bid%5D/page.tsx)
-- Admin list + form: [src/app/(admin)/admin/users/page.tsx](../../app/(admin)/admin/users/page.tsx)
+- Admin list + form: [src/components/staff/customer-users-tab.tsx](../staff/customer-users-tab.tsx)
 
 ## Stats / dashboard widgets
 

@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   FileText,
+  Info,
   Loader2,
   Mail,
   MessageCircle,
@@ -26,6 +27,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
+import { formatDeliveryNote } from "@/components/communications/delivery-status";
 import { trpc } from "@/lib/trpc/client";
 
 type Channel = "EMAIL" | "SMS" | "IN_APP" | "PUSH";
@@ -172,6 +174,7 @@ export function CommsLogDetailDrawer({ id, open, onOpenChange }: CommsLogDetailD
       : log.customer.email ?? "—"
     : "—";
   const attachments = parseAttachments(log?.attachmentRefs);
+  const deliveryNote = formatDeliveryNote(log?.errorMessage);
   const resendBlockedReason =
     !log
       ? null
@@ -195,7 +198,11 @@ export function CommsLogDetailDrawer({ id, open, onOpenChange }: CommsLogDetailD
           <div className="flex items-center gap-2 text-muted-foreground">
             <ChannelIcon className="h-4 w-4" aria-hidden />
             <span className="caption">{CHANNEL_LABEL[channel]}</span>
-            {log ? <StatusBadge status={log.status as StatusKey} /> : null}
+            {log ? (
+              <StatusBadge
+                status={(deliveryNote?.suppressed ? "SUPPRESSED" : log.status) as StatusKey}
+              />
+            ) : null}
           </div>
           <SheetTitle className="pr-6">
             {log?.subject ? log.subject : log ? humaniseType(log.type) : "Communication"}
@@ -291,11 +298,25 @@ export function CommsLogDetailDrawer({ id, open, onOpenChange }: CommsLogDetailD
                 ) : null}
               </dl>
 
-              {log.errorMessage ? (
-                <div className="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-                  <span className="break-words">{log.errorMessage}</span>
-                </div>
+              {deliveryNote ? (
+                deliveryNote.suppressed ? (
+                  <div className="mt-4 flex items-start gap-2 rounded-md bg-muted p-3 text-sm text-muted-foreground">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                    <span className="break-words">{deliveryNote.text}</span>
+                  </div>
+                ) : (
+                  <div className="mt-4 flex items-start gap-2 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+                    <div className="min-w-0 space-y-1">
+                      <span className="break-words">{deliveryNote.text}</span>
+                      {deliveryNote.detail ? (
+                        <p className="break-words font-mono text-xs text-destructive/70">
+                          {deliveryNote.detail}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                )
               ) : null}
             </section>
 

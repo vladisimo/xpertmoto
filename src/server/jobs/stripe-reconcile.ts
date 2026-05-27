@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { listBalanceTransactions, type StripeBalanceTransaction } from "@/lib/stripe";
 import { getSecret, setSecret } from "@/lib/integration-config";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 /**
  * G3 — stripe-reconcile
@@ -38,12 +38,35 @@ export type ReconcileResult = {
   newCheckpoint: number | null;
 };
 
-export async function runStripeReconcile(opts: { lookbackDays?: number } = {}): Promise<ReconcileResult> {
+export async function runStripeReconcile(
+  opts: {
+    lookbackDays?: number;
+    /** Reconcile an explicit window instead of the checkpoint→now range. */
+    windowStart?: Date;
+    windowEnd?: Date;
+    /**
+     * Whether to advance the saved checkpoint. Defaults to true for the normal
+     * nightly run, false for an explicit-window run (so an on-demand UI refresh
+     * doesn't disturb the nightly cadence).
+     */
+    advanceCheckpoint?: boolean;
+  } = {},
+): Promise<ReconcileResult> {
   const lookbackDays = opts.lookbackDays ?? DEFAULT_LOOKBACK_DAYS;
-  const checkpointRaw = await getSecret(CHECKPOINT_KEY, "RECONCILE_LAST_CHECKPOINT");
-  const defaultStart = Math.floor(Date.now() / 1000) - lookbackDays * 24 * 60 * 60;
-  const createdGte = checkpointRaw ? parseInt(checkpointRaw, 10) || defaultStart : defaultStart;
-  const createdLte = Math.floor(Date.now() / 1000) - 600; // 10-minute lag
+  const explicitWindow = opts.windowStart != null && opts.windowEnd != null;
+  const advanceCheckpoint = opts.advanceCheckpoint ?? !explicitWindow;
+
+  let createdGte: number;
+  let createdLte: number;
+  if (explicitWindow) {
+    createdGte = Math.floor(opts.windowStart!.getTime() / 1000);
+    createdLte = Math.floor(opts.windowEnd!.getTime() / 1000);
+  } else {
+    const checkpointRaw = await getSecret(CHECKPOINT_KEY, "RECONCILE_LAST_CHECKPOINT");
+    const defaultStart = Math.floor(Date.now() / 1000) - lookbackDays * 24 * 60 * 60;
+    createdGte = checkpointRaw ? parseInt(checkpointRaw, 10) || defaultStart : defaultStart;
+    createdLte = Math.floor(Date.now() / 1000) - 600; // 10-minute lag
+  }
 
   const result: ReconcileResult = {
     balanceTxnsProcessed: 0,
@@ -76,8 +99,8 @@ export async function runStripeReconcile(opts: { lookbackDays?: number } = {}): 
   // Step 3–4 — cross-check
   await crossCheck(createdGte, createdLte, result);
 
-  // Step 5 — save checkpoint if we made progress
-  if (result.balanceTxnsProcessed > 0 && maxCreated > createdGte) {
+  // Step 5 — save checkpoint if we made progress (skipped for explicit-window runs)
+  if (advanceCheckpoint && result.balanceTxnsProcessed > 0 && maxCreated > createdGte) {
     await setSecret(CHECKPOINT_KEY, String(maxCreated));
     result.newCheckpoint = maxCreated;
   }
@@ -97,6 +120,7 @@ async function processBalanceTxn(txn: StripeBalanceTransaction, result: Reconcil
       where: { stripeChargeId: chargeId },
       create: {
         stripeChargeId: chargeId,
+        stripePaymentIntentId: txn.paymentIntent ?? null,
         feeType: txn.type === "charge" ? "stripe_fee" : "refund_fee",
         feeAmountCents: Math.abs(txn.fee),
         netAmountCents: txn.net,
@@ -105,6 +129,9 @@ async function processBalanceTxn(txn: StripeBalanceTransaction, result: Reconcil
       },
       update: {
         netAmountCents: txn.net,
+        // Backfill the PI if a later txn (e.g. refund) carries it and the
+        // original charge row didn't.
+        ...(txn.paymentIntent ? { stripePaymentIntentId: txn.paymentIntent } : {}),
       },
     });
     result.feeRowsUpserted += 1;
@@ -167,6 +194,87 @@ async function crossCheck(createdGte: number, createdLte: number, result: Reconc
       }
     }
   }
+
+  // Stripe → system-ledger: charge rows in the fee ledger (i.e. seen in Stripe
+  // balance_transactions) within the window with no matching Payment row. A
+  // Payment matches by charge id OR by payment-intent — the latter covers
+  // Payments whose charge id wasn't backfilled by the webhook; when matched
+  // only by PI we backfill the charge id so future runs match directly.
+  const chargeLedgerInWindow = await prisma.stripeFeeLedger.findMany({
+    where: { balanceTxnCreatedAt: { gte: start, lte: end }, feeType: "stripe_fee" },
+    select: {
+      stripeChargeId: true,
+      stripePaymentIntentId: true,
+      netAmountCents: true,
+      feeAmountCents: true,
+      balanceTxnCreatedAt: true,
+    },
+  });
+  if (chargeLedgerInWindow.length > 0) {
+    const chargeIds = chargeLedgerInWindow.map((l) => l.stripeChargeId);
+    const pis = chargeLedgerInWindow
+      .map((l) => l.stripePaymentIntentId)
+      .filter((p): p is string => !!p);
+    const candidatePayments = await prisma.payment.findMany({
+      where: {
+        OR: [
+          { stripeChargeId: { in: chargeIds } },
+          ...(pis.length ? [{ stripePaymentIntentId: { in: pis } }] : []),
+        ],
+      },
+      select: { id: true, stripeChargeId: true, stripePaymentIntentId: true },
+    });
+    const byChargeId = new Set(
+      candidatePayments.map((p) => p.stripeChargeId).filter((c): c is string => !!c),
+    );
+    const paymentByPi = new Map(
+      candidatePayments
+        .filter((p) => p.stripePaymentIntentId)
+        .map((p) => [p.stripePaymentIntentId!, p]),
+    );
+    for (const l of chargeLedgerInWindow) {
+      if (byChargeId.has(l.stripeChargeId)) {
+        await resolveUnmatched("STRIPE_CHARGE", l.stripeChargeId);
+        continue;
+      }
+      const piMatch = l.stripePaymentIntentId
+        ? paymentByPi.get(l.stripePaymentIntentId)
+        : undefined;
+      if (piMatch) {
+        // Backfill the charge id the webhook never set, then clear any stale
+        // discrepancy — the rows now reconcile on charge id.
+        if (!piMatch.stripeChargeId) {
+          await prisma.payment.update({
+            where: { id: piMatch.id },
+            data: { stripeChargeId: l.stripeChargeId },
+          });
+        }
+        await resolveUnmatched("STRIPE_CHARGE", l.stripeChargeId);
+        continue;
+      }
+      await upsertUnmatched({
+        source: "STRIPE_CHARGE",
+        externalId: l.stripeChargeId,
+        // Gross = net + fee for a charge row.
+        amountCents: l.netAmountCents + l.feeAmountCents,
+        occurredAt: l.balanceTxnCreatedAt,
+        reason: "Stripe charge seen in balance_transactions but no matching Payment row",
+        payload: { stripeChargeId: l.stripeChargeId },
+      });
+      result.unmatchedStripeCharges += 1;
+    }
+  }
+}
+
+/** Mark a previously-recorded discrepancy resolved once it reconciles. */
+async function resolveUnmatched(
+  source: "SYSTEM_LEDGER" | "STRIPE_CHARGE" | "STRIPE_PAYOUT" | "BANK_STATEMENT",
+  externalId: string,
+): Promise<void> {
+  await prisma.unmatchedTransaction.updateMany({
+    where: { source, externalId, resolvedAt: null },
+    data: { resolvedAt: new Date(), resolvedNote: "Auto-resolved: charge now reconciles" },
+  });
 }
 
 async function upsertUnmatched(args: {
@@ -195,6 +303,7 @@ async function upsertUnmatched(args: {
 
 export function startStripeReconcileScheduler() {
   registerWorker(QUEUE, async () => runStripeReconcile());
+  monitorCron(QUEUE, "30 2 * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   // Nightly at 02:30 Brisbane, after bond-auto-release + revenue-reconcile.

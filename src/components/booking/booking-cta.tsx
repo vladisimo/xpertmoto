@@ -9,7 +9,6 @@ function useWizardResumable(): boolean {
   // SSR/hydration mismatch where the server would always render "Book Now".
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
   return mounted && step >= 2;

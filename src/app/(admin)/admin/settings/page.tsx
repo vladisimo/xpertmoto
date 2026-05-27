@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
@@ -18,6 +18,21 @@ import {
   SETTING_GROUP_FOR,
   type SettingKey,
 } from "@/lib/settings-defaults";
+import {
+  Archive,
+  Award,
+  Bell,
+  Building2,
+  CalendarCheck,
+  CalendarX,
+  CreditCard,
+  FlaskConical,
+  KeyRound,
+  ShieldCheck,
+  ShoppingCart,
+  Tags,
+  type LucideIcon,
+} from "lucide-react";
 
 type FieldType = "number" | "decimal" | "text" | "boolean";
 
@@ -40,6 +55,7 @@ const IS_DEV = process.env.NODE_ENV !== "production";
 interface TabDef {
   key: TabKey;
   label: string;
+  icon: LucideIcon;
   description: string;
   fields?: { key: SettingKey; label: string; type: FieldType; suffix?: string }[];
 }
@@ -48,6 +64,7 @@ const TABS: TabDef[] = [
   {
     key: "organisation",
     label: "Organisation",
+    icon: Building2,
     description: "Business identity shown on the public site, emails, and tax documents.",
     fields: [
       { key: "org.tradingName", label: "Trading name", type: "text" },
@@ -64,6 +81,7 @@ const TABS: TabDef[] = [
   {
     key: "booking",
     label: "Booking",
+    icon: CalendarCheck,
     description: "Control how far ahead customers can book and the duration limits.",
     fields: [
       { key: "booking.minDays", label: "Minimum duration", type: "number", suffix: "days" },
@@ -76,6 +94,7 @@ const TABS: TabDef[] = [
   {
     key: "checkout",
     label: "Checkout",
+    icon: ShoppingCart,
     description: "Rules that apply at check-out and return, including late fees and fuel charges.",
     fields: [
       { key: "booking.allowGuestCheckout", label: "Allow guest checkout", type: "boolean" },
@@ -87,6 +106,7 @@ const TABS: TabDef[] = [
   {
     key: "cancellation",
     label: "Cancellation",
+    icon: CalendarX,
     description: "Thresholds used when customers or staff cancel a booking.",
     fields: [
       { key: "cancellation.fullRefundHours", label: "Full refund cutoff", type: "number", suffix: "hrs" },
@@ -98,6 +118,7 @@ const TABS: TabDef[] = [
   {
     key: "payment",
     label: "Payment & tax",
+    icon: CreditCard,
     description: "Tax settings, bond behaviour, and accepted payment methods.",
     fields: [
       { key: "tax.gstRate", label: "GST rate", type: "decimal", suffix: "ratio" },
@@ -109,6 +130,7 @@ const TABS: TabDef[] = [
   {
     key: "pricing",
     label: "Pricing",
+    icon: Tags,
     description:
       "Global levers that gate the demand multiplier and the legacy duration-discount ladder. PricingTier ladders are unaffected — they always replace the duration discount where configured.",
     fields: [
@@ -127,6 +149,7 @@ const TABS: TabDef[] = [
   {
     key: "loyalty",
     label: "Loyalty",
+    icon: Award,
     description: "Point earning rates and lifetime-tier thresholds.",
     fields: [
       { key: "loyalty.pointsPerDollar", label: "Points per A$1 spent", type: "number" },
@@ -139,6 +162,7 @@ const TABS: TabDef[] = [
   {
     key: "notifications",
     label: "Notifications",
+    icon: Bell,
     description:
       "Kill-switch, per-channel master toggles, and reminder timing. Disabling a channel stops every send on that channel — auth emails (password reset, magic link) remain exempt.",
     fields: [
@@ -154,6 +178,7 @@ const TABS: TabDef[] = [
   {
     key: "authentication",
     label: "Authentication",
+    icon: KeyRound,
     description:
       "Sign-in policy for back-office users. Customers always have OAuth available; this toggle only controls staff, manager, and admin accounts.",
     fields: [
@@ -167,11 +192,13 @@ const TABS: TabDef[] = [
   {
     key: "audit",
     label: "Audit & retention",
+    icon: Archive,
     description: "Per-category audit log trimming. Runs daily at 03:00 Australia/Brisbane.",
   },
   {
     key: "security",
     label: "Security",
+    icon: ShieldCheck,
     description: "APP-11 encryption rollout, secret rotation status, and other security posture indicators.",
   },
   ...(IS_DEV
@@ -179,6 +206,7 @@ const TABS: TabDef[] = [
         {
           key: "testData" as const,
           label: "Test data",
+          icon: FlaskConical,
           description:
             "Inject simulated events (tolls, infringements, incidents, overdue) to rehearse workflows. Hidden in production.",
         },
@@ -193,7 +221,18 @@ export default function SettingsPage() {
     onSuccess: () => util.admin.listSettings.invalidate(),
   });
 
-  const [tab, setTab] = useState<TabKey>("organisation");
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const tab: TabKey = TABS.some((t) => t.key === tabParam) ? (tabParam as TabKey) : "organisation";
+  const setTab = (key: TabKey) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (key === "organisation") params.delete("tab");
+    else params.set("tab", key);
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
   const active = TABS.find((t) => t.key === tab)!;
 
   function currentValue(key: SettingKey): unknown {
@@ -222,22 +261,26 @@ export default function SettingsPage() {
         className="-mx-3 flex gap-1 overflow-x-auto border-b px-3 sm:mx-0 sm:px-0"
         role="tablist"
       >
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.key}
-            onClick={() => setTab(t.key)}
-            className={`border-b-2 whitespace-nowrap px-4 py-2 text-sm font-medium transition-colors ${
-              tab === t.key
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.key}
+              onClick={() => setTab(t.key)}
+              className={`inline-flex items-center gap-1.5 border-b-2 whitespace-nowrap px-4 py-2 text-sm font-medium transition-colors ${
+                tab === t.key
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden />
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {active.key === "testData" ? (
@@ -255,7 +298,7 @@ export default function SettingsPage() {
             />
           ) : (
             <div className="space-y-8">
-              <FormGrid cols={2}>
+              <FormGrid cols={3}>
                 {active.fields!.map((f) => (
                   <SettingField
                     key={f.key}

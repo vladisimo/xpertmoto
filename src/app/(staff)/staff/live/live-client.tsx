@@ -7,6 +7,19 @@ import { PageShell } from "@/components/layout/page-section";
 import { Tabs, TabsContent, TabsTrigger } from "@/components/ui/tabs";
 import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import { DesktopRecommendedNotice } from "@/components/layout/desktop-recommended-notice";
+import {
+  Activity,
+  Bell,
+  Filter,
+  Gauge,
+  Megaphone,
+  MousePointerClick,
+  Radio,
+  Repeat,
+  TrendingUp,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
 import { LiveTab } from "./tabs/live-tab";
 import { OverviewTab } from "./tabs/overview-tab";
 import { AcquisitionTab } from "./tabs/acquisition-tab";
@@ -31,6 +44,19 @@ const TABS = [
   "alerts",
 ] as const;
 type TabValue = (typeof TABS)[number];
+
+const TAB_META: Record<TabValue, { label: string; icon: LucideIcon }> = {
+  live:         { label: "Live",              icon: Radio },
+  sessions:     { label: "Sessions",          icon: Users },
+  interactions: { label: "Interactions",      icon: MousePointerClick },
+  sales:        { label: "Sales performance", icon: TrendingUp },
+  overview:     { label: "Overview",          icon: Gauge },
+  acquisition:  { label: "Acquisition",       icon: Megaphone },
+  behaviour:    { label: "Behaviour",         icon: Activity },
+  conversion:   { label: "Conversion",        icon: Filter },
+  retention:    { label: "Retention",         icon: Repeat },
+  alerts:       { label: "Alerts",            icon: Bell },
+};
 
 function parseTab(v: string | null): TabValue {
   // Legacy: "analytics" was the single summary tab; redirect to overview.
@@ -74,16 +100,16 @@ export function LiveClient() {
         className="flex min-h-0 flex-1 flex-col gap-4"
       >
         <MobileScrollTabs className="w-max sm:w-max">
-          <TabsTrigger value="live">Live</TabsTrigger>
-          <TabsTrigger value="sessions">Sessions</TabsTrigger>
-          <TabsTrigger value="interactions">Interactions</TabsTrigger>
-          <TabsTrigger value="sales">Sales performance</TabsTrigger>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="acquisition">Acquisition</TabsTrigger>
-          <TabsTrigger value="behaviour">Behaviour</TabsTrigger>
-          <TabsTrigger value="conversion">Conversion</TabsTrigger>
-          <TabsTrigger value="retention">Retention</TabsTrigger>
-          <TabsTrigger value="alerts">Alerts</TabsTrigger>
+          {TABS.map((value) => {
+            const meta = TAB_META[value];
+            const Icon = meta.icon;
+            return (
+              <TabsTrigger key={value} value={value} className="gap-1.5">
+                <Icon className="h-3.5 w-3.5" aria-hidden />
+                <span>{meta.label}</span>
+              </TabsTrigger>
+            );
+          })}
         </MobileScrollTabs>
 
         <TabsContent

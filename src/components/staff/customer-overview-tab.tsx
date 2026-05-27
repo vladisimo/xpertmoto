@@ -169,7 +169,7 @@ export function CustomerOverviewTab() {
           </ul>
         </header>
         <div className="px-2 pb-2 pt-3" style={{ height: 188 }}>
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height: 188 }}>
             <BarChart data={trendData} margin={{ top: 8, right: 16, left: 8, bottom: 8 }}>
               <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" vertical={false} />
               <XAxis
@@ -216,7 +216,7 @@ export function CustomerOverviewTab() {
           <header className="border-b px-4 py-3">
             <h2 className="h3">Top spenders</h2>
             <p className="text-caption text-muted-foreground">
-              Lifetime spend across all completed bookings
+              Lifetime spend across all bookings
             </p>
           </header>
           <ul className="divide-y">
@@ -249,7 +249,7 @@ export function CustomerOverviewTab() {
                       {formatAud(c.totalSpend)}
                     </span>
                     <span className="text-[11px] text-muted-foreground">
-                      {c.completedBookings} bookings
+                      {c.totalBookings} {c.totalBookings === 1 ? "booking" : "bookings"}
                     </span>
                   </div>
                   <StatusBadge

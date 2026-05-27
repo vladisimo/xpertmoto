@@ -2,7 +2,7 @@ import { auth, signOut } from "@/lib/auth";
 import { PublicHeader } from "@/components/layout/public-header";
 import { PublicMain } from "@/components/layout/public-main";
 import { PublicFooter } from "@/components/layout/public-footer";
-import { HideOnBooking } from "@/components/layout/hide-on-booking";
+import { HideOnRoute } from "@/components/layout/hide-on-route";
 import { ReviewsShowcase } from "@/components/marketing/reviews-showcase";
 import { ReviewsShowcaseSlot } from "@/components/marketing/reviews-showcase-slot";
 import { VisitorHeartbeatMount } from "@/components/live/visitor-heartbeat-mount";
@@ -27,17 +27,23 @@ export default async function PublicLayout({ children }: { children: React.React
 
   return (
     <div className="flex min-h-screen flex-col">
-      <PublicHeader user={user} signOutAction={handleSignOut} />
+      <HideOnRoute prefixes={["/why-xpert"]}>
+        <PublicHeader user={user} signOutAction={handleSignOut} />
+      </HideOnRoute>
       <PublicMain>{children}</PublicMain>
-      <ReviewsShowcaseSlot>
-        <ReviewsShowcase />
-      </ReviewsShowcaseSlot>
-      <HideOnBooking>
+      <HideOnRoute prefixes={["/why-xpert"]}>
+        <ReviewsShowcaseSlot>
+          <ReviewsShowcase />
+        </ReviewsShowcaseSlot>
+      </HideOnRoute>
+      <HideOnRoute prefixes={["/booking", "/why-xpert"]}>
         <PublicFooter />
-      </HideOnBooking>
+      </HideOnRoute>
       <VisitorHeartbeatMount />
       <VisitorEventsMount />
-      <LiveChatLauncher />
+      <HideOnRoute prefixes={["/why-xpert"]}>
+        <LiveChatLauncher />
+      </HideOnRoute>
     </div>
   );
 }

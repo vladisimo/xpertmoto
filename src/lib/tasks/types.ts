@@ -14,6 +14,19 @@ export type TargetEntityKind =
   | "BondLedger"
   | "DamageCharge";
 
+/**
+ * Denormalised navigation targets for a task's related domain entities, so the
+ * queue UI can offer "View booking / customer / asset" deep-links without
+ * re-querying. Each is optional — a maintenance work order has a vehicle but no
+ * booking or customer, for instance. Only the IDs are carried; the queue builds
+ * the `/staff/...` URLs from them.
+ */
+export interface TaskLinks {
+  bookingId?: string;
+  customerId?: string;
+  vehicleId?: string;
+}
+
 export interface VirtualTask {
   taskType: StaffTaskType;
   targetEntityKind: TargetEntityKind;
@@ -28,6 +41,7 @@ export interface VirtualTask {
   actionableSince: Date;
   dueAt?: Date | null;
   metadata?: Record<string, unknown>;
+  links?: TaskLinks;
 }
 
 export interface TaskListEntry extends VirtualTask {

@@ -116,7 +116,7 @@ export function AuditActivityChart({ points, bucket, loading }: AuditActivityCha
             No activity recorded in this window.
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 600, height: 224 }}>
             <BarChart data={data} margin={{ top: 4, right: 12, bottom: 0, left: -16 }}>
               <CartesianGrid
                 vertical={false}

@@ -1,32 +1,92 @@
 import {
+  Activity,
+  AlertTriangle,
+  Archive,
+  ArrowLeftRight,
+  Award,
+  Banknote,
   BarChart3,
+  Bell,
   Bike,
+  BookOpen,
+  Brain,
+  Building2,
   CalendarCheck,
+  CalendarRange,
+  CalendarX,
+  Car,
   CheckSquare,
+  ClipboardCheck,
   CreditCard,
+  Database,
   DollarSign,
   Eye,
   FileText,
+  Filter,
   Gauge,
+  HardDrive,
+  HelpCircle,
   Home,
+  IdCard,
+  Inbox,
+  KeyRound,
   LayoutDashboard,
+  LayoutGrid,
   LifeBuoy,
-  MapPin,
+  Lightbulb,
+  ListOrdered,
+  Lock,
+  Mail,
+  Megaphone,
   MessageCircle,
   MessageSquare,
+  MessagesSquare,
+  MousePointerClick,
+  Pencil,
+  Percent,
   Plug,
+  PlusCircle,
+  Radio,
+  Receipt,
+  Repeat,
+  Route,
+  Satellite,
+  Scale,
   ScrollText,
+  Send,
+  Server,
   ServerCog,
   Settings,
+  Shapes,
+  ShieldAlert,
+  ShieldCheck,
+  ShoppingCart,
   Sparkles,
+  Tags,
+  Target,
+  Ticket,
+  TrendingUp,
+  Umbrella,
+  UserCheck,
   UserCircle,
-  UserCog,
   Users,
+  Webhook,
+  Wrench,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 
 export type UserRole = "CUSTOMER" | "STAFF" | "MANAGER" | "ADMIN" | "SUPER_ADMIN";
 export type PortalSection = "staff" | "admin";
+
+/** A single tab/sub-page of a nav item, rendered in the hover flyout. */
+export type BackOfficeNavChild = {
+  label: string;
+  /** Full deep link — includes the `?tab=…` query or a sibling route. */
+  href: string;
+  /** Matches the icon used by the corresponding tab on the destination page. */
+  icon: LucideIcon;
+};
 
 export type BackOfficeNavItem = {
   href: string;
@@ -34,6 +94,12 @@ export type BackOfficeNavItem = {
   icon: LucideIcon;
   section: PortalSection;
   allowedRoles: readonly UserRole[];
+  /**
+   * Tabs of the destination page, deep-linked from a hover flyout in the
+   * sidebar. Children inherit the parent's `allowedRoles`. The first child
+   * (the page's default tab) intentionally equals the parent `href`.
+   */
+  children?: readonly BackOfficeNavChild[];
 };
 
 const STAFF_PLUS: readonly UserRole[] = ["STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"];
@@ -45,23 +111,170 @@ export const BACK_OFFICE_NAV: readonly BackOfficeNavItem[] = [
   { href: "/staff/dashboard",      label: "Dashboard",      icon: LayoutDashboard, section: "staff", allowedRoles: STAFF_PLUS },
   { href: "/staff/tasks",          label: "Priority Tasks", icon: CheckSquare,     section: "staff", allowedRoles: STAFF_PLUS },
   { href: "/staff/calendar",       label: "Bookings",       icon: CalendarCheck,   section: "staff", allowedRoles: STAFF_PLUS },
-  { href: "/staff/customers",      label: "Customers",      icon: Users,           section: "staff", allowedRoles: STAFF_PLUS },
-  { href: "/staff/fleet",          label: "Fleet",          icon: Bike,            section: "staff", allowedRoles: STAFF_PLUS },
-  { href: "/staff/communications", label: "Communications", icon: MessageCircle,   section: "staff", allowedRoles: STAFF_PLUS },
-  { href: "/staff/support",        label: "Support",        icon: LifeBuoy,        section: "staff", allowedRoles: STAFF_PLUS },
-  { href: "/staff/live",           label: "Live Visitors",  icon: Eye,             section: "staff", allowedRoles: STAFF_PLUS },
+  {
+    href: "/staff/customers", label: "Customers", icon: Users, section: "staff", allowedRoles: STAFF_PLUS,
+    children: [
+      { label: "Overview",            href: "/staff/customers",                       icon: Gauge },
+      { label: "Directory",           href: "/staff/customers?tab=directory",         icon: Users },
+      { label: "Verification",        href: "/staff/customers?tab=verification",      icon: IdCard },
+      { label: "Risk & Compliance",   href: "/staff/customers?tab=risk",              icon: ShieldAlert },
+      { label: "Loyalty & Referrals", href: "/staff/customers?tab=loyalty",           icon: Award },
+      { label: "Communications",      href: "/staff/customers?tab=communications",    icon: MessageSquare },
+      { label: "Documents",           href: "/staff/customers?tab=documents",         icon: FileText },
+      { label: "Settings",            href: "/staff/customers?tab=settings",          icon: Settings },
+    ],
+  },
+  {
+    href: "/staff/fleet", label: "Fleet", icon: Bike, section: "staff", allowedRoles: STAFF_PLUS,
+    children: [
+      { label: "Overview",        href: "/staff/fleet",                  icon: Gauge },
+      { label: "Vehicles",        href: "/staff/fleet?tab=vehicles",     icon: Bike },
+      { label: "Makes & Models",  href: "/staff/fleet?tab=makes-models", icon: BookOpen },
+      { label: "Maintenance",     href: "/staff/fleet?tab=maintenance",  icon: Wrench },
+      { label: "Inspections",     href: "/staff/fleet?tab=inspections",  icon: ClipboardCheck },
+      { label: "Incidents",       href: "/staff/fleet?tab=incidents",    icon: AlertTriangle },
+      { label: "Infringements",   href: "/staff/fleet?tab=infringements", icon: Receipt },
+      { label: "Tolls",           href: "/staff/fleet?tab=tolls",        icon: Route },
+      { label: "Settings",        href: "/staff/fleet?tab=settings",     icon: Settings },
+    ],
+  },
+  {
+    href: "/staff/communications", label: "Communications", icon: MessageCircle, section: "staff", allowedRoles: STAFF_PLUS,
+    children: [
+      { label: "Log",          href: "/staff/communications",             icon: Inbox },
+      { label: "Compose",      href: "/staff/communications/compose",     icon: Send },
+      { label: "Campaigns",    href: "/staff/communications/campaigns",   icon: MessageSquare },
+      { label: "Templates",    href: "/staff/communications/templates",   icon: FileText },
+      { label: "Segments",     href: "/staff/communications/segments",    icon: Target },
+      { label: "Preferences",  href: "/staff/communications/preferences", icon: ShieldCheck },
+      { label: "Automations",  href: "/staff/communications/automations", icon: Zap },
+    ],
+  },
+  {
+    href: "/staff/support", label: "Support", icon: LifeBuoy, section: "staff", allowedRoles: STAFF_PLUS,
+    children: [
+      { label: "Tickets",  href: "/staff/support",              icon: Ticket },
+      { label: "Insights", href: "/staff/support?tab=insights", icon: Lightbulb },
+    ],
+  },
+  {
+    href: "/staff/live", label: "Live Visitors", icon: Eye, section: "staff", allowedRoles: STAFF_PLUS,
+    children: [
+      { label: "Live",              href: "/staff/live",                   icon: Radio },
+      { label: "Sessions",          href: "/staff/live?tab=sessions",      icon: Users },
+      { label: "Interactions",      href: "/staff/live?tab=interactions",  icon: MousePointerClick },
+      { label: "Sales performance", href: "/staff/live?tab=sales",         icon: TrendingUp },
+      { label: "Overview",          href: "/staff/live?tab=overview",      icon: Gauge },
+      { label: "Acquisition",       href: "/staff/live?tab=acquisition",   icon: Megaphone },
+      { label: "Behaviour",         href: "/staff/live?tab=behaviour",     icon: Activity },
+      { label: "Conversion",        href: "/staff/live?tab=conversion",    icon: Filter },
+      { label: "Retention",         href: "/staff/live?tab=retention",     icon: Repeat },
+      { label: "Alerts",            href: "/staff/live?tab=alerts",        icon: Bell },
+    ],
+  },
   { href: "/staff/ai-insights",    label: "AI Insights",    icon: Sparkles,        section: "staff", allowedRoles: MANAGER_PLUS },
+  { href: "/staff/help",           label: "Help",           icon: HelpCircle,      section: "staff", allowedRoles: STAFF_PLUS },
 
-  { href: "/admin/dashboard",    label: "Dashboard", icon: Gauge,       section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/users",        label: "Users & Roles",   icon: UserCog,     section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/depots",       label: "Depots",          icon: MapPin,      section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/finance",      label: "Finance",         icon: DollarSign,  section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/reports",      label: "Reports",         icon: BarChart3,   section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/integrations", label: "Integrations",    icon: Plug,          section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/notification-templates", label: "Templates", icon: MessageSquare, section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/audit-log",    label: "Audit Log",       icon: ScrollText,    section: "admin", allowedRoles: ADMIN_PLUS },
-  { href: "/admin/platform",     label: "Platform",        icon: ServerCog,     section: "admin", allowedRoles: SUPER_ADMIN_ONLY },
-  { href: "/admin/settings",     label: "System Settings", icon: Settings,    section: "admin", allowedRoles: SUPER_ADMIN_ONLY },
+  {
+    href: "/admin/dashboard", label: "Dashboard", icon: Gauge, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Overview", href: "/admin/dashboard",            icon: LayoutDashboard },
+      { label: "Risk",     href: "/admin/dashboard?tab=risk",    icon: ShieldAlert },
+      { label: "Debt",     href: "/admin/dashboard?tab=debt",    icon: DollarSign },
+      { label: "Support",  href: "/admin/dashboard?tab=support", icon: LifeBuoy },
+    ],
+  },
+  {
+    href: "/admin/finance", label: "Finance", icon: DollarSign, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Overview",       href: "/admin/finance",                icon: LayoutDashboard },
+      { label: "Transactions",   href: "/admin/finance/transactions",   icon: ArrowLeftRight },
+      { label: "Invoices",       href: "/admin/finance/invoices",       icon: FileText },
+      { label: "Bonds",          href: "/admin/finance/bonds",          icon: Lock },
+      { label: "GST / BAS",      href: "/admin/finance/gst",            icon: Receipt },
+      { label: "Reconciliation", href: "/admin/finance/reconciliation", icon: Scale },
+      { label: "Recurring",      href: "/admin/finance/recurring",      icon: Repeat },
+      { label: "Webhook health", href: "/admin/webhooks",               icon: Webhook },
+    ],
+  },
+  {
+    href: "/admin/pricing", label: "Pricing", icon: Tags, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Rates",      href: "/admin/pricing?tab=rates",      icon: DollarSign },
+      { label: "Categories", href: "/admin/pricing?tab=categories", icon: Shapes },
+      { label: "Models",     href: "/admin/pricing?tab=models",     icon: Bike },
+      { label: "Add-ons",    href: "/admin/pricing?tab=addons",     icon: PlusCircle },
+      { label: "Insurance",  href: "/admin/pricing?tab=insurance",  icon: Umbrella },
+      { label: "Discounts",  href: "/admin/pricing?tab=discounts",  icon: Percent },
+      { label: "Seasons",    href: "/admin/pricing?tab=seasons",    icon: CalendarRange },
+    ],
+  },
+  {
+    href: "/admin/reports", label: "Reports", icon: BarChart3, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Bookings",    href: "/admin/reports",                 icon: ArrowLeftRight },
+      { label: "Fleet",       href: "/admin/reports?tab=fleet",       icon: Bike },
+      { label: "Customers",   href: "/admin/reports?tab=customers",   icon: Users },
+      { label: "Financial",   href: "/admin/reports?tab=financial",   icon: Banknote },
+      { label: "Operational", href: "/admin/reports?tab=operational", icon: AlertTriangle },
+    ],
+  },
+  {
+    href: "/admin/integrations", label: "Integrations", icon: Plug, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Overview",      href: "/admin/integrations",                icon: LayoutGrid },
+      { label: "Payments & ID", href: "/admin/integrations?tab=payments",   icon: CreditCard },
+      { label: "Messaging",     href: "/admin/integrations?tab=messaging",  icon: MessagesSquare },
+      { label: "Accounting",    href: "/admin/integrations?tab=accounting", icon: Receipt },
+      { label: "Tolls",         href: "/admin/integrations?tab=tolls",      icon: Car },
+      { label: "Customer CX",   href: "/admin/integrations?tab=customer",   icon: Sparkles },
+      { label: "Operations",    href: "/admin/integrations?tab=operations", icon: Satellite },
+      { label: "API keys",      href: "/admin/integrations?tab=api-keys",   icon: KeyRound },
+    ],
+  },
+  {
+    href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin", allowedRoles: ADMIN_PLUS,
+    children: [
+      { label: "Overview",        href: "/admin/audit-log",                   icon: Gauge },
+      { label: "Security",        href: "/admin/audit-log?tab=security",      icon: ShieldAlert },
+      { label: "Authentication",  href: "/admin/audit-log?tab=authentication", icon: KeyRound },
+      { label: "Mutations",       href: "/admin/audit-log?tab=mutations",     icon: Pencil },
+      { label: "Webhooks & Jobs", href: "/admin/audit-log?tab=webhooks",      icon: Webhook },
+      { label: "Impersonation",   href: "/admin/audit-log?tab=impersonation", icon: UserCheck },
+      { label: "Activity",        href: "/admin/audit-log?tab=activity",      icon: Activity },
+      { label: "All events",      href: "/admin/audit-log?tab=all",           icon: ListOrdered },
+    ],
+  },
+  {
+    href: "/admin/platform", label: "Platform", icon: ServerCog, section: "admin", allowedRoles: SUPER_ADMIN_ONLY,
+    children: [
+      { label: "Database",      href: "/admin/platform",                   icon: Database },
+      { label: "Server",        href: "/admin/platform?tab=server",        icon: Server },
+      { label: "Storage",       href: "/admin/platform?tab=storage",       icon: HardDrive },
+      { label: "LLM",           href: "/admin/platform?tab=llm",           icon: Brain },
+      { label: "Email",         href: "/admin/platform?tab=email",         icon: Mail },
+      { label: "SMS",           href: "/admin/platform?tab=sms",           icon: MessageSquare },
+      { label: "Payments",      href: "/admin/platform?tab=payments",      icon: CreditCard },
+      { label: "Observability", href: "/admin/platform?tab=observability", icon: Activity },
+    ],
+  },
+  {
+    href: "/admin/settings", label: "System Settings", icon: Settings, section: "admin", allowedRoles: SUPER_ADMIN_ONLY,
+    children: [
+      { label: "Organisation",      href: "/admin/settings",                    icon: Building2 },
+      { label: "Booking",           href: "/admin/settings?tab=booking",        icon: CalendarCheck },
+      { label: "Checkout",          href: "/admin/settings?tab=checkout",       icon: ShoppingCart },
+      { label: "Cancellation",      href: "/admin/settings?tab=cancellation",   icon: CalendarX },
+      { label: "Payment & tax",     href: "/admin/settings?tab=payment",        icon: CreditCard },
+      { label: "Pricing",           href: "/admin/settings?tab=pricing",        icon: Tags },
+      { label: "Loyalty",           href: "/admin/settings?tab=loyalty",        icon: Award },
+      { label: "Notifications",     href: "/admin/settings?tab=notifications",  icon: Bell },
+      { label: "Authentication",    href: "/admin/settings?tab=authentication", icon: KeyRound },
+      { label: "Audit & retention", href: "/admin/settings?tab=audit",          icon: Archive },
+      { label: "Security",          href: "/admin/settings?tab=security",       icon: ShieldCheck },
+    ],
+  },
+  { href: "/admin/help",         label: "Help",            icon: HelpCircle,  section: "admin", allowedRoles: ADMIN_PLUS },
 ];
 
 export type CustomerNavItem = {

@@ -4,7 +4,9 @@ import type { Prisma } from "@prisma/client";
 import { createTRPCRouter, staffProcedure } from "../trpc";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import {
+  captureBookingId,
   captureCustomerId,
+  readCapturedBookingId,
   readCapturedCustomerId,
 } from "@/server/services/audit";
 
@@ -86,7 +88,7 @@ export const inspectionRouter = createTRPCRouter({
         status: z.enum(["DRAFT", "COMPLETED"]).default("COMPLETED"),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       if (input.bookingId) {
         const booking = await ctx.prisma.booking.findUnique({
@@ -162,13 +164,14 @@ export const inspectionRouter = createTRPCRouter({
           .optional(),
       }),
     )
-    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
         where: { id: input.id },
         include: { booking: { select: { customerId: true } } },
       });
       captureCustomerId(ctx, inspection.booking?.customerId);
+      captureBookingId(ctx, inspection.bookingId);
       if (inspection.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only DRAFT inspections can be edited" });
       }
@@ -187,8 +190,10 @@ export const inspectionRouter = createTRPCRouter({
   /** Mark a DRAFT inspection COMPLETED (used when agreement step does not auto-complete it). */
   complete: staffProcedure
     .input(z.object({ id: z.string() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const inspection = await ctx.prisma.inspection.findUniqueOrThrow({ where: { id: input.id } });
+      captureBookingId(ctx, inspection.bookingId);
       if (inspection.status === "COMPLETED") return inspection;
       if (inspection.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot complete from ${inspection.status}` });
@@ -263,7 +268,13 @@ export const inspectionRouter = createTRPCRouter({
 
   addPhoto: staffProcedure
     .input(z.object({ inspectionId: z.string(), url: z.string().url(), caption: z.string().optional(), damageZone: z.string().optional() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
+      const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
+        where: { id: input.inspectionId },
+        select: { bookingId: true },
+      });
+      captureBookingId(ctx, inspection.bookingId);
       return ctx.prisma.inspectionPhoto.create({
         data: {
           inspectionId: input.inspectionId,
@@ -276,7 +287,13 @@ export const inspectionRouter = createTRPCRouter({
 
   removePhoto: staffProcedure
     .input(z.object({ id: z.string() }))
-    .mutation(({ ctx, input }) =>
-      ctx.prisma.inspectionPhoto.delete({ where: { id: input.id } }),
-    ),
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
+    .mutation(async ({ ctx, input }) => {
+      const photo = await ctx.prisma.inspectionPhoto.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { inspection: { select: { bookingId: true } } },
+      });
+      captureBookingId(ctx, photo.inspection?.bookingId);
+      return ctx.prisma.inspectionPhoto.delete({ where: { id: input.id } });
+    }),
 });

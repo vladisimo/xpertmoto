@@ -6,7 +6,13 @@ import { createTRPCRouter, managerProcedure, protectedProcedure, staffProcedure 
 import { uploadFile } from "@/lib/storage";
 import { renderReturnAssessmentPdf, type ReturnAssessmentData } from "@/lib/agreement/pdf/return-assessment-pdf";
 import { requestTimestamp, sha256Buffer } from "@/lib/agreement/timestamp";
-import { writeAudit, writeCustomerAuditAsync } from "@/server/services/audit";
+import {
+  captureBookingId,
+  readCapturedBookingId,
+  writeAudit,
+  writeBookingAuditAsync,
+  writeCustomerAuditAsync,
+} from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { logger } from "@/lib/logger";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
@@ -52,6 +58,7 @@ export const returnRouter = createTRPCRouter({
   /** Start or resume a DRAFT return assessment for a booking. */
   startDraft: staffProcedure
     .input(z.object({ bookingId: z.string(), inspectionId: z.string() }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
       const booking = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
@@ -110,11 +117,13 @@ export const returnRouter = createTRPCRouter({
         staffNote: z.string().optional(),
       }),
     )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const assessment = await ctx.prisma.returnAssessment.findUniqueOrThrow({
         where: { id: input.assessmentId },
         include: { booking: true, inspection: true },
       });
+      captureBookingId(ctx, assessment.bookingId);
       if (assessment.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Assessment is sealed" });
       }
@@ -196,11 +205,13 @@ export const returnRouter = createTRPCRouter({
   /** Remove a provisional DamageCharge line. */
   removeDamageCharge: staffProcedure
     .input(z.object({ chargeId: z.string() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const charge = await ctx.prisma.damageCharge.findUniqueOrThrow({
         where: { id: input.chargeId },
         include: { returnAssessment: true },
       });
+      captureBookingId(ctx, charge.returnAssessment.bookingId);
       if (charge.returnAssessment.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Assessment sealed" });
       }
@@ -281,10 +292,12 @@ export const returnRouter = createTRPCRouter({
           message: "reuseUrl is only supported for initials",
         }),
     )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const assessment = await ctx.prisma.returnAssessment.findUniqueOrThrow({
         where: { id: input.assessmentId },
       });
+      captureBookingId(ctx, assessment.bookingId);
       if (assessment.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Assessment sealed" });
       }
@@ -661,6 +674,18 @@ export const returnRouter = createTRPCRouter({
             },
           });
         }
+        // Ancillary charges raised above (damage + late + fuel + cleaning,
+        // summing to totalDueNow) are owed until the capture-pending job /
+        // webhook collects them. Add them to balanceDue here so
+        // applyCaptureToBalanceDue can net them out on capture — keeping the
+        // "raised → added, collected → removed" invariant (see balance-due.ts)
+        // and mirroring bookingSettlement.addCharge.
+        if (totalDueNow > 0) {
+          await tx.booking.update({
+            where: { id: assessment.bookingId },
+            data: { balanceDue: { increment: totalDueNow } },
+          });
+        }
         await autoCloseByTarget(tx, "ReturnAssessment", assessment.id, {
           types: ["RETURN_ASSESSMENT_FINALISE"],
           reason: "completed",
@@ -685,7 +710,7 @@ export const returnRouter = createTRPCRouter({
           timestampStatus,
         },
       });
-      writeCustomerAuditAsync(ctx.prisma, assessment.booking?.customerId, {
+      const signedAudit = {
         userId: ctx.user.id,
         action: "RETURN_ASSESSMENT_SIGNED",
         reqId: ctx.reqId,
@@ -696,7 +721,9 @@ export const returnRouter = createTRPCRouter({
           pendingQuoteCap: pendingCapTotal,
           timestampStatus,
         },
-      });
+      };
+      writeCustomerAuditAsync(ctx.prisma, assessment.booking?.customerId, signedAudit);
+      writeBookingAuditAsync(ctx.prisma, assessment.bookingId, signedAudit);
 
       return { pdfUrl: pdfUpload.url, assessmentId: assessment.id, totalDueNow, pendingQuoteCap: pendingCapTotal };
     }),
@@ -799,6 +826,12 @@ export const returnRouter = createTRPCRouter({
           previousData: { status: charge.status },
           newData: { status: "CONFIRMED", amount: 0 },
         });
+        writeBookingAuditAsync(ctx.prisma, charge.returnAssessment.bookingId, {
+          userId: ctx.user.id,
+          action: "DAMAGE_CHARGE_CONFIRMED_ZERO",
+          reqId: ctx.reqId,
+          newData: { damageChargeId: charge.id, amount: 0 },
+        });
         return { damageCharge: updated, paymentId: null };
       }
 
@@ -835,6 +868,16 @@ export const returnRouter = createTRPCRouter({
               processedById: ctx.user.id,
             },
           }));
+        // Newly-raised PENDING charge → add to balanceDue so the eventual
+        // capture nets it out (see balance-due.ts). Skipped when re-confirming
+        // an already-raised charge (idempotent path above), which would
+        // otherwise double-count.
+        if (!existing && bookingId) {
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { balanceDue: { increment: amountNumber } },
+          });
+        }
         const damageCharge = await tx.damageCharge.update({
           where: { id: charge.id },
           data: {
@@ -860,7 +903,7 @@ export const returnRouter = createTRPCRouter({
           amount: amountNumber,
         },
       });
-      writeCustomerAuditAsync(ctx.prisma, customerId, {
+      const confirmedAudit = {
         userId: ctx.user.id,
         action: "DAMAGE_CHARGE_CONFIRMED",
         reqId: ctx.reqId,
@@ -872,7 +915,9 @@ export const returnRouter = createTRPCRouter({
           paymentReference: payment.reference,
           amount: amountNumber,
         },
-      });
+      };
+      writeCustomerAuditAsync(ctx.prisma, customerId, confirmedAudit);
+      writeBookingAuditAsync(ctx.prisma, bookingId, confirmedAudit);
       return { damageCharge, paymentId: payment.id };
     }),
 
@@ -896,6 +941,12 @@ export const returnRouter = createTRPCRouter({
         entity: "ReturnAssessment",
         entityId: a.id,
         newData: { reason: input.reason },
+      });
+      writeBookingAuditAsync(ctx.prisma, a.bookingId, {
+        userId: ctx.user.id,
+        action: "RETURN_ASSESSMENT_VOIDED",
+        reqId: ctx.reqId,
+        newData: { assessmentId: a.id, reason: input.reason },
       });
       return { ok: true as const };
     }),

@@ -18,6 +18,7 @@ const bondUpdate = vi.fn().mockResolvedValue({});
 const paymentCreate = vi.fn().mockResolvedValue({});
 const vehicleUpdate = vi.fn().mockResolvedValue({});
 const auditCreate = vi.fn().mockResolvedValue({});
+const billingPlanUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
 const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], notificationIds: [] });
 const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
   cb({
@@ -25,6 +26,7 @@ const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
     bondLedger: { update: bondUpdate },
     payment: { create: paymentCreate },
     vehicle: { update: vehicleUpdate },
+    bookingBillingPlan: { updateMany: billingPlanUpdateMany },
   }),
 );
 
@@ -35,6 +37,7 @@ vi.mock("@/lib/prisma", () => ({
     payment: { create: paymentCreate },
     vehicle: { update: vehicleUpdate },
     auditLog: { create: auditCreate },
+    bookingBillingPlan: { updateMany: billingPlanUpdateMany },
     $transaction: txFn,
   },
 }));
@@ -56,6 +59,7 @@ beforeEach(() => {
   paymentCreate.mockClear();
   vehicleUpdate.mockClear();
   auditCreate.mockClear();
+  billingPlanUpdateMany.mockClear();
   sendNotification.mockClear();
   getSettings.mockReset();
   getSettings.mockResolvedValue({
@@ -75,6 +79,7 @@ describe("no-show-detector", () => {
         vehicleId: "veh_1",
         pickupDateTime: pickup,
         bondAmount: "200.00",
+        pickupDepot: { slug: "gold-coast" },
         bondLedger: {
           id: "bond_1",
           status: "HELD",
@@ -124,6 +129,7 @@ describe("no-show-detector", () => {
         vehicleId: null,
         pickupDateTime: new Date(Date.now() - 4 * 3600 * 1000),
         bondAmount: "0",
+        pickupDepot: { slug: "gold-coast" },
         bondLedger: null,
       },
     ]);
@@ -140,6 +146,35 @@ describe("no-show-detector", () => {
         }),
       }),
     );
+    // The no-show fee is owed until collected, so it's added to balanceDue
+    // (the capture-pending job nets it out on capture).
+    expect(bookingUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "book_no_bond" },
+        data: { balanceDue: { increment: 50 } },
+      }),
+    );
+  });
+
+  it("cancels any long-term billing plan in the same transaction (F4)", async () => {
+    bookingFindMany.mockResolvedValue([
+      {
+        id: "book_lt",
+        bookingReference: "SCT-0003",
+        customerId: "cust_3",
+        vehicleId: null,
+        pickupDateTime: new Date(Date.now() - 5 * 3600 * 1000),
+        bondAmount: "0",
+        pickupDepot: { slug: "gold-coast" },
+        bondLedger: null,
+      },
+    ]);
+    const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
+    await runNoShowDetector();
+    expect(billingPlanUpdateMany).toHaveBeenCalledWith({
+      where: { bookingId: "book_lt", status: { notIn: ["CANCELLED", "COMPLETED"] } },
+      data: { status: "CANCELLED", cancelReason: "Booking marked as no-show" },
+    });
   });
 
   it("respects the grace hours from SystemSetting", async () => {

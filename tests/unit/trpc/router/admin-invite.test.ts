@@ -104,11 +104,20 @@ describe("admin.inviteStaff", () => {
 
     expect(prisma.user.create).toHaveBeenCalledTimes(1);
     const createArg = prisma.user.create.mock.calls[0]?.[0] as {
-      data: { passwordHash: null; status: string; email: string };
+      data: {
+        passwordHash: null;
+        status: string;
+        email: string;
+        staffProfile: unknown;
+        customerProfile: { create: Record<string, unknown> };
+      };
     };
     expect(createArg.data.passwordHash).toBeNull();
     expect(createArg.data.status).toBe("SUSPENDED");
     expect(createArg.data.email).toBe("new@xpert.test"); // lowercased by zod preprocess
+    // Back-office users also get a bare CustomerProfile so they can rent.
+    expect(createArg.data.staffProfile).toBeDefined();
+    expect(createArg.data.customerProfile).toEqual({ create: {} });
     expect(issueStaffInviteSpy).toHaveBeenCalledTimes(1);
     expect(issueStaffInviteSpy.mock.calls[0]?.[1]).toMatchObject({
       email: "new@xpert.test",

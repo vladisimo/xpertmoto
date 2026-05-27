@@ -4,7 +4,11 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { trpc } from "@/lib/trpc/client";
 import { cn } from "@/lib/utils";
-import { useBookingWizard } from "@/stores/booking-wizard";
+import {
+  STALE_RESET_FLAG,
+  useBookingWizard,
+  type StaleResetReason,
+} from "@/stores/booking-wizard";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -31,6 +35,24 @@ import { useWizardShellLayout } from "@/components/booking/wizard-shell-layout-c
 export function StepSearch() {
   const w = useBookingWizard();
   const layout = useWizardShellLayout();
+
+  // If the wizard was reset on resume (pickup time too late, or the chosen
+  // vehicle/category sold out), `resetStaleBookingWizard` left a reason in
+  // sessionStorage. Read + clear it once so we can explain the fresh start.
+  const [staleNotice, setStaleNotice] = useState<StaleResetReason | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const reason = sessionStorage.getItem(STALE_RESET_FLAG);
+      if (reason === "PICKUP_PASSED" || reason === "UNAVAILABLE") {
+        setStaleNotice(reason);
+        sessionStorage.removeItem(STALE_RESET_FLAG);
+      }
+    } catch {
+      // sessionStorage unavailable (Safari private mode) — no banner, harmless.
+    }
+  }, []);
+
   const { data: depots } = trpc.depot.list.useQuery();
   const { data: categories } = trpc.vehicle.listCategories.useQuery();
 
@@ -149,6 +171,13 @@ export function StepSearch() {
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+        {staleNotice && (
+          <div className="rounded-md border border-secondary bg-secondary/10 px-3 py-2 text-sm text-foreground">
+            {staleNotice === "PICKUP_PASSED"
+              ? "Your earlier pickup time has passed, so we've started a fresh search. Pick new dates below."
+              : "The vehicles you were looking at are no longer available for those dates. Please search again."}
+          </div>
+        )}
         {/* Render the heading only on desktop. The previous `hidden md:block`
          * still counted as a preceding sibling of the grid, so Tailwind's
          * `space-y-*` rule pushed the grid down by 24px on mobile. Removing
@@ -311,7 +340,7 @@ export function StepSearch() {
         )}
         {layout === "desktop" && (
           <div className="flex justify-end">
-            <Button type="submit">Continue</Button>
+            <Button type="submit" variant="cta">Continue</Button>
           </div>
         )}
       </form>

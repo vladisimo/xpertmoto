@@ -4,6 +4,7 @@
 
 import { PrismaClient, UserRole, UserStatus } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { buildOnboardingVersion } from "../src/lib/onboarding-status";
 
 const prisma = new PrismaClient();
 
@@ -21,6 +22,27 @@ async function main() {
       role: UserRole.SUPER_ADMIN,
       status: UserStatus.ACTIVE,
       passwordHash,
+      dateOfBirth: new Date(1985, 0, 15),
+      // Back-office users carry a CustomerProfile so they can rent. Seed it
+      // fully onboarded + licence-verified so the dev login can immediately
+      // exercise the customer portal.
+      customerProfile: {
+        create: {
+          onboardedAt: new Date(),
+          onboardingVersion: buildOnboardingVersion(),
+          termsAcceptedAt: new Date(),
+          privacyAcceptedAt: new Date(),
+          licenceNumber: "90000000",
+          licenceState: "QLD",
+          licenceClass: "C",
+          licenceExpiry: new Date(2030, 5, 1),
+          licenceVerifiedAt: new Date(),
+          addressLine1: "1 Admin St",
+          suburb: "Surfers Paradise",
+          state: "QLD",
+          postcode: "4217",
+        },
+      },
     },
   });
 

@@ -21,6 +21,7 @@ import {
   setPasswordInputSchema,
 } from "@/lib/validators/auth";
 import { TERMS_VERSION, PRIVACY_VERSION } from "@/lib/consent-versions";
+import { trackServer, trackServerIdentify } from "@/lib/analytics";
 import { sendEmail } from "@/lib/email";
 import PasswordResetEmail from "../../../../emails/password-reset";
 import {
@@ -82,6 +83,29 @@ export const authRouter = createTRPCRouter({
         },
       });
       captureCustomerId(ctx, user.id);
+
+      // Create the PostHog person profile up front and record the signup
+      // event. Identify carries contact identifiers (email/name) plus
+      // immutable first-touch props; both are server-side so they flow
+      // through the pino redaction contract. Best-effort, never blocks.
+      const fullName = `${input.firstName} ${input.lastName}`.trim();
+      await trackServerIdentify({
+        distinctId: user.id,
+        set: { email: user.email, name: fullName, role: "CUSTOMER" },
+        setOnce: {
+          firstSeenAt: consentTimestamp.toISOString(),
+          signupChannel: "REGISTRATION",
+        },
+      });
+      await trackServer({
+        event: "customer.registered",
+        distinctId: user.id,
+        properties: {
+          marketingOptIn: input.marketingOptIn,
+          marketingSmsOptIn: input.marketingSmsOptIn,
+        },
+      });
+
       return { id: user.id, email: user.email };
     }),
 

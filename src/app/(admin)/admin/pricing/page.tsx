@@ -1,5 +1,6 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import type { inferRouterOutputs } from "@trpc/server";
 import { trpc } from "@/lib/trpc/client";
 import type { AppRouter } from "@/server/trpc/router";
@@ -13,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { DataTablePagination } from "@/components/ui/data-table-pagination";
 import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Dialog,
@@ -23,11 +25,31 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
-import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
 import { TieredPricingPanel } from "@/components/admin/pricing/tiered-pricing-panel";
 import { TierEditor } from "@/components/admin/pricing/tier-editor";
+import { CategoriesManager } from "@/components/admin/categories-manager";
+import {
+  Bike,
+  CalendarRange,
+  DollarSign,
+  Percent,
+  PlusCircle,
+  Shapes,
+  Umbrella,
+  type LucideIcon,
+} from "lucide-react";
 
-type Tab = "rates" | "models" | "addons" | "insurance" | "discounts" | "seasons";
+type Tab = "rates" | "categories" | "models" | "addons" | "insurance" | "discounts" | "seasons";
+
+const TABS: { value: Tab; label: string; icon: LucideIcon }[] = [
+  { value: "rates", label: "Rates", icon: DollarSign },
+  { value: "categories", label: "Categories", icon: Shapes },
+  { value: "models", label: "Models", icon: Bike },
+  { value: "addons", label: "Add-ons", icon: PlusCircle },
+  { value: "insurance", label: "Insurance", icon: Umbrella },
+  { value: "discounts", label: "Discounts", icon: Percent },
+  { value: "seasons", label: "Seasons", icon: CalendarRange },
+];
 type RatesView = "base" | "tiered";
 
 type PricingSummary = inferRouterOutputs<AppRouter>["admin"]["pricingSummary"];
@@ -54,7 +76,11 @@ export default function PricingPage() {
   const upsertDiscount = trpc.admin.upsertDiscount.useMutation({ onSuccess: invalidate });
   const upsertSeason = trpc.admin.upsertSeason.useMutation({ onSuccess: invalidate });
 
-  const [tab, setTab] = useState<Tab>("rates");
+  const searchParams = useSearchParams();
+  const urlTab = searchParams.get("tab") as Tab | null;
+  const [tab, setTab] = useState<Tab>(
+    urlTab && TABS.some((t) => t.value === urlTab) ? urlTab : "rates",
+  );
   const [ratesView, setRatesView] = useState<RatesView>("base");
   const [newDiscount, setNewDiscount] = useState({ code: "", type: "PERCENTAGE" as "PERCENTAGE" | "FIXED", value: 10, isActive: true });
   const [newSeason, setNewSeason] = useState({ name: "", startDate: "", endDate: "", multiplier: 1.2, isActive: true });
@@ -73,6 +99,8 @@ export default function PricingPage() {
     id: string;
     label: string;
   } | null>(null);
+  const [modelPage, setModelPage] = useState(1);
+  const [modelPageSize, setModelPageSize] = useState(25);
 
   const filteredModels = (modelData?.models ?? []).filter((m) => {
     if (modelCategory !== "__all" && m.category?.id !== modelCategory) return false;
@@ -90,6 +118,19 @@ export default function PricingPage() {
     }
     return true;
   });
+
+  // Reset to the first page whenever the filtered set or page size changes,
+  // so the visible slice never points past the end of the list.
+  useEffect(() => {
+    setModelPage(1);
+  }, [modelSearch, modelCategory, modelFleetFilter, modelPageSize]);
+
+  const modelPageCount = Math.max(1, Math.ceil(filteredModels.length / modelPageSize));
+  const modelSafePage = Math.min(modelPage, modelPageCount);
+  const pagedModels = filteredModels.slice(
+    (modelSafePage - 1) * modelPageSize,
+    modelSafePage * modelPageSize,
+  );
 
   const modelColumns: DataTableColumn<ModelRow>[] = [
     {
@@ -447,29 +488,31 @@ export default function PricingPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full={tab === "models"}>
       <PageHeader
-        eyebrow="Administration · Finance"
+        eyebrow="Administration"
         title="Pricing"
         description="Base rates, add-ons, insurance tiers, discounts, and seasonal multipliers."
       />
 
-      <FinanceTabsBar />
-
       <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0">
-        {(["rates", "models", "addons", "insurance", "discounts", "seasons"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`shrink-0 border-b-2 px-4 py-2 text-sm font-medium ${
-              tab === t
-                ? "border-primary text-primary"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t[0]!.toUpperCase() + t.slice(1)}
-          </button>
-        ))}
+        {TABS.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.value}
+              onClick={() => setTab(t.value)}
+              className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium ${
+                tab === t.value
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5" aria-hidden />
+              {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {tab === "rates" && (
@@ -513,16 +556,18 @@ export default function PricingPage() {
         </div>
       )}
 
+      {tab === "categories" && <CategoriesManager />}
+
       {tab === "models" && (
-        <div className="space-y-4">
-          <p className="text-sm text-muted-foreground">
+        <div className="flex min-h-0 flex-1 flex-col gap-4">
+          <p className="shrink-0 text-sm text-muted-foreground">
             Per-model (make + model) base rate and base period. When set, these
             override the category default for every vehicle of that model. Leave
             base rate empty to fall back to the category daily rate. Set period
             to 48 h for premium bikes that rent in 2-day minimums.
           </p>
 
-          <div className="grid gap-3 md:grid-cols-[1fr_12rem_12rem]">
+          <div className="grid shrink-0 gap-3 md:grid-cols-[1fr_12rem_12rem]">
             <Input
               placeholder="Search make or model…"
               value={modelSearch}
@@ -559,31 +604,48 @@ export default function PricingPage() {
             </Select>
           </div>
 
-          <div className="text-xs text-muted-foreground">
+          <div className="shrink-0 text-xs text-muted-foreground">
             Showing {filteredModels.length} of {modelData?.models.length ?? 0} models
           </div>
 
-          <DataTable
-            columns={modelColumns}
-            data={filteredModels}
-            getRowId={(m) => m.id}
-            rowActions={(m) => (
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() =>
-                  setEditingModel({
-                    id: m.id,
-                    label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
-                  })
-                }
-              >
-                {(tierCountByModel[m.id] ?? 0) > 0 ? "Edit tiers" : "Add tiers"}
-              </Button>
-            )}
-            empty="No models match the current filters."
-            mobileMode="cards"
-          />
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card shadow-sm">
+            <div className="flex-1 overflow-auto">
+              <DataTable
+                columns={modelColumns}
+                data={pagedModels}
+                getRowId={(m) => m.id}
+                rowActions={(m) => (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      setEditingModel({
+                        id: m.id,
+                        label: `${m.make} ${m.model}${m.year ? ` ${m.year}` : ""}`,
+                      })
+                    }
+                  >
+                    {(tierCountByModel[m.id] ?? 0) > 0 ? "Edit tiers" : "Add tiers"}
+                  </Button>
+                )}
+                empty="No models match the current filters."
+                className="rounded-none border-0 shadow-none"
+                stickyHeader
+                mobileMode="cards"
+              />
+            </div>
+            <div className="shrink-0 border-t bg-muted/30 px-4 py-2">
+              <DataTablePagination
+                page={modelSafePage}
+                pageSize={modelPageSize}
+                totalCount={filteredModels.length}
+                pageCount={modelPageCount}
+                onPageChange={setModelPage}
+                onPageSizeChange={setModelPageSize}
+                emptyLabel="No models"
+              />
+            </div>
+          </div>
 
           <Dialog
             open={editingModel !== null}

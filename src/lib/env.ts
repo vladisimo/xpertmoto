@@ -62,6 +62,11 @@ const envSchema = z
     TWILIO_ACCOUNT_SID: z.string().optional(),
     TWILIO_AUTH_TOKEN: z.string().optional(),
     TWILIO_FROM_NUMBER: z.string().optional(),
+    // Dev-only safety valve: when set, every outbound SMS is redirected to
+    // this single number instead of the real recipient (the intended
+    // recipient is prepended to the body). Ignored in production so it can
+    // never silently swallow real customer SMS. See sendSms() in sms.ts.
+    SMS_DEV_REDIRECT_TO: z.string().optional(),
 
     // Storage.
     S3_ENDPOINT: z.string().optional(),
@@ -79,6 +84,13 @@ const envSchema = z
     // Sentry — all optional, enables reporting when set.
     SENTRY_DSN: z.string().optional(),
     NEXT_PUBLIC_SENTRY_DSN: z.string().optional(),
+    // Nightly platform-sentry-stats job. SENTRY_AUTH_TOKEN is reused from CI
+    // (org:read scope); SENTRY_ORG_SLUG is the org slug, distinct from
+    // SENTRY_ORG. The job no-ops unless both are set.
+    SENTRY_AUTH_TOKEN: z.string().optional(),
+    SENTRY_ORG_SLUG: z.string().optional(),
+    SENTRY_API_BASE_URL: z.string().url().optional(),
+    PLATFORM_SENTRY_STATS_CRON: z.string().optional(),
 
     // Observability / misc.
     LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).optional(),

@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import type { Prisma as P } from "@prisma/client";
 import { invalidateTag } from "@/lib/cache";
 import { CACHE_TAGS } from "@/lib/cache-tags";
+import { recomputeCustomerRewards } from "./customer-rewards";
 
 type Tx = P.TransactionClient;
 
@@ -91,15 +92,12 @@ export async function recordBookingCompletion(
     netRevenue: booking.totalAmount,
   });
 
-  await tx.customerProfile.updateMany({
-    where: { userId: booking.customerId },
-    data: {
-      totalBookings: { increment: 1 },
-      completedBookings: { increment: 1 },
-      totalSpend: { increment: booking.totalAmount },
-      lastBookingAt: when,
-    },
-  });
+  // Rewards counters (spend / bookings / points / tier) are recomputed from
+  // source ledgers — net money collected, not contracted totalAmount — so a
+  // no-show's retained fees and in-flight bookings are reflected too. The
+  // nightly rewards-recompute job is the backstop; this keeps it live at
+  // completion. See customer-rewards.ts.
+  await recomputeCustomerRewards(tx, booking.customerId);
 }
 
 type AdditionalChargesInput = {

@@ -16,7 +16,6 @@ export interface BrandLogoProps {
 }
 
 const DEFAULT_WIDE = "/brand/xpert-logo-white.png";
-const DEFAULT_SQUARE = "/brand/xpert-logo-white-square.png";
 const DEFAULT_WIDE_DARK = "/brand/xpert-logo-black.avif";
 
 export function BrandLogo({ variant = "default", linked = true, className, height = 32 }: BrandLogoProps) {

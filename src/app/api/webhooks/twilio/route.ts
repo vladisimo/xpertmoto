@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { withAudit } from "@/lib/with-audit";
 import { updateTwilioStatus } from "@/server/services/twilio-cost";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 const TERMINAL_DELIVERED = new Set(["delivered"]);
 const TERMINAL_FAILED = new Set(["failed", "undelivered"]);
@@ -81,6 +83,22 @@ async function handlePost(req: Request) {
       { sid, status, errorCode, matched: updated.count },
       "twilio status callback processed",
     );
+    // Gated: only the deliverability-critical FAILED signal goes to PostHog —
+    // never `delivered` (hundreds/day). distinctId is the notification's
+    // recipient, resolved via the twilioSid linkage.
+    if (next === "FAILED") {
+      const notif = await prisma.notification.findFirst({
+        where: { channel: "SMS", data: { path: ["twilioSid"], equals: sid } },
+        select: { userId: true },
+      });
+      if (notif?.userId) {
+        await trackServer({
+          event: SERVER_EVENTS.commsSmsFailed,
+          distinctId: notif.userId,
+          properties: { status, errorCode: errorCode ?? null },
+        });
+      }
+    }
   }
 
   return NextResponse.json({ ok: true });

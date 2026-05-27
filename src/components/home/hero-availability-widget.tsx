@@ -242,7 +242,7 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
     { enabled: !!pickup && !!ret },
   );
 
-  const vehicles = query.data ?? [];
+  const vehicles = useMemo(() => query.data ?? [], [query.data]);
 
   // Derive dropdown options from the full available-bike list.
   const availableCategoryIds = useMemo(
@@ -425,6 +425,7 @@ export function HeroAvailabilityWidget({ onDismiss }: HeroAvailabilityWidgetProp
                     : "Pick your pickup and return dates."}
               </p>
               <Button
+                variant="cta"
                 size="sm"
                 disabled={!range?.from}
                 onClick={() => {

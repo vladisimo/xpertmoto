@@ -110,7 +110,7 @@ export default async function ConfirmationPage({
               <img
                 src={heroUrl}
                 alt={vehicleTitle}
-                className="absolute inset-0 h-full w-full object-cover"
+                className="absolute inset-0 h-full w-full object-contain"
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center text-xs uppercase tracking-wide text-muted-foreground">
@@ -169,9 +169,15 @@ export default async function ConfirmationPage({
               <span>{booking.durationDays} days</span>
             </div>
             <div className="flex justify-between border-t pt-3 font-semibold">
-              <span>Total paid</span>
-              <span className="text-primary">{formatCurrency(Number(booking.totalAmount))}</span>
+              <span>Paid today</span>
+              <span className="text-primary">{formatCurrency(Number(booking.amountPaid))}</span>
             </div>
+            {Number(booking.balanceDue) > 0 && (
+              <div className="flex justify-between text-sm text-muted-foreground">
+                <span>Due at pickup</span>
+                <span>{formatCurrency(Number(booking.balanceDue))}</span>
+              </div>
+            )}
             <div className="flex justify-between text-xs text-muted-foreground">
               <span>Bond held</span>
               <span>{formatCurrency(Number(booking.bondAmount))}</span>

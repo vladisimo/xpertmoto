@@ -188,7 +188,7 @@ function InnerForm({
   // Imperative submit() invoked by the wizard's mobile bottom-bar CTA.
   // Stable handle — `submitRef.current` always points at the latest
   // runSubmit closure thanks to the effect above.
-  useImperativeHandle(apiRef, () => ({ submit: () => submitRef.current() }), [apiRef]);
+  useImperativeHandle(apiRef, () => ({ submit: () => submitRef.current() }), []);
 
   // Surface the processing flag so the parent's external CTA can show
   // its own pending spinner.
@@ -276,7 +276,7 @@ function InnerForm({
           >
             Back
           </Button>
-          <Button type="submit" disabled={!stripe || !elements || processing}>
+          <Button type="submit" variant="cta" disabled={!stripe || !elements || processing}>
             {processing ? "Processing…" : "Pay & confirm"}
           </Button>
         </div>

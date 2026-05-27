@@ -1,10 +1,8 @@
 import { Document, Image, StyleSheet, Text, View, renderToBuffer } from "@react-pdf/renderer";
 
 import { getBranding } from "@/lib/branding";
-import { getInvoicingConfig } from "@/lib/invoicing-config";
 import { LineItemsTable, type PdfLineItem } from "@/lib/pdf/components/line-items-table";
 import { NoticeCallout } from "@/lib/pdf/components/callouts";
-import { PdfFooter } from "@/lib/pdf/components/footer";
 import { PdfHeader } from "@/lib/pdf/components/header";
 import {
   Col,
@@ -81,9 +79,16 @@ interface DamageMarker {
 
 export async function renderRentalAgreementPdf(data: RentalAgreementData): Promise<Buffer> {
   const branding = await getBranding();
-  const config = await getInvoicingConfig();
   const theme = makePdfTheme(branding);
   const logoUrl = resolvePdfLogoSrc(branding);
+
+  const signedAtIso = data.signedAt.toISOString();
+  const signedAtLocal = data.signedAt.toLocaleString("en-AU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Australia/Brisbane",
+  });
+  const customerFullName = `${data.customer.firstName} ${data.customer.lastName}`;
 
   const renderHeader = () => (
     <PdfHeader
@@ -100,22 +105,22 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
     />
   );
 
+  // Per-page fixed footer carries the customer signature stamp + name + date,
+  // mirroring the Terms & Conditions consent document so every page stands
+  // alone as evidence of signing.
   const renderFooter = () => (
-    <PdfFooter
+    <SignedFixedFooter
       theme={theme}
       legalName={branding.legalName}
       abn={branding.abn}
-      supportEmail={branding.supportEmail}
-      supportPhone={branding.supportPhone}
-      postalAddress={branding.postalAddress}
-      invoiceFooter={config.invoiceFooter}
+      title="Rental Agreement"
+      version={`v${data.version}`}
+      customerFullName={customerFullName}
+      signatureUrl={data.signatures.customerFullUrl}
+      signedAtLocal={signedAtLocal}
+      signedAtIso={signedAtIso}
     />
   );
-
-  const renderInitials = () =>
-    data.signatures.initialsUrl ? (
-      <InitialsStamp theme={theme} url={data.signatures.initialsUrl} />
-    ) : null;
 
   const lineItems = buildLineItems(data);
   const subtotalExGst = data.booking.totalAmount - data.booking.gstAmount;
@@ -184,7 +189,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
             {"\n"}Terms version: {data.terms.version} · Agreement version: {data.version}
           </NoticeCallout>
         </PdfSection>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -207,7 +211,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
           cleaning, infringements, or insurance excess. Any unused portion is released within 14
           days of return.
         </NoticeCallout>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -251,7 +254,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
               : `${data.damageMarkers.length} existing marking(s) recorded at handover.`}
           </Text>
         </PdfSection>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -287,7 +289,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
             </View>
           ))}
         </PdfSection>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -342,7 +343,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
             </Text>
           ))}
         </PdfSection>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -371,7 +371,6 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
             </Text>
           ))}
         </PdfSection>
-        {renderInitials()}
         {renderFooter()}
       </PageShell>
 
@@ -386,8 +385,7 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
               marginBottom: theme.spacing.lg,
             }}
           >
-            Signed on {formatDateTime(data.signedAt)}. This agreement is subject to the terms set
-            out above.
+            This agreement is subject to the terms set out above.
           </Text>
           <TwoColRow theme={theme}>
             <Col>
@@ -395,7 +393,9 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
                 theme={theme}
                 label="Hirer signature"
                 signatureUrl={data.signatures.customerFullUrl}
-                caption={`${data.customer.firstName} ${data.customer.lastName}`}
+                name={customerFullName}
+                signedAtLocal={signedAtLocal}
+                signedAtIso={signedAtIso}
               />
             </Col>
             <Col>
@@ -403,7 +403,9 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
                 theme={theme}
                 label="Staff witness signature"
                 signatureUrl={data.signatures.staffFullUrl}
-                caption={data.staffName ?? null}
+                name={data.staffName ?? null}
+                signedAtLocal={signedAtLocal}
+                signedAtIso={signedAtIso}
               />
             </Col>
           </TwoColRow>
@@ -499,16 +501,22 @@ function PhotoGrid({
   );
 }
 
+// Final signature block — mirrors the Terms & Conditions consent document:
+// label → bold signer name → signature image → "Accepted at {local} AEST ({iso})".
 function SignatureBox({
   theme,
   label,
   signatureUrl,
-  caption,
+  name,
+  signedAtLocal,
+  signedAtIso,
 }: {
   theme: PdfTheme;
   label: string;
   signatureUrl: string | null | undefined;
-  caption: string | null;
+  name: string | null;
+  signedAtLocal: string;
+  signedAtIso: string;
 }) {
   const styles = StyleSheet.create({
     wrap: {
@@ -525,6 +533,12 @@ function SignatureBox({
       letterSpacing: 0.5,
       marginBottom: theme.spacing.xs,
     },
+    name: {
+      fontSize: theme.size.bodyLg,
+      fontFamily: theme.font.bodyBold,
+      color: theme.colors.ink,
+      marginBottom: theme.spacing.xs,
+    },
     image: {
       width: "100%",
       height: 60,
@@ -533,42 +547,106 @@ function SignatureBox({
       fontSize: theme.size.caption,
       color: theme.colors.faint,
     },
-    caption: {
+    accepted: {
       marginTop: theme.spacing.sm,
       fontSize: theme.size.caption,
+      color: theme.colors.muted,
     },
   });
   return (
     <View style={styles.wrap}>
       <Text style={styles.label}>{label}</Text>
+      {name ? <Text style={styles.name}>{name}</Text> : null}
       {signatureUrl ? (
         <Image src={signatureUrl} style={styles.image} />
       ) : (
         <Text style={styles.placeholder}>(unsigned)</Text>
       )}
-      {caption ? <Text style={styles.caption}>{caption}</Text> : null}
+      {signatureUrl ? (
+        <Text style={styles.accepted}>
+          Accepted at {signedAtLocal} AEST ({signedAtIso})
+        </Text>
+      ) : null}
     </View>
   );
 }
 
-function InitialsStamp({ theme, url }: { theme: PdfTheme; url: string }) {
+// Per-page fixed footer modelled on the consent document's footer: supplier
+// identity + page counter on the left, customer signature stamp + name + date
+// on the right, so each rendered page stands alone as evidence of signing.
+function SignedFixedFooter({
+  theme,
+  legalName,
+  abn,
+  title,
+  version,
+  customerFullName,
+  signatureUrl,
+  signedAtLocal,
+  signedAtIso,
+}: {
+  theme: PdfTheme;
+  legalName: string;
+  abn: string;
+  title: string;
+  version: string;
+  customerFullName: string;
+  signatureUrl: string | null | undefined;
+  signedAtLocal: string;
+  signedAtIso: string;
+}) {
   const styles = StyleSheet.create({
-    box: {
-      borderWidth: 1,
-      borderColor: theme.colors.divider,
-      padding: theme.spacing.xs,
+    wrap: {
       position: "absolute",
-      bottom: theme.spacing.page + theme.spacing.lg,
+      bottom: theme.spacing.xxl,
+      left: theme.spacing.page,
       right: theme.spacing.page,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "flex-end",
+      borderTopWidth: 1,
+      borderTopColor: theme.colors.divider,
+      paddingTop: theme.spacing.md,
     },
-    image: {
-      width: 48,
-      height: 22,
+    leftCol: {
+      flex: 1,
+      gap: theme.spacing.xs,
+    },
+    rightCol: {
+      alignItems: "flex-end",
+      gap: theme.spacing.xs,
+    },
+    line: {
+      fontSize: theme.size.micro,
+      color: theme.colors.faint,
+    },
+    sigStamp: {
+      width: 80,
+      height: 30,
+      objectFit: "contain",
     },
   });
+  const supplierLine = [legalName, abn ? `ABN ${abn}` : null].filter(Boolean).join(" · ");
   return (
-    <View style={styles.box} fixed>
-      <Image src={url} style={styles.image} />
+    <View style={styles.wrap} fixed>
+      <View style={styles.leftCol}>
+        <Text style={styles.line}>{supplierLine}</Text>
+        <Text style={styles.line}>
+          {title} · {version}
+        </Text>
+        <Text
+          style={styles.line}
+          render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`}
+        />
+      </View>
+      {signatureUrl ? (
+        <View style={styles.rightCol}>
+          <Image src={signatureUrl} style={styles.sigStamp} />
+          <Text style={styles.line}>Signed by {customerFullName}</Text>
+          <Text style={styles.line}>{signedAtLocal} AEST</Text>
+          <Text style={styles.line}>{signedAtIso}</Text>
+        </View>
+      ) : null}
     </View>
   );
 }

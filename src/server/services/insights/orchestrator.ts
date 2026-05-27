@@ -83,7 +83,7 @@ export async function generateInsightsOverview(
   const cards = await Promise.all(
     valid.map(async ({ id, payload }) => {
       const meta = INSIGHT_META[id];
-      const narrative = await narrateInsight(payload);
+      const narrative = await narrateInsight(payload, { depotId });
       const card: InsightCard = {
         id,
         pillar: meta.pillar,

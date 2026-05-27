@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { TRPCError } from "@trpc/server";
+
+// closeOut now records booking completion (revenue + rewards recompute). Stub
+// the aggregator so this stays a pure unit test of the close-out transition.
+vi.mock("@/server/services/revenue-aggregator", () => ({
+  recordBookingCompletion: vi.fn().mockResolvedValue(undefined),
+  recordAdditionalCharges: vi.fn().mockResolvedValue(undefined),
+  invalidateRevenueCaches: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { staffBookingRouter } from "@/server/trpc/router/staff-booking";
 
 type CallerCtx = Parameters<typeof staffBookingRouter.createCaller>[0];

@@ -37,7 +37,7 @@ export function StepVehicle() {
       {layout === "desktop" && (
         <div className="flex justify-between">
           <Button variant="outline" onClick={() => w.back()}>Back</Button>
-          <Button disabled={!canContinue} onClick={() => w.next()}>Continue</Button>
+          <Button variant="cta" disabled={!canContinue} onClick={() => w.next()}>Continue</Button>
         </div>
       )}
     </div>

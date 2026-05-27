@@ -11,6 +11,7 @@ import {
   quote as quotePricing,
   quoteExtension,
   OneWayDisallowedError,
+  MinimumRentalPeriodError,
 } from "@/server/services/pricing";
 import {
   countAvailable,
@@ -21,6 +22,7 @@ import {
   isBookingOverlapViolation,
 } from "@/server/services/availability";
 import { checkEligibility } from "@/server/services/eligibility";
+import { canRentAsCustomer } from "@/lib/customer-identity";
 import {
   enforceBookingTimesWithinHours,
   enforceDateTimeWithinDepotHours,
@@ -39,8 +41,14 @@ import {
   cancel as cancelBookingService,
   quoteCancellation as quoteCancellationService,
 } from "@/server/services/booking-cancellation";
-import { skipAutoAudit, writeAudit, writeCustomerAuditAsync } from "@/server/services/audit";
+import {
+  skipAutoAudit,
+  writeAudit,
+  writeBookingAuditAsync,
+  writeCustomerAuditAsync,
+} from "@/server/services/audit";
 import { trackServer } from "@/lib/analytics";
+import { gstFromInclusive } from "@/lib/money";
 import { generateBookingReference, withUniqueRetry } from "@/lib/id-gen";
 import { applyReferral } from "@/server/services/referral";
 import { attachByTrackingCode } from "@/server/services/partner";
@@ -248,7 +256,10 @@ export const bookingRouter = createTRPCRouter({
             },
           }),
           ctx.prisma.bookingSwap.findMany({
-            where: { bookingId: booking.id, deletedAt: null },
+            // Only committed swaps produce an agreement document. DRAFT (still
+            // in the wizard) and VOIDED (cancelled) swaps have no document and
+            // must not show up as phantom "Pending" rows.
+            where: { bookingId: booking.id, deletedAt: null, status: "COMMITTED" },
             select: {
               id: true,
               swappedAt: true,
@@ -462,7 +473,15 @@ export const bookingRouter = createTRPCRouter({
         deliveryFee: input.deliveryFee ?? 0,
       });
     } catch (err) {
-      if (err instanceof OneWayDisallowedError) {
+      // Pricing-cascade validation outcomes (one-way not allowed, vehicle's
+      // minimum-rental period not met) are normal customer-input rejections,
+      // not server faults. Surface them as BAD_REQUEST so the wizard can show
+      // the message — leaving them to escape turns a 1-day-on-a-2-day-minimum
+      // bike into a 500 and a Sentry exception (see MIN_RENTAL_PERIOD noise).
+      if (
+        err instanceof OneWayDisallowedError ||
+        err instanceof MinimumRentalPeriodError
+      ) {
         throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
       }
       throw err;
@@ -485,6 +504,43 @@ export const bookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       skipAutoAudit(ctx);
 
+      // Customer identity is profile-based, not role-based: this flow pins
+      // customerId to the caller (ctx.user.id), so the caller must be a
+      // bookable customer — i.e. own a CustomerProfile AND have completed
+      // onboarding (licence + signed agreements). This admits CUSTOMER users
+      // and back-office users (STAFF/MANAGER/ADMIN/SUPER_ADMIN) who carry a
+      // profile and have onboarded; it rejects un-onboarded staff and any
+      // profile-less account, keeping the booking resolvable in the
+      // back-office customer directory. protectedProcedure does NOT gate
+      // back-office sessions on onboarding (it would lock them out of the
+      // back office), so we enforce it here. Staff booking on a customer's
+      // behalf must use staffBooking.createWalkIn.
+      const customerForEligibility = await ctx.prisma.user.findUniqueOrThrow({
+        where: { id: ctx.user.id },
+        select: {
+          dateOfBirth: true,
+          customerProfile: {
+            select: {
+              onboardedAt: true,
+              onboardingVersion: true,
+              licenceClass: true,
+              licenceExpiry: true,
+              passportNumber: true,
+              passportExpiry: true,
+              licenceType: true,
+              licenceImageFront: true,
+              passportImage: true,
+            },
+          },
+        },
+      });
+      if (!canRentAsCustomer(customerForEligibility.customerProfile)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Complete customer onboarding before booking online.",
+        });
+      }
+
       // Depot hours gate — pickup + return must fall inside the respective
       // depot's published operating hours (timezone + holiday overrides
       // respected). Runs before eligibility so the error surfaces on the
@@ -498,31 +554,13 @@ export const bookingRouter = createTRPCRouter({
 
       // A3 + A4: eligibility (age + licence class/expiry) before we commit
       // a booking. Reject impossible quotes early so we don't create a row
-      // that will fail at check-out anyway.
-      const [categoryForEligibility, customerForEligibility] =
-        await Promise.all([
-          ctx.prisma.vehicleCategory.findUniqueOrThrow({
-            where: { id: input.categoryId },
-            select: { name: true, licenceRequired: true, minAge: true },
-          }),
-          ctx.prisma.user.findUniqueOrThrow({
-            where: { id: ctx.user.id },
-            select: {
-              dateOfBirth: true,
-              customerProfile: {
-                select: {
-                  licenceClass: true,
-                  licenceExpiry: true,
-                  passportNumber: true,
-                  passportExpiry: true,
-                  licenceType: true,
-                  licenceImageFront: true,
-                  passportImage: true,
-                },
-              },
-            },
-          }),
-        ]);
+      // that will fail at check-out anyway. Reuses customerForEligibility
+      // fetched above for the onboarding guard.
+      const categoryForEligibility =
+        await ctx.prisma.vehicleCategory.findUniqueOrThrow({
+          where: { id: input.categoryId },
+          select: { name: true, licenceRequired: true, minAge: true },
+        });
       const eligibility = checkEligibility({
         customer: {
           dateOfBirth: customerForEligibility.dateOfBirth,
@@ -583,7 +621,10 @@ export const bookingRouter = createTRPCRouter({
           deliveryFee: input.deliveryFee ?? 0,
         });
       } catch (err) {
-        if (err instanceof OneWayDisallowedError) {
+        if (
+          err instanceof OneWayDisallowedError ||
+          err instanceof MinimumRentalPeriodError
+        ) {
           throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
         }
         throw err;
@@ -747,7 +788,7 @@ export const bookingRouter = createTRPCRouter({
         }
       }
 
-      writeCustomerAuditAsync(ctx.prisma, ctx.user.id, {
+      const bookingCreatedAudit = {
         userId: ctx.user.id,
         action: "BOOKING_CREATED",
         reqId: ctx.reqId,
@@ -763,6 +804,25 @@ export const bookingRouter = createTRPCRouter({
           source: booking.source,
           eligibilityBasis,
           eligibilityWarnings: eligibilityWarnings.map((w) => w.code),
+        },
+      };
+      writeCustomerAuditAsync(ctx.prisma, ctx.user.id, bookingCreatedAudit);
+      // Companion row so the customer's own booking creation surfaces on the
+      // booking's Activity tab. Shares reqId with the customer row above.
+      writeBookingAuditAsync(ctx.prisma, booking.id, bookingCreatedAudit);
+
+      await trackServer({
+        event: "booking.created",
+        distinctId: ctx.user.id,
+        properties: {
+          bookingId: booking.id,
+          reference: booking.bookingReference,
+          categoryId: input.categoryId,
+          pickupDepotId: input.pickupDepotId,
+          durationDays: booking.durationDays,
+          totalAud: Number(booking.totalAmount),
+          isDelivery: booking.isDelivery,
+          source: booking.source,
         },
       });
 
@@ -970,8 +1030,9 @@ export const bookingRouter = createTRPCRouter({
             const nextChargeAt = new Date(
               booking.pickupDateTime.getTime() + periodDays * 24 * 60 * 60 * 1000,
             );
-            // Per-period GST is recurringAmount / 11 (GST-inclusive).
-            const perPeriodGst = Math.round((snapshot.recurringAmount / 11) * 100) / 100;
+            // Per-period GST is recurringAmount / 11 (GST-inclusive) — via the
+            // shared money utility, never an inline divide-by-11.
+            const perPeriodGst = gstFromInclusive(snapshot.recurringAmount).toNumber();
             await tx.bookingBillingPlan.upsert({
               where: { bookingId: booking.id },
               update: {},
@@ -1168,6 +1229,14 @@ export const bookingRouter = createTRPCRouter({
         },
       });
 
+      // Lifetime confirmed-or-beyond bookings for this customer, used to
+      // refresh the PostHog person profile. Best-effort alongside the event.
+      const lifetimeBookings = await ctx.prisma.booking.count({
+        where: {
+          customerId: booking.customerId,
+          status: { in: ["CONFIRMED", "CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED", "COMPLETED"] },
+        },
+      });
       await trackServer({
         event: "booking.confirmed",
         distinctId: ctx.user.id,
@@ -1181,6 +1250,8 @@ export const bookingRouter = createTRPCRouter({
           hasBond: Number(booking.bondAmount) > 0,
           source: booking.source,
         },
+        groups: { depot: booking.pickupDepot.slug },
+        set: { lifetimeBookings, depotAffinity: booking.pickupDepot.slug },
       });
 
       return updated;

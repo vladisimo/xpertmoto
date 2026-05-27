@@ -14,6 +14,9 @@ import {
 } from "@/server/services/presence";
 import { classifyDevice, hashIp, lookupGeo } from "@/lib/geo-ip";
 import { classifyChannel } from "@/lib/analytics/channel";
+import { posthogServerEnabled, trackServerBatch, type AnalyticsEvent } from "@/lib/analytics";
+import { VISITOR_EVENT_NAMES } from "@/lib/analytics/visitor-event-names";
+import { logger } from "@/lib/logger";
 
 const VISITOR_COOKIE = "xpertmoto_vid";
 const PRESENCE_ACTIVE_MS = 60_000;
@@ -74,6 +77,102 @@ export function readVisitorCookie(ctx: { headers: Headers }): string | null {
     if (k === VISITOR_COOKIE) return rest.join("=") || null;
   }
   return null;
+}
+
+// Depot id → slug cache for the PostHog fan-out. Depot slugs are stable
+// (archived depots get renamed, not re-keyed), so a process-lifetime cache
+// avoids a depot lookup on every visitor-event flush. Bounded by the depot
+// count (tens of rows).
+const depotSlugCache = new Map<string, string | null>();
+
+/**
+ * Minimal structural slice of the Prisma client used by the depot-slug
+ * lookup — just enough to resolve a depot's slug. A method signature (not
+ * an arrow property) and concrete args keep the real PrismaClient
+ * assignable to it while a `{ depot: { findUnique: vi.fn() } }` test mock
+ * stays valid too.
+ */
+type DepotSlugLookup = {
+  depot: {
+    findUnique(args: {
+      where: { id: string };
+      select: { slug: true };
+    }): Promise<{ slug: string } | null>;
+  };
+};
+
+async function resolveDepotSlug(
+  prisma: DepotSlugLookup,
+  depotId: string | null,
+): Promise<string | null> {
+  if (!depotId) return null;
+  const cached = depotSlugCache.get(depotId);
+  if (cached !== undefined) return cached;
+  const depot = await prisma.depot.findUnique({
+    where: { id: depotId },
+    select: { slug: true },
+  });
+  const slug = depot?.slug ?? null;
+  depotSlugCache.set(depotId, slug);
+  return slug;
+}
+
+type FanOutEvent = {
+  kind: keyof typeof VISITOR_EVENT_NAMES;
+  path: string;
+  target?: string | null;
+  value?: string | null;
+  numericValue?: number | null;
+  metadata?: Record<string, string | number | boolean | null> | null;
+  wizardStep?: number | null;
+  occurredAt?: string;
+};
+
+/**
+ * Fan the already-PII-scrubbed client visitor events out to PostHog as one
+ * batched `/batch/` request. Anonymous: `distinct_id` is the visitor cookie
+ * id, so each event is sent with `processPerson: false`
+ * (`$process_person_profile: false`) to stop PostHog minting a billable
+ * person profile per visitor cookie — the browser SDK's
+ * `person_profiles:'identified_only'` does NOT apply to raw server capture.
+ * Best-effort — gated on PostHog being enabled,
+ * fully wrapped so a failure never surfaces to the `events` mutation, and
+ * fired with `void` (no await) so it can't delay the mutation response.
+ */
+export async function fanOutVisitorEvents(
+  prisma: DepotSlugLookup,
+  events: FanOutEvent[],
+  vid: string,
+  pickupDepotId: string | null,
+): Promise<void> {
+  try {
+    if (!(await posthogServerEnabled())) return;
+    const depotSlug = await resolveDepotSlug(prisma, pickupDepotId);
+    const groups = depotSlug ? { depot: depotSlug } : undefined;
+    const mapped: AnalyticsEvent[] = events.map((e) => ({
+      event: VISITOR_EVENT_NAMES[e.kind],
+      distinctId: vid,
+      // Anonymous visitor cookie — never a person. Suppress profile creation
+      // so the fan-out can't mint one billable person per visitor cookie.
+      processPerson: false,
+      properties: {
+        path: e.path,
+        ...(e.target != null ? { target: e.target } : {}),
+        ...(e.value != null ? { value: e.value } : {}),
+        ...(e.numericValue != null ? { numericValue: e.numericValue } : {}),
+        ...(e.wizardStep != null ? { wizardStep: e.wizardStep } : {}),
+        ...(e.metadata ?? {}),
+      },
+      groups,
+      timestamp: e.occurredAt ? new Date(e.occurredAt) : undefined,
+    }));
+    await trackServerBatch(mapped);
+  } catch (err) {
+    logger.debug(
+      { err: err instanceof Error ? err.message : String(err) },
+      "posthog visitor fan-out failed",
+    );
+  }
 }
 
 export function hashUA(userAgent: string | null | undefined): string {
@@ -383,7 +482,7 @@ export const liveRouter = createTRPCRouter({
       // heartbeat pipeline hasn't initialised yet).
       const session = await ctx.prisma.visitorSession.findUnique({
         where: { id: vid },
-        select: { id: true, deviceType: true },
+        select: { id: true, deviceType: true, pickupDepotId: true },
       });
       if (!session) return { ok: false as const, reason: "no-session" };
       const deviceType = session.deviceType;
@@ -403,6 +502,10 @@ export const liveRouter = createTRPCRouter({
         })),
         skipDuplicates: true,
       });
+      // Mirror the events to PostHog (fire-and-forget; never blocks the
+      // write or the response). The events are already PII-scrubbed by the
+      // client `trackEvent` pipeline before they reach here.
+      void fanOutVisitorEvents(ctx.prisma, input.events, vid, session.pickupDepotId);
       return { ok: true as const, accepted: input.events.length };
     }),
 

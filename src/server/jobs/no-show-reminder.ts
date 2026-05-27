@@ -2,6 +2,8 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { getSettings } from "@/lib/settings";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { getQueue, registerWorker } from "./queue";
 
 /**
@@ -63,7 +65,7 @@ export async function runNoShowReminder(opts: { graceHours?: number; reminderMin
       customerId: true,
       pickupDateTime: true,
       bondAmount: true,
-      pickupDepot: { select: { name: true, phone: true } },
+      pickupDepot: { select: { name: true, phone: true, slug: true } },
     },
   });
 
@@ -110,6 +112,17 @@ export async function runNoShowReminder(opts: { graceHours?: number; reminderMin
           bondAud,
         },
         dedupKey: `no-show-warning:${b.id}`,
+      });
+      await trackServer({
+        event: SERVER_EVENTS.bookingNoShowWarningSent,
+        distinctId: b.customerId,
+        properties: {
+          bookingId: b.id,
+          reference: b.bookingReference,
+          minutesUntilCutoff: minutesLeft,
+          bondAud,
+        },
+        ...(b.pickupDepot?.slug ? { groups: { depot: b.pickupDepot.slug } } : {}),
       });
       warned += 1;
     } catch (err) {

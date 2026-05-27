@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import * as Sentry from "@sentry/nextjs";
 import { prisma as defaultPrisma } from "@/lib/prisma";
 
 // Accepts either the raw PrismaClient or the extended `@/lib/prisma`
@@ -152,6 +153,23 @@ export type ChargeOffSessionResult = OffSessionChargeResult & {
  * retries don't double-charge.
  */
 export async function chargeOffSessionForUser(args: {
+  userId: string;
+  amount: number;
+  description: string;
+  idempotencyKey: string;
+  metadata?: Record<string, string>;
+  prisma?: PrismaLike;
+}): Promise<ChargeOffSessionResult | null> {
+  // Child span so the off-session Stripe round-trip (the slowest external hop
+  // on every recurring/ancillary charge) is visible under the request or job
+  // transaction. No forceTransaction — it must nest, not split the trace.
+  return Sentry.startSpan(
+    { name: "stripe.charge_offsession", op: "stripe.capture", attributes: { amountAud: args.amount } },
+    () => chargeOffSessionForUserImpl(args),
+  );
+}
+
+async function chargeOffSessionForUserImpl(args: {
   userId: string;
   amount: number;
   description: string;

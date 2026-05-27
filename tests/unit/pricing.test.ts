@@ -476,7 +476,7 @@ test("Phase A2 — FULL strategy does NOT force the whole booking up-front for l
   });
   expect(q.durationDays).toBe(31);
   expect(q.isLongTerm).toBe(true);
-  expect(q.recurringPeriodsTotal).toBe(3); // floor(31/7) = 4 periods, 3 recurring
+  expect(q.recurringPeriodsTotal).toBe(4); // ceil(31/7) = 5 periods, 4 recurring
   expect(q.payOnlineAmount).toBe(q.firstPeriodAmount);
   // payOnline must be substantially less than the full total — progressive
   // billing is doing its job.
@@ -594,14 +594,14 @@ test("Phase A2 — flat-rate add-on (e.g. one-time lock fee) sits in the first p
   );
 });
 
-test("Phase A2 — uneven duration: remainder days fold into the first period at per-day rate", async () => {
+test("Phase A2 — uneven duration: remainder days form a smaller FIRST charge (ceil)", async () => {
   const fake = makeFakePrisma({
     daily: 80, weekly: 504, monthly: 1800, bond: 1500,
     longTermMinDays: 14,
     longTermDefaultFrequency: "WEEKLY",
   });
-  // 23-day hire (3 weekly periods + 2 remainder days). Base subtotal at
-  // weekly rate: 23 × 72 = 1656, less 10% duration discount = 1490.40.
+  // 23-day hire (3 full weeks + 2 remainder days). Base subtotal at weekly
+  // rate: 23 × 72 = 1656, less 10% duration discount = 1490.40.
   const q = await quote(fake, {
     categoryId: "cat1",
     pickupDateTime: new Date("2026-04-10T10:00:00"),
@@ -609,17 +609,21 @@ test("Phase A2 — uneven duration: remainder days fold into the first period at
   });
   expect(q.durationDays).toBe(23);
   expect(q.totalAmount).toBeCloseTo(1490.4, 2);
-  expect(q.recurringPeriodsTotal).toBe(2);
+  // ceil(23/7) = 4 periods → 3 recurring full weeks; the 2 remainder days are
+  // the smaller FIRST online charge, not a heavy up-front payment.
+  expect(q.recurringPeriodsTotal).toBe(3);
   // perDayRate = 1490.40 / 23 = $64.80 exactly. Recurring = 64.80 × 7 = $453.60.
   expect(q.recurringAmount).toBeCloseTo(453.6, 2);
-  // First period = week 1 (453.60) + days 22-23 (2 × 64.80 = 129.60) = 583.20.
-  expect(q.firstPeriodAmount).toBeCloseTo(583.2, 2);
+  // First period = days 22-23 only (2 × 64.80 = 129.60).
+  expect(q.firstPeriodAmount).toBeCloseTo(129.6, 2);
   // Reconciliation invariant.
   expect(q.firstPeriodAmount + q.recurringAmount * q.recurringPeriodsTotal).toBeCloseTo(
     q.totalAmount,
     2,
   );
-  expect(q.firstPeriodAmount).toBeGreaterThan(q.recurringAmount);
+  // The whole point of ceil: the first online charge is now SMALLER than a
+  // full recurring period.
+  expect(q.firstPeriodAmount).toBeLessThan(q.recurringAmount);
 });
 
 test("Phase A2 — combined: per-day insurance + flat delivery + uneven duration reconciles exactly", async () => {
@@ -643,8 +647,11 @@ test("Phase A2 — combined: per-day insurance + flat delivery + uneven duration
     q.totalAmount,
     2,
   );
-  // Flat delivery sits in first period: first > recurring + delivery.
-  expect(q.firstPeriodAmount).toBeGreaterThan(q.recurringAmount + 40);
+  // Flat delivery still lands in the first period, so even though the first
+  // charge is now the small remainder, it clears the $45 delivery fee.
+  expect(q.firstPeriodAmount).toBeGreaterThan(45);
+  // …and remains smaller than a full recurring week (ceil behaviour).
+  expect(q.firstPeriodAmount).toBeLessThan(q.recurringAmount);
 });
 
 test("pricing — durationDiscountEnabled=false drops the 10% week ladder", async () => {

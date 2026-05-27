@@ -1,8 +1,29 @@
 import Link from "next/link";
+import Image from "next/image";
+import {
+  AlertOctagon,
+  AlertTriangle,
+  Bike,
+  Clock,
+  Disc,
+  ImageIcon,
+  LogIn,
+  LogOut,
+  Send,
+  ShieldAlert,
+  type LucideIcon,
+} from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { formatCurrency, formatDateTime } from "@/lib/utils";
+import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { NotReturnedBikes } from "@/components/staff/not-returned-bikes";
+import { CalendarMistakesView } from "@/components/staff/calendar-mistakes";
+import { TyreAlerts } from "@/components/staff/tyre-alerts";
+import { findNotReturnedBookings } from "@/server/services/staff-ops-signals";
+import { getCalendarMistakes, getTyreAlerts } from "@/server/queries/cached";
+
+const MS_IN_DAY = 86_400_000;
 
 export async function StaffTodayTab({ depotId }: { depotId?: string }) {
   const now = new Date();
@@ -11,14 +32,50 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
   const endOfDay = new Date(startOfDay);
   endOfDay.setDate(endOfDay.getDate() + 1);
 
-  const [pickups, returns, activeCount, overdueCount] = await Promise.all([
+  const in14 = new Date(now.getTime() + 14 * MS_IN_DAY);
+  const in30 = new Date(now.getTime() + 30 * MS_IN_DAY);
+  const fleetAttentionWhere = {
+    isActive: true,
+    ...(depotId ? { depotId } : {}),
+    OR: [
+      { regoExpiry: { lt: in30 } },
+      { ctpExpiry: { lt: in30 } },
+      { insuranceExpiry: { lt: in30 } },
+      { nextServiceDueDate: { lt: in14 } },
+    ],
+  };
+
+  const vehicleInclude = {
+    images: {
+      orderBy: [
+        { isPrimary: "desc" as const },
+        { displayOrder: "asc" as const },
+      ],
+      take: 1,
+    },
+  };
+
+  const [
+    pickups,
+    returns,
+    activeCount,
+    overdueRows,
+    fleetAttentionCount,
+    fleetVehicles,
+    mistakes,
+    tyreAlerts,
+  ] = await Promise.all([
     prisma.booking.findMany({
       where: {
         pickupDateTime: { gte: startOfDay, lt: endOfDay },
         status: { in: ["CONFIRMED", "PENDING_PAYMENT"] },
         ...(depotId ? { pickupDepotId: depotId } : {}),
       },
-      include: { customer: true, category: true, vehicle: true },
+      include: {
+        customer: true,
+        category: true,
+        vehicle: { include: vehicleInclude },
+      },
       orderBy: { pickupDateTime: "asc" },
     }),
     prisma.booking.findMany({
@@ -27,123 +84,506 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
         status: { in: ["ACTIVE", "CHECKED_OUT"] },
         ...(depotId ? { returnDepotId: depotId } : {}),
       },
-      include: { customer: true, category: true, vehicle: true },
+      include: {
+        customer: true,
+        category: true,
+        vehicle: { include: vehicleInclude },
+      },
+      orderBy: { returnDateTime: "asc" },
     }),
     prisma.booking.count({
       where: { status: "ACTIVE", ...(depotId ? { depotId } : {}) },
     }),
-    prisma.booking.count({
-      where: {
-        status: { in: ["ACTIVE", "OVERDUE", "CHECKED_OUT"] },
-        returnDateTime: { lt: now },
-        ...(depotId ? { returnDepotId: depotId } : {}),
-      },
+    findNotReturnedBookings(depotId),
+    prisma.vehicle.count({ where: fleetAttentionWhere }),
+    prisma.vehicle.findMany({
+      where: fleetAttentionWhere,
+      include: vehicleInclude,
+      orderBy: { nextServiceDueDate: "asc" },
+      take: 40,
     }),
+    getCalendarMistakes(depotId),
+    getTyreAlerts(depotId),
   ]);
 
+  // Overdue signals — merged in from the former Overdue tab. The not-returned
+  // query shares the Today "Overdue" definition, so derive the count from it.
+  const overdueCount = overdueRows.length;
+  const noticeSent = overdueRows.filter((r) => r.overdueStage >= 1).length;
+  const managerEscalation = overdueRows.filter(
+    (r) => r.overdueStage >= 3,
+  ).length;
+  const over24h = overdueRows.filter((r) => r.hoursOverdue >= 24).length;
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto">
-      <div className="grid gap-3 md:grid-cols-4">
-        <Kpi label="Today's pickups" value={pickups.length} />
-        <Kpi label="Today's returns" value={returns.length} />
-        <Kpi label="Active rentals" value={activeCount} />
-        <Kpi label="Overdue" value={overdueCount} tone={overdueCount > 0 ? "warn" : undefined} />
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto lg:overflow-hidden">
+      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+        <StatCard title="Today's movements">
+          <StatTile label="Pickups" value={pickups.length} icon={LogOut} />
+          <StatTile label="Returns" value={returns.length} icon={LogIn} />
+          <StatTile label="Active" value={activeCount} icon={Bike} />
+          <StatTile
+            label="Overdue"
+            value={overdueCount}
+            icon={AlertTriangle}
+            tone={overdueCount > 0 ? "warn" : undefined}
+          />
+        </StatCard>
+        <StatCard title="Overdue escalation">
+          <StatTile
+            label="Not returned"
+            value={overdueCount}
+            icon={AlertOctagon}
+            tone={overdueCount > 0 ? "warn" : undefined}
+          />
+          <StatTile label="Notice sent" value={noticeSent} icon={Send} />
+          <StatTile
+            label="Manager escalation"
+            value={managerEscalation}
+            icon={ShieldAlert}
+            tone={managerEscalation > 0 ? "warn" : undefined}
+          />
+          <StatTile
+            label="Over 24 hours"
+            value={over24h}
+            icon={Clock}
+            tone={over24h > 0 ? "warn" : undefined}
+          />
+        </StatCard>
+        <StatCard title="Fleet & maintenance">
+          <StatTile
+            label="Fleet attention"
+            value={fleetAttentionCount}
+            icon={Bike}
+            tone={fleetAttentionCount > 0 ? "warn" : undefined}
+          />
+          <StatTile
+            label="Calendar mistakes"
+            value={mistakes.total}
+            icon={AlertOctagon}
+            tone={mistakes.total > 0 ? "warn" : undefined}
+          />
+          <StatTile
+            label="Tyre alerts"
+            value={tyreAlerts.length}
+            icon={Disc}
+            tone={tyreAlerts.length > 0 ? "warn" : undefined}
+          />
+        </StatCard>
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-2">
-        <Card className="flex min-h-0 flex-col">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Today&apos;s pickups</CardTitle>
-          </CardHeader>
-          <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto">
-            {pickups.length === 0 ? (
-              <p className="caption">No pickups scheduled.</p>
-            ) : (
-              pickups.map((b) => (
+      <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
+        <ScrollCard title="Today's pickups" count={pickups.length}>
+          {pickups.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {pickups.map((b) => (
                 <BookingRow
                   key={b.id}
                   b={b}
+                  kind="pickup"
                   action="Check out"
                   href={`/staff/bookings/${b.id}/check-out`}
                 />
-              ))
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="flex min-h-0 flex-col">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Today&apos;s returns</CardTitle>
-          </CardHeader>
-          <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto">
-            {returns.length === 0 ? (
-              <p className="caption">No returns scheduled.</p>
-            ) : (
-              returns.map((b) => (
+              ))}
+            </div>
+          )}
+        </ScrollCard>
+        <ScrollCard title="Today's returns" count={returns.length}>
+          {returns.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {returns.map((b) => (
                 <BookingRow
                   key={b.id}
                   b={b}
+                  kind="return"
                   action="Check in"
                   href={`/staff/bookings/${b.id}/check-in`}
                 />
-              ))
-            )}
-          </CardContent>
-        </Card>
+              ))}
+            </div>
+          )}
+        </ScrollCard>
+        <ScrollCard title="Not returned" count={overdueCount}>
+          <NotReturnedBikes rows={overdueRows} />
+        </ScrollCard>
+      </div>
+
+      <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
+        <ScrollCard
+          title="Vehicles needing attention"
+          description="Rego / CTP / insurance within 30 days, or service within 14."
+          contentClassName="flex flex-col gap-1.5"
+        >
+          {fleetVehicles.length === 0 ? (
+            <EmptyState
+              icon={Bike}
+              title="Fleet is current"
+              hint="No rego, CTP, insurance or service due soon."
+            />
+          ) : (
+            fleetVehicles.map((v) => (
+              <FleetRow
+                key={v.id}
+                v={v}
+                chips={attentionChips(v, now, in30, in14)}
+              />
+            ))
+          )}
+        </ScrollCard>
+
+        <ScrollCard
+          title="Calendar mistakes"
+          description="Booking ↔ vehicle ↔ maintenance inconsistencies."
+        >
+          <CalendarMistakesView data={mistakes} />
+        </ScrollCard>
+
+        <ScrollCard
+          title="Tyre alerts"
+          description="Low tread or high km since last replacement."
+        >
+          <TyreAlerts rows={tyreAlerts} />
+        </ScrollCard>
       </div>
     </div>
   );
 }
 
-function Kpi({ label, value, tone }: { label: string; value: number; tone?: "warn" }) {
+function ScrollCard({
+  title,
+  count,
+  description,
+  contentClassName,
+  children,
+}: {
+  title: string;
+  count?: number;
+  description?: string;
+  contentClassName?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-xs font-normal text-muted-foreground">{label}</CardTitle>
+    <Card className="flex min-h-0 flex-col overflow-hidden lg:flex-1">
+      <CardHeader className="shrink-0 pb-2">
+        <CardTitle className="flex items-baseline gap-1.5 text-base">
+          <span>{title}</span>
+          {count != null && (
+            <span className="text-sm font-normal text-muted-foreground">
+              ({count})
+            </span>
+          )}
+        </CardTitle>
+        {description && (
+          <p className="text-caption text-muted-foreground">{description}</p>
+        )}
       </CardHeader>
-      <CardContent>
-        <div
-          className={`font-display text-2xl font-semibold tracking-tight ${
-            tone === "warn" ? "text-destructive" : "text-foreground"
-          }`}
-        >
-          {value}
-        </div>
+      <CardContent
+        className={cn("min-h-0 flex-1 overflow-auto", contentClassName)}
+      >
+        {children}
       </CardContent>
     </Card>
   );
 }
 
-type BookingRowProps = {
-  b: {
-    id: string;
-    bookingReference: string;
-    pickupDateTime: Date;
-    returnDateTime: Date;
-    totalAmount: unknown;
-    customer: { firstName: string; lastName: string; email: string };
-    category: { name: string };
-    vehicle: { internalCode: string } | null;
-  };
-  action: string;
-  href: string;
+type AttentionChip = {
+  label: string;
+  date: Date;
+  overdue: boolean;
+  dueText: string;
 };
 
-function BookingRow({ b, action, href }: BookingRowProps) {
+function dueText(date: Date, now: Date): string {
+  const days = Math.round((date.getTime() - now.getTime()) / MS_IN_DAY);
+  if (days < 0) {
+    const n = Math.abs(days);
+    return `overdue by ${n} day${n === 1 ? "" : "s"}`;
+  }
+  if (days === 0) return "due today";
+  return `due in ${days} day${days === 1 ? "" : "s"}`;
+}
+
+function attentionChips(
+  v: {
+    regoExpiry: Date | null;
+    ctpExpiry: Date | null;
+    insuranceExpiry: Date | null;
+    nextServiceDueDate: Date | null;
+  },
+  now: Date,
+  in30: Date,
+  in14: Date,
+): AttentionChip[] {
+  const chips: AttentionChip[] = [];
+  const add = (label: string, date: Date) =>
+    chips.push({ label, date, overdue: date < now, dueText: dueText(date, now) });
+  if (v.regoExpiry && v.regoExpiry < in30) add("Rego", v.regoExpiry);
+  if (v.ctpExpiry && v.ctpExpiry < in30) add("CTP", v.ctpExpiry);
+  if (v.insuranceExpiry && v.insuranceExpiry < in30) add("Ins", v.insuranceExpiry);
+  if (v.nextServiceDueDate && v.nextServiceDueDate < in14)
+    add("Service", v.nextServiceDueDate);
+  return chips;
+}
+
+function FleetRow({
+  v,
+  chips,
+}: {
+  v: {
+    id: string;
+    make: string;
+    model: string;
+    year: number;
+    colour: string;
+    internalCode: string;
+    images: { url: string; caption: string | null }[];
+  };
+  chips: AttentionChip[];
+}) {
+  const image = v.images[0];
+  const title = `${v.year} ${v.make} ${v.model}`;
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2.5">
-      <div className="min-w-0">
-        <div className="truncate font-medium">
-          {b.bookingReference} · {b.customer.firstName} {b.customer.lastName}
+    <Link
+      href={`/staff/fleet/vehicles/${v.id}?tab=overview&edit=compliance`}
+      className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5 transition-colors hover:bg-muted/50"
+    >
+      <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md bg-muted">
+        {image ? (
+          <Image
+            src={image.url}
+            alt={image.caption ?? title}
+            fill
+            sizes="56px"
+            className="object-contain"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-muted-foreground">
+            <ImageIcon className="h-5 w-5" aria-hidden />
+          </span>
+        )}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold tracking-wider">
+            {v.internalCode}
+          </span>
+          <span className="truncate text-sm font-medium">{title}</span>
         </div>
-        <div className="truncate text-xs text-muted-foreground">
-          {b.category.name}
-          {b.vehicle && ` · ${b.vehicle.internalCode}`} · {formatDateTime(b.pickupDateTime)} →{" "}
-          {formatDateTime(b.returnDateTime)}
+        <div className="truncate text-xs text-muted-foreground">{v.colour}</div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+          {chips.map((c) => (
+            <span
+              key={c.label}
+              className={cn(
+                "text-[11px] leading-tight tabular-nums",
+                c.overdue ? "text-destructive" : "text-muted-foreground",
+              )}
+            >
+              <span className="font-medium">
+                {c.label} {c.dueText}
+              </span>{" "}
+              · {formatDate(c.date)}
+            </span>
+          ))}
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-3">
-        <span className="text-sm font-medium">{formatCurrency(Number(b.totalAmount))}</span>
+    </Link>
+  );
+}
+
+function EmptyState({
+  icon: Icon,
+  title,
+  hint,
+}: {
+  icon: LucideIcon;
+  title: string;
+  hint: string;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+      <Icon className="h-5 w-5 text-muted-foreground/60" aria-hidden />
+      <p className="text-sm font-medium">{title}</p>
+      <p className="text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
+function StatCard({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="grid grid-cols-2 gap-2 p-3 pt-0">
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  icon: Icon,
+  tone,
+}: {
+  label: string;
+  value: number;
+  icon: LucideIcon;
+  tone?: "warn";
+}) {
+  const active = tone === "warn" && value > 0;
+  return (
+    <div
+      className={`flex items-center gap-2.5 rounded-md border p-2.5 transition-colors ${
+        active
+          ? "border-destructive/30 bg-destructive/5"
+          : "border-border bg-background"
+      }`}
+    >
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
+          active
+            ? "bg-destructive/10 text-destructive"
+            : "bg-muted text-muted-foreground"
+        }`}
+      >
+        <Icon className="h-4 w-4" aria-hidden />
+      </span>
+      <div className="min-w-0">
+        <div
+          className={`font-display text-xl font-semibold leading-none tracking-tight ${
+            active ? "text-destructive" : "text-foreground"
+          }`}
+        >
+          {value}
+        </div>
+        <div className="truncate text-[11px] text-muted-foreground">
+          {label}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type RowBooking = {
+  id: string;
+  customerId: string;
+  bookingReference: string;
+  pickupDateTime: Date;
+  returnDateTime: Date;
+  totalAmount: unknown;
+  customer: { firstName: string; lastName: string };
+  category: { name: string };
+  vehicle: {
+    make: string;
+    model: string;
+    year: number;
+    colour: string;
+    rego: string;
+    regoState: string;
+    internalCode: string;
+    images: { url: string; caption: string | null }[];
+  } | null;
+};
+
+function formatTime(d: Date) {
+  return formatDate(d, { timeStyle: "short" });
+}
+
+function BookingRow({
+  b,
+  kind,
+  action,
+  href,
+}: {
+  b: RowBooking;
+  kind: "pickup" | "return";
+  action: string;
+  href: string;
+}) {
+  const v = b.vehicle;
+  const image = v?.images[0];
+  const title = v ? `${v.year} ${v.make} ${v.model}` : b.category.name;
+  const imageAlt = image?.caption ?? title;
+
+  return (
+    <div className="flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5">
+      <Link
+        href={`/staff/bookings/${b.id}`}
+        aria-label={`Open booking ${b.bookingReference}`}
+        className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md bg-muted ring-offset-background transition hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        {image ? (
+          <Image
+            src={image.url}
+            alt={imageAlt}
+            fill
+            sizes="56px"
+            className="object-cover"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-muted-foreground">
+            <ImageIcon className="h-5 w-5" aria-hidden />
+          </span>
+        )}
+      </Link>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          {v && (
+            <span className="shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold tracking-wider">
+              {v.rego}
+            </span>
+          )}
+          <Link
+            href={`/staff/bookings/${b.id}`}
+            className="truncate font-semibold hover:underline"
+          >
+            {title}
+          </Link>
+        </div>
+        <div className="truncate text-xs text-muted-foreground">
+          {v ? (
+            <>
+              {v.colour} · {v.regoState} · {v.internalCode}
+            </>
+          ) : (
+            "Vehicle assigned at pickup"
+          )}
+        </div>
+        <div className="truncate text-xs text-muted-foreground">
+          <Link
+            href={`/staff/customers/${b.customerId}`}
+            className="font-medium text-foreground hover:underline"
+          >
+            {b.customer.firstName} {b.customer.lastName}
+          </Link>{" "}
+          ·{" "}
+          {kind === "pickup" ? (
+            <>
+              out {formatTime(b.pickupDateTime)} · back{" "}
+              {formatDate(b.returnDateTime, { day: "numeric", month: "short" })}
+            </>
+          ) : (
+            <>due {formatTime(b.returnDateTime)}</>
+          )}{" "}
+          · {b.bookingReference}
+        </div>
+      </div>
+
+      <div className="flex shrink-0 flex-col items-end gap-2">
+        <span className="text-sm font-medium">
+          {formatCurrency(Number(b.totalAmount))}
+        </span>
         <Button asChild size="sm">
           <Link href={href}>{action}</Link>
         </Button>

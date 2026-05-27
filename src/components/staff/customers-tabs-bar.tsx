@@ -9,6 +9,7 @@ import {
   MessageSquare,
   Settings,
   ShieldAlert,
+  UserCog,
   Users,
   type LucideIcon,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { Tabs, TabsTrigger } from "@/components/ui/tabs";
 import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import {
   CUSTOMER_TAB_VALUES,
+  isAdminOnlyCustomerTab,
   type CustomerTabValue,
 } from "@/lib/customers/tabs";
 
@@ -33,9 +35,17 @@ const TAB_META: Record<CustomerTabValue, { label: string; icon: LucideIcon }> = 
   communications: { label: "Communications",      icon: MessageSquare },
   documents:      { label: "Documents",           icon: FileText },
   settings:       { label: "Settings",            icon: Settings },
+  users:          { label: "Users & Roles",       icon: UserCog },
 };
 
-export function CustomersTabsBar({ activeTab }: { activeTab: CustomerTabValue }) {
+export function CustomersTabsBar({
+  activeTab,
+  isAdmin = false,
+}: {
+  activeTab: CustomerTabValue;
+  /** Admin-only tabs (Users & Roles) only render for ADMIN / SUPER_ADMIN. */
+  isAdmin?: boolean;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -45,10 +55,14 @@ export function CustomersTabsBar({ activeTab }: { activeTab: CustomerTabValue })
     router.replace(`/staff/customers?${params.toString()}`, { scroll: false });
   };
 
+  const tabs = CUSTOMER_TAB_VALUES.filter(
+    (value) => isAdmin || !isAdminOnlyCustomerTab(value),
+  );
+
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange}>
       <MobileScrollTabs className="w-full justify-start sm:w-full">
-        {CUSTOMER_TAB_VALUES.map((value) => {
+        {tabs.map((value) => {
           const meta = TAB_META[value];
           const Icon = meta.icon;
           return (

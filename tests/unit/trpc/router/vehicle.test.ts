@@ -67,6 +67,7 @@ describe("vehicle.listModels", () => {
 
     const args = findMany.mock.calls[0]?.[0];
     expect(args?.where).toMatchObject({
+      isRentable: true,
       vehicles: { some: { isActive: true } },
       useCases: { has: "ADVENTURE" },
     });

@@ -67,7 +67,7 @@ export function ModelGallery({ images, alt }: ModelGalleryProps) {
             alt={current.caption ?? alt}
             fill
             sizes="(max-width: 1024px) 100vw, 640px"
-            className="object-cover"
+            className="object-contain"
             priority
           />
         )}
@@ -115,7 +115,7 @@ export function ModelGallery({ images, alt }: ModelGalleryProps) {
                 i === safeActive ? "border-primary opacity-100" : "border-transparent opacity-70 hover:opacity-100",
               )}
             >
-              <Image src={img.url} alt={img.caption ?? alt} fill sizes="96px" className="object-cover" />
+              <Image src={img.url} alt={img.caption ?? alt} fill sizes="96px" className="object-contain" />
             </button>
           ))}
         </div>

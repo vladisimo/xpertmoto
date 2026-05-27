@@ -24,7 +24,11 @@ function Calendar({
         month: "flex flex-col gap-3",
         month_caption: "flex justify-center pt-1 relative items-center",
         caption_label: "text-sm font-semibold",
-        nav: "flex items-center gap-1 absolute inset-x-1 top-1 justify-between",
+        // z-10 keeps the prev/next buttons above the month-caption divs.
+        // RDP renders <Nav> as the first child of the months container, so
+        // the later, position:relative captions would otherwise paint on top
+        // of these absolutely-positioned buttons and swallow the clicks.
+        nav: "flex items-center gap-1 absolute inset-x-1 top-1 justify-between z-10",
         button_previous: cn(
           buttonVariants({ variant: "ghost", size: "icon" }),
           "h-7 w-7",

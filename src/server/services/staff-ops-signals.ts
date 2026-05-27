@@ -19,7 +19,17 @@ export type NotReturnedBooking = {
     email: string;
     phone: string | null;
   };
-  vehicle: { id: string; internalCode: string; rego: string; make: string; model: string } | null;
+  vehicle: {
+    id: string;
+    internalCode: string;
+    rego: string;
+    regoState: string;
+    make: string;
+    model: string;
+    year: number;
+    colour: string;
+    images: { url: string; caption: string | null }[];
+  } | null;
   category: { name: string };
   totalAmount: number;
   balanceDue: number;
@@ -38,7 +48,23 @@ export async function findNotReturnedBookings(
     },
     include: {
       customer: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
-      vehicle: { select: { id: true, internalCode: true, rego: true, make: true, model: true } },
+      vehicle: {
+        select: {
+          id: true,
+          internalCode: true,
+          rego: true,
+          regoState: true,
+          make: true,
+          model: true,
+          year: true,
+          colour: true,
+          images: {
+            orderBy: [{ isPrimary: "desc" as const }, { displayOrder: "asc" as const }],
+            take: 1,
+            select: { url: true, caption: true },
+          },
+        },
+      },
       category: { select: { name: true } },
     },
     orderBy: { returnDateTime: "asc" },

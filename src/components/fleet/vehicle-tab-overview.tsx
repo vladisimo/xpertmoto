@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Pencil } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -12,11 +13,40 @@ import { VehicleEditSheet, type VehicleEditSection } from "./vehicle-edit-sheet"
 import type { VehicleDetail } from "./vehicle-detail-types";
 import { expiryTone } from "./expiry";
 
+const EDIT_SECTIONS: VehicleEditSection[] = [
+  "identity",
+  "compliance",
+  "assignment",
+  "financial",
+  "pricing",
+];
+
+function asEditSection(value: string | null): VehicleEditSection | null {
+  return value && (EDIT_SECTIONS as string[]).includes(value)
+    ? (value as VehicleEditSection)
+    : null;
+}
+
 export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
   const { vehicle: v, depreciation: dep, totalRevenue, totalBookings, totalMaintenanceCost } = data;
   const roi = dep ? totalRevenue - dep.depreciation - totalMaintenanceCost : null;
   const { open } = useVehicleActions();
-  const [editing, setEditing] = useState<VehicleEditSection | null>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // Deep links (e.g. from the dashboard "Vehicles needing attention" card) can
+  // request a section sheet to open via ?edit=compliance.
+  const [editing, setEditing] = useState<VehicleEditSection | null>(() =>
+    asEditSection(searchParams.get("edit")),
+  );
+
+  const closeEditing = () => {
+    setEditing(null);
+    if (searchParams.get("edit")) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("edit");
+      router.replace(url.pathname + url.search, { scroll: false });
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -158,7 +188,7 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
         section={editing}
         vehicle={v}
         open={editing !== null}
-        onOpenChange={(o) => { if (!o) setEditing(null); }}
+        onOpenChange={(o) => { if (!o) closeEditing(); }}
       />
     </div>
   );

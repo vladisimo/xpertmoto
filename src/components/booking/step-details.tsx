@@ -359,7 +359,7 @@ export function StepDetails() {
         <h2 className="h2 hidden md:block">Sign in to continue</h2>
         <p className="text-muted-foreground">Please sign in or create an account to complete your booking.</p>
         <div className="flex gap-3">
-          <Button asChild>
+          <Button asChild variant="cta">
             <Link href={`/login?callbackUrl=/booking`}>Sign in</Link>
           </Button>
           <Button asChild variant="outline">
@@ -528,7 +528,7 @@ export function StepDetails() {
         {layout === "desktop" && (
           <div className="flex justify-between">
             <Button type="button" variant="outline" onClick={() => w.back()}>Back</Button>
-            <Button type="button" onClick={handleContinue}>Continue</Button>
+            <Button type="button" variant="cta" onClick={handleContinue}>Continue</Button>
           </div>
         )}
       </div>
@@ -961,7 +961,7 @@ export function StepDetails() {
         {layout === "desktop" && (
           <div className="flex justify-between">
             <Button type="button" variant="outline" onClick={() => w.back()}>Back</Button>
-            <Button type="submit" disabled={updateProfile.isPending}>
+            <Button type="submit" variant="cta" disabled={updateProfile.isPending}>
               {updateProfile.isPending ? "Saving…" : "Save & continue"}
             </Button>
           </div>

@@ -7,29 +7,47 @@ import {
   BookOpen,
   ClipboardCheck,
   Gauge,
+  MapPin,
   Receipt,
   Route,
   Settings,
   Wrench,
+  type LucideIcon,
 } from "lucide-react";
 import { Tabs, TabsTrigger } from "@/components/ui/tabs";
 import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
+import {
+  FLEET_TAB_VALUES,
+  isAdminOnlyFleetTab,
+  type FleetTabValue,
+} from "@/lib/fleet/tabs";
 
-export const FLEET_TABS = [
-  { value: "overview", label: "Overview", icon: Gauge },
-  { value: "vehicles", label: "Vehicles", icon: Bike },
-  { value: "makes-models", label: "Makes & Models", icon: BookOpen },
-  { value: "maintenance", label: "Maintenance", icon: Wrench },
-  { value: "inspections", label: "Inspections", icon: ClipboardCheck },
-  { value: "incidents", label: "Incidents", icon: AlertTriangle },
-  { value: "infringements", label: "Infringements", icon: Receipt },
-  { value: "tolls", label: "Tolls", icon: Route },
-  { value: "settings", label: "Settings", icon: Settings },
-] as const;
+// Re-export for callers that already import from this module. New code
+// should import from @/lib/fleet/tabs directly.
+export { FLEET_TAB_VALUES };
+export type { FleetTabValue };
 
-export type FleetTabValue = (typeof FLEET_TABS)[number]["value"];
+const TAB_META: Record<FleetTabValue, { label: string; icon: LucideIcon }> = {
+  overview:       { label: "Overview",       icon: Gauge },
+  vehicles:       { label: "Vehicles",       icon: Bike },
+  "makes-models": { label: "Makes & Models", icon: BookOpen },
+  maintenance:    { label: "Maintenance",    icon: Wrench },
+  inspections:    { label: "Inspections",    icon: ClipboardCheck },
+  incidents:      { label: "Incidents",      icon: AlertTriangle },
+  infringements:  { label: "Infringements",  icon: Receipt },
+  tolls:          { label: "Tolls",          icon: Route },
+  depots:         { label: "Depots",         icon: MapPin },
+  settings:       { label: "Settings",       icon: Settings },
+};
 
-export function FleetTabsBar({ activeTab }: { activeTab: FleetTabValue }) {
+export function FleetTabsBar({
+  activeTab,
+  isAdmin = false,
+}: {
+  activeTab: FleetTabValue;
+  /** Admin-only tabs (Depots) only render for ADMIN / SUPER_ADMIN. */
+  isAdmin?: boolean;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -39,15 +57,20 @@ export function FleetTabsBar({ activeTab }: { activeTab: FleetTabValue }) {
     router.replace(`/staff/fleet?${params.toString()}`, { scroll: false });
   };
 
+  const tabs = FLEET_TAB_VALUES.filter(
+    (value) => isAdmin || !isAdminOnlyFleetTab(value),
+  );
+
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange}>
       <MobileScrollTabs className="w-full justify-start sm:w-full">
-        {FLEET_TABS.map((tab) => {
-          const Icon = tab.icon;
+        {tabs.map((value) => {
+          const meta = TAB_META[value];
+          const Icon = meta.icon;
           return (
-            <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5">
+            <TabsTrigger key={value} value={value} className="gap-1.5">
               <Icon className="h-3.5 w-3.5" />
-              <span>{tab.label}</span>
+              <span>{meta.label}</span>
             </TabsTrigger>
           );
         })}

@@ -4,8 +4,12 @@ const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const paymentFindFirst = vi.fn().mockResolvedValue(null);
 const paymentFindMany = vi.fn().mockResolvedValue([]);
 const bookingFindMany = vi.fn().mockResolvedValue([]);
+const bookingFindUnique = vi.fn().mockResolvedValue(null);
 const bookingUpdate = vi.fn().mockResolvedValue({});
 const bondUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+const bondUpdate = vi.fn().mockResolvedValue({});
+const bondFindFirst = vi.fn().mockResolvedValue(null);
+const trackServerMock = vi.fn().mockResolvedValue(undefined);
 const profileUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const incidentFindFirst = vi.fn().mockResolvedValue(null);
 const incidentCreate = vi.fn().mockResolvedValue({ id: "incident_1" });
@@ -28,8 +32,8 @@ vi.mock("@/lib/prisma", () => ({
       findFirst: paymentFindFirst,
       findMany: paymentFindMany,
     },
-    booking: { findMany: bookingFindMany, update: bookingUpdate },
-    bondLedger: { updateMany: bondUpdateMany },
+    booking: { findMany: bookingFindMany, findUnique: bookingFindUnique, update: bookingUpdate },
+    bondLedger: { updateMany: bondUpdateMany, update: bondUpdate, findFirst: bondFindFirst },
     customerProfile: { updateMany: profileUpdateMany },
     incident: { findFirst: incidentFindFirst, create: incidentCreate },
     user: { findMany: userFindMany },
@@ -46,6 +50,10 @@ vi.mock("@/server/services/notification-sender", () => ({
 vi.mock("@/server/services/revenue-aggregator", () => ({
   recordRefund: vi.fn().mockResolvedValue(undefined),
   invalidateRevenueCaches: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("@/lib/analytics", () => ({
+  trackServer: (...args: unknown[]) => trackServerMock(...args),
 }));
 
 let constructMock = vi.fn();
@@ -72,8 +80,12 @@ beforeEach(() => {
   paymentFindMany.mockResolvedValue([]);
   bookingFindMany.mockClear();
   bookingFindMany.mockResolvedValue([]);
+  bookingFindUnique.mockClear();
+  bookingFindUnique.mockResolvedValue(null);
   bookingUpdate.mockClear();
   bondUpdateMany.mockClear();
+  bondUpdate.mockClear();
+  bondUpdate.mockResolvedValue({});
   profileUpdateMany.mockClear();
   incidentFindFirst.mockClear();
   incidentFindFirst.mockResolvedValue(null);
@@ -84,6 +96,9 @@ beforeEach(() => {
   webhookEventCreate.mockClear();
   webhookEventCreate.mockResolvedValue({});
   webhookEventUpdate.mockClear();
+  bondFindFirst.mockClear();
+  bondFindFirst.mockResolvedValue(null);
+  trackServerMock.mockClear();
   constructMock = vi.fn();
 });
 
@@ -114,6 +129,73 @@ describe("Stripe webhook", () => {
         data: expect.objectContaining({ status: "SUCCEEDED", stripeChargeId: "ch_123" }),
       }),
     );
+  });
+
+  it("decrements Booking.balanceDue when a PENDING ancillary charge captures", async () => {
+    // First findFirst = the pre-flip read for the balanceDue decrement;
+    // second = the receipt lookup (return null to skip the receipt path).
+    paymentFindFirst
+      .mockResolvedValueOnce({
+        bookingId: "b1",
+        type: "EXTENSION",
+        amount: 854.97,
+        status: "PENDING",
+      })
+      .mockResolvedValueOnce(null);
+    bookingFindUnique.mockResolvedValueOnce({ balanceDue: 904.97, amountPaid: 100 });
+    constructMock.mockResolvedValue({
+      id: "evt_cap",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_ext", latest_charge: "ch_ext" } },
+    });
+
+    const res = await post({});
+    expect(res.status).toBe(200);
+    // balanceDue 904.97 − 854.97 = 50; amountPaid 100 + 854.97 = 954.97.
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { balanceDue: 50, amountPaid: 954.97 },
+    });
+  });
+
+  it("does not decrement balanceDue when the charge was already SUCCEEDED (redelivery)", async () => {
+    paymentFindFirst
+      .mockResolvedValueOnce({
+        bookingId: "b1",
+        type: "EXTENSION",
+        amount: 854.97,
+        status: "SUCCEEDED",
+      })
+      .mockResolvedValueOnce(null);
+    constructMock.mockResolvedValue({
+      id: "evt_redeliver",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_ext", latest_charge: "ch_ext" } },
+    });
+
+    await post({});
+    expect(bookingFindUnique).not.toHaveBeenCalled();
+    expect(bookingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not decrement balanceDue for the deposit (BOOKING_PAYMENT)", async () => {
+    paymentFindFirst
+      .mockResolvedValueOnce({
+        bookingId: "b1",
+        type: "BOOKING_PAYMENT",
+        amount: 542.72,
+        status: "PENDING",
+      })
+      .mockResolvedValueOnce(null);
+    constructMock.mockResolvedValue({
+      id: "evt_deposit",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_dep", latest_charge: "ch_dep" } },
+    });
+
+    await post({});
+    expect(bookingFindUnique).not.toHaveBeenCalled();
+    expect(bookingUpdate).not.toHaveBeenCalled();
   });
 
   it("marks Payment REFUNDED on full refund", async () => {
@@ -164,6 +246,139 @@ describe("Stripe webhook", () => {
       expect.objectContaining({
         where: { userId: "cust_1" },
         data: expect.objectContaining({ licenceVerifiedAt: expect.any(Date) }),
+      }),
+    );
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "identity.verified", distinctId: "cust_1" }),
+    );
+  });
+
+  it("emits bond.held_updated with depot group on amount_capturable_updated", async () => {
+    bondFindFirst.mockResolvedValueOnce({
+      bookingId: "b1",
+      customerId: "cust_1",
+      heldAmount: 500,
+      booking: { pickupDepot: { slug: "brisbane-cbd" } },
+    });
+    constructMock.mockResolvedValue({
+      id: "evt_bond_hold",
+      type: "payment_intent.amount_capturable_updated",
+      data: { object: { id: "pi_bond" } },
+    });
+    await post({});
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "bond.held_updated",
+        distinctId: "cust_1",
+        groups: { depot: "brisbane-cbd" },
+      }),
+    );
+  });
+
+  it("emits bond.released when a held bond is cancelled", async () => {
+    bondFindFirst.mockResolvedValueOnce({
+      id: "bond_1",
+      bookingId: "b1",
+      customerId: "cust_1",
+      heldAmount: 500,
+      capturedAmount: 0,
+      booking: { pickupDepot: { slug: "brisbane-cbd" } },
+    });
+    constructMock.mockResolvedValue({
+      id: "evt_pi_cancel",
+      type: "payment_intent.canceled",
+      data: { object: { id: "pi_bond" } },
+    });
+    await post({});
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "bond.released", distinctId: "cust_1" }),
+    );
+  });
+
+  it("releases the full held amount (not 0) so the terminal-state CHECK holds", async () => {
+    // Regression: the canceled handler used to hardcode releasedAmount: 0,
+    // which violates BondLedger_terminal_state_chk (captured + released must
+    // equal held for a RELEASED row). Release must net out the held amount.
+    bondFindFirst.mockResolvedValueOnce({
+      id: "bond_1",
+      bookingId: "b1",
+      customerId: "cust_1",
+      heldAmount: 300,
+      capturedAmount: 0,
+      booking: { pickupDepot: { slug: "brisbane-cbd" } },
+    });
+    constructMock.mockResolvedValue({
+      id: "evt_pi_cancel_amount",
+      type: "payment_intent.canceled",
+      data: { object: { id: "pi_bond" } },
+    });
+    await post({});
+    expect(bondUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "bond_1" },
+        data: expect.objectContaining({ status: "RELEASED" }),
+      }),
+    );
+    const releasedArg = bondUpdate.mock.calls[0]?.[0]?.data?.releasedAmount;
+    expect(Number(releasedArg)).toBe(300);
+  });
+
+  it("does not emit bond.released when no held bond was cancelled", async () => {
+    bondFindFirst.mockResolvedValueOnce(null);
+    constructMock.mockResolvedValue({
+      id: "evt_pi_cancel_noop",
+      type: "payment_intent.canceled",
+      data: { object: { id: "pi_bond" } },
+    });
+    await post({});
+    expect(bondUpdate).not.toHaveBeenCalled();
+    expect(trackServerMock).not.toHaveBeenCalled();
+  });
+
+  it("emits payment.failed for each failed payment with a customer", async () => {
+    paymentFindMany.mockResolvedValueOnce([
+      {
+        id: "pay_1",
+        customerId: "cust_1",
+        bookingId: "b1",
+        amount: 120,
+        type: "EXTENSION",
+        booking: { pickupDepot: { slug: "brisbane-cbd" } },
+      },
+    ]);
+    constructMock.mockResolvedValue({
+      id: "evt_fail",
+      type: "payment_intent.payment_failed",
+      data: { object: { id: "pi_fail" } },
+    });
+    await post({});
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "payment.failed",
+        distinctId: "cust_1",
+        groups: { depot: "brisbane-cbd" },
+      }),
+    );
+  });
+
+  it("emits payment.refunded with depot group on charge.refunded", async () => {
+    paymentFindFirst.mockResolvedValueOnce({
+      id: "pay_1",
+      customerId: "cust_1",
+      bookingId: "b1",
+      booking: { depotId: "d1", pickupDepot: { slug: "brisbane-cbd" } },
+    });
+    constructMock.mockResolvedValue({
+      id: "evt_refund_ph",
+      type: "charge.refunded",
+      data: { object: { payment_intent: "pi_r", amount: 1000, amount_refunded: 1000 } },
+    });
+    await post({});
+    expect(trackServerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "payment.refunded",
+        distinctId: "cust_1",
+        groups: { depot: "brisbane-cbd" },
       }),
     );
   });

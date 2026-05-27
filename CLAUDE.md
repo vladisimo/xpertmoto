@@ -29,7 +29,7 @@ SMS, BullMQ jobs, and CI are wired up; per-router unit-test coverage is the
 biggest remaining gap.
 
 The actual codebase has expanded well beyond the original spec — 117 Prisma
-models, 44 tRPC routers, 88 service modules, 27 React Email templates. See
+models, 44 tRPC routers, ~90 service modules, 27 React Email templates. See
 the `project_codebase_scope` memory for context.
 
 **Locale:** en-AU. **Currency:** AUD (GST-inclusive at 10%, divide-by-11).
@@ -163,7 +163,7 @@ session should never miss.
 
 ```
 scootering/
-├── prisma/                  # Schema (117 models), 62 migrations, seed
+├── prisma/                  # Schema (117 models), 68 migrations, seed
 ├── src/
 │   ├── app/                 # Next.js App Router (route groups by audience)
 │   │   ├── (public)/        # Marketing + booking wizard
@@ -175,7 +175,7 @@ scootering/
 │   │   └── api/             # tRPC, webhooks (stripe/twilio), cron, health
 │   ├── server/
 │   │   ├── trpc/router/     # 44 tRPC routers — see src/server/trpc/CLAUDE.md
-│   │   ├── services/        # 88 business-logic modules
+│   │   ├── services/        # ~90 business-logic modules
 │   │   └── jobs/            # BullMQ workers (Australia/Brisbane TZ — gotcha)
 │   ├── lib/                 # Auth, branding, money, logger — see src/lib/CLAUDE.md
 │   ├── components/

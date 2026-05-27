@@ -18,6 +18,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "@/lib/redis";
+import { scrubSentryEvent } from "@/lib/observability/sentry-scrub";
 import { logger } from "@/lib/logger";
 import { shutdownQueues } from "./queue";
 
@@ -43,6 +44,7 @@ import { startVisitorSessionCleanupScheduler } from "./visitor-session-cleanup";
 import { startAnalyticsAlertScheduler } from "@/server/services/analytics-alert";
 import { startAnalyticsDigestScheduler } from "@/server/services/analytics-digest";
 import { startRevenueReconcileScheduler } from "./revenue-reconcile";
+import { startRewardsRecomputeScheduler } from "./rewards-recompute";
 import { startStaffTaskAutoAbandonScheduler } from "./staff-task-auto-abandon";
 import { startCartRecoveryScheduler } from "./cart-recovery";
 import { startPrePickupUpsellScheduler } from "./pre-pickup-upsell";
@@ -74,6 +76,7 @@ if (process.env.SENTRY_DSN) {
     tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
     enabled: process.env.NODE_ENV !== "test",
     serverName: "xpertmoto-worker",
+    beforeSend: scrubSentryEvent,
   });
 }
 
@@ -106,6 +109,7 @@ async function main() {
   startAnalyticsAlertScheduler();
   startAnalyticsDigestScheduler();
   startRevenueReconcileScheduler();
+  startRewardsRecomputeScheduler();
   startStaffTaskAutoAbandonScheduler();
   // Revenue-lever schedulers
   startCartRecoveryScheduler();

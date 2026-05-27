@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
 
@@ -19,7 +19,7 @@ import {
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell, PageSection } from "@/components/layout/page-section";
 import { LoadingBlock } from "@/components/ui/spinner";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { SwapVehiclePicker } from "@/components/staff/swap-vehicle-picker";
 import {
   DamageMapCanvas,
   normalizeMarkers,
@@ -29,6 +29,24 @@ import { SignaturePad } from "@/components/agreement/signature-pad";
 import { cn } from "@/lib/utils";
 
 type Step = "reason" | "outgoing" | "select" | "incoming" | "review";
+
+/**
+ * The slice of wizard state persisted to `BookingSwap.draftState` so an
+ * abandoned-then-reopened draft resumes exactly where it was left. Reason
+ * fields live on the row itself (editable via saveDraftProgress), so they're
+ * not duplicated here.
+ */
+type PersistedDraftState = {
+  step: Step;
+  outgoing: InspectionDraft;
+  incoming: InspectionDraft;
+  incomingVehicleId: string;
+  includeCrossCategory: boolean;
+  customerSignatureUrl: string | null;
+  staffSignatureUrl: string | null;
+  incidentSeverity: "MINOR" | "MODERATE" | "MAJOR" | "TOTAL_LOSS";
+  workOrderPriority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+};
 
 type InspectionDraft = {
   odometerKm: string;
@@ -129,6 +147,8 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
   const router = useRouter();
 
   const { data: booking } = trpc.staffBooking.detail.useQuery({ id });
+  // Resume an in-progress draft if one exists for this booking.
+  const draftQuery = trpc.bookingSwap.activeDraft.useQuery({ bookingId: id });
 
   const [step, setStep] = useState<Step>("reason");
   const [swapId, setSwapId] = useState<string | null>(null);
@@ -165,11 +185,15 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
 
   const start = trpc.bookingSwap.startSwapDraft.useMutation();
   const voidDraft = trpc.bookingSwap.voidSwapDraft.useMutation();
+  const saveProgress = trpc.bookingSwap.saveDraftProgress.useMutation();
   const confirm = trpc.bookingSwap.confirmSwap.useMutation();
 
+  // Candidates load on the "select" step, and also whenever a vehicle is
+  // already chosen — so resuming a draft straight onto the incoming/review
+  // steps can still resolve `selectedCandidate`.
   const candidates = trpc.bookingSwap.listCandidates.useQuery(
     { bookingId: id, includeCrossCategory: isFaultReason || includeCrossCategory },
-    { enabled: step === "select" && Boolean(booking?.vehicle) },
+    { enabled: (step === "select" || Boolean(incomingVehicleId)) && Boolean(booking?.vehicle) },
   );
 
   const selectedCandidate = useMemo(
@@ -186,7 +210,74 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
     { enabled: Boolean(selectedCandidate && reason) },
   );
 
-  if (!booking) {
+  // Rehydrate from an existing DRAFT exactly once, before the form is shown.
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (hydratedRef.current || !draftQuery.isFetched) return;
+    const d = draftQuery.data;
+    if (d) {
+      setSwapId(d.id);
+      setReason(d.reason);
+      setOrigin(d.origin);
+      setReasonNotes(d.reasonNotes);
+      setOriginDetails(d.originDetails ?? "");
+      const s = d.draftState as unknown as PersistedDraftState | null;
+      if (s) {
+        setStep(s.step ?? "outgoing");
+        setOutgoing(s.outgoing ?? emptyInspection());
+        setIncoming(s.incoming ?? emptyInspection());
+        setIncomingVehicleId(s.incomingVehicleId ?? "");
+        setIncludeCrossCategory(s.includeCrossCategory ?? false);
+        setCustomerSignatureUrl(s.customerSignatureUrl ?? null);
+        setStaffSignatureUrl(s.staffSignatureUrl ?? null);
+        setIncidentSeverity(s.incidentSeverity ?? "MODERATE");
+        setWorkOrderPriority(s.workOrderPriority ?? "HIGH");
+      } else {
+        // Legacy draft from before draftState existed — its reason is saved,
+        // so resume past the reason step onto the outgoing inspection.
+        setStep("outgoing");
+      }
+    }
+    hydratedRef.current = true;
+  }, [draftQuery.isFetched, draftQuery.data]);
+
+  // Debounced autosave of wizard progress so closing the tab mid-swap doesn't
+  // lose the work. Only runs once a draft exists and hydration has settled.
+  useEffect(() => {
+    if (!swapId || !hydratedRef.current) return;
+    const handle = setTimeout(() => {
+      saveProgress.mutate({
+        swapId,
+        draftState: {
+          step,
+          outgoing,
+          incoming,
+          incomingVehicleId,
+          includeCrossCategory,
+          customerSignatureUrl,
+          staffSignatureUrl,
+          incidentSeverity,
+          workOrderPriority,
+        },
+      });
+    }, 600);
+    return () => clearTimeout(handle);
+    // saveProgress.mutate is referentially stable (TanStack Query v5).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    swapId,
+    step,
+    outgoing,
+    incoming,
+    incomingVehicleId,
+    includeCrossCategory,
+    customerSignatureUrl,
+    staffSignatureUrl,
+    incidentSeverity,
+    workOrderPriority,
+  ]);
+
+  if (!booking || !draftQuery.isFetched) {
     return (
       <PageShell>
         <LoadingBlock padded="lg" />
@@ -219,14 +310,26 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
     }
     setErr(null);
     try {
-      const draft = await start.mutateAsync({
-        bookingId: id,
-        reason,
-        origin,
-        reasonNotes: reasonNotes.trim(),
-        originDetails: originDetails.trim() || undefined,
-      });
-      setSwapId(draft.id);
+      if (swapId) {
+        // Resuming an existing draft — persist any edits to the reason fields
+        // rather than opening a second draft (which the soft-lock would reject).
+        await saveProgress.mutateAsync({
+          swapId,
+          reason,
+          origin,
+          reasonNotes: reasonNotes.trim(),
+          originDetails: originDetails.trim() || null,
+        });
+      } else {
+        const draft = await start.mutateAsync({
+          bookingId: id,
+          reason,
+          origin,
+          reasonNotes: reasonNotes.trim(),
+          originDetails: originDetails.trim() || undefined,
+        });
+        setSwapId(draft.id);
+      }
       setStep("outgoing");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to start swap draft.");
@@ -356,8 +459,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
 
             <StepFooter
               onNext={handleStartDraft}
-              nextDisabled={!reason || !origin || !reasonNotes.trim() || start.isPending}
-              nextLabel={start.isPending ? "Starting…" : "Continue"}
+              nextDisabled={!reason || !origin || !reasonNotes.trim()}
+              loading={start.isPending || saveProgress.isPending}
+              nextLabel={start.isPending || saveProgress.isPending ? "Saving…" : "Continue"}
             />
           </div>
         </PageSection>
@@ -391,63 +495,22 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
           }
         >
           <div className="space-y-4">
-            {!isFaultReason && reason !== "LATERAL" && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  id="cross-cat"
-                  type="checkbox"
-                  checked={includeCrossCategory}
-                  onChange={(e) => setIncludeCrossCategory(e.target.checked)}
-                />
-                <label htmlFor="cross-cat">Include other categories</label>
-              </div>
-            )}
-            {candidates.isLoading && <LoadingBlock padded="md" />}
-            {candidates.data?.eligible && candidates.data.vehicles.length === 0 && (
+            {candidates.data && !candidates.data.eligible && (
               <p className="text-sm text-muted-foreground">
-                No candidate vehicles found for the remaining rental window.
+                This booking is no longer eligible for a swap.
               </p>
             )}
-            {candidates.data?.eligible && candidates.data.vehicles.length > 0 && (
-              <div className="space-y-2">
-                {candidates.data.vehicles
-                  .filter((v) => v.free)
-                  .map((v) => {
-                    const differentCategory = v.categoryId !== currentCategoryId;
-                    return (
-                      <button
-                        key={v.id}
-                        type="button"
-                        onClick={() => setIncomingVehicleId(v.id)}
-                        className={cn(
-                          "w-full rounded-md border px-4 py-3 text-left text-sm transition",
-                          incomingVehicleId === v.id
-                            ? "border-primary bg-primary/5"
-                            : "border-border hover:border-foreground/40",
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="font-medium">
-                            {v.internalCode} · {v.rego}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <StatusBadge status={v.condition} />
-                            {differentCategory && (
-                              <span className="text-xs text-muted-foreground">
-                                {v.categoryName}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {v.currentOdometerKm.toLocaleString()} km
-                          {v.docsExpiringDuringRental.length > 0 &&
-                            ` · ⚠️ ${v.docsExpiringDuringRental.join(", ")} expires during rental`}
-                        </div>
-                      </button>
-                    );
-                  })}
-              </div>
+            {(candidates.isLoading || candidates.data?.eligible) && (
+              <SwapVehiclePicker
+                vehicles={candidates.data?.eligible ? candidates.data.vehicles : []}
+                currentCategoryId={currentCategoryId}
+                selectedId={incomingVehicleId}
+                onSelect={setIncomingVehicleId}
+                includeCrossCategory={includeCrossCategory}
+                onIncludeCrossCategoryChange={setIncludeCrossCategory}
+                showCrossCategoryToggle={!isFaultReason && reason !== "LATERAL"}
+                isLoading={candidates.isLoading}
+              />
             )}
 
             {selectedCandidate && deltaQuote.data && (
@@ -587,7 +650,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
               <div className="space-y-2">
                 <Label>Customer signature</Label>
                 <SignaturePad
+                  autoCapture
                   onAccept={setCustomerSignatureUrl}
+                  onClear={() => setCustomerSignatureUrl(null)}
                   existingUrl={customerSignatureUrl}
                   label="Sign here — customer"
                 />
@@ -595,7 +660,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
               <div className="space-y-2">
                 <Label>Staff signature</Label>
                 <SignaturePad
+                  autoCapture
                   onAccept={setStaffSignatureUrl}
+                  onClear={() => setStaffSignatureUrl(null)}
                   existingUrl={staffSignatureUrl}
                   label="Sign here — staff"
                 />
@@ -605,7 +672,7 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
             <StepFooter
               onBack={() => setStep("incoming")}
               onNext={handleConfirm}
-              nextDisabled={confirm.isPending}
+              loading={confirm.isPending}
               nextLabel={
                 confirm.isPending ? "Committing…" : <>
                   <CheckCircle2 className="mr-1.5 h-4 w-4" aria-hidden />
@@ -662,11 +729,13 @@ function StepFooter({
   onNext,
   nextDisabled,
   nextLabel,
+  loading,
 }: {
   onBack?: () => void;
   onNext: () => void;
   nextDisabled?: boolean;
   nextLabel?: React.ReactNode;
+  loading?: boolean;
 }) {
   return (
     <div className="mt-6 flex items-center justify-between">
@@ -678,8 +747,8 @@ function StepFooter({
       ) : (
         <span />
       )}
-      <Button size="sm" onClick={onNext} disabled={nextDisabled}>
-        {nextDisabled && typeof nextLabel !== "string" ? (
+      <Button size="sm" onClick={onNext} disabled={nextDisabled || loading}>
+        {loading ? (
           <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
         ) : null}
         {nextLabel ?? (

@@ -56,8 +56,8 @@ export function VehiclePhotos({ vehicleId }: { vehicleId: string }) {
       fd.append("file", file);
       const res = await fetch("/api/upload/vehicle-image", { method: "POST", body: fd });
       if (!res.ok) throw new Error((await res.json()).error ?? "Upload failed");
-      const { url } = (await res.json()) as { url: string };
-      await addImage.mutateAsync({ vehicleId, url });
+      const { url, checksum } = (await res.json()) as { url: string; checksum?: string };
+      await addImage.mutateAsync({ vehicleId, url, checksum });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Upload failed");
     } finally {
@@ -142,7 +142,7 @@ function SortableImage({
   return (
     <div ref={setNodeRef} style={style} className="relative group border rounded overflow-hidden">
       <div className="relative aspect-video bg-muted">
-        <Image src={img.url} alt={img.caption ?? "Vehicle photo"} fill className="object-cover" sizes="(max-width: 768px) 50vw, 25vw" />
+        <Image src={img.url} alt={img.caption ?? "Vehicle photo"} fill className="object-contain" sizes="(max-width: 768px) 50vw, 25vw" />
       </div>
       {isFirst && (
         <span className="absolute top-1 left-1 bg-primary text-primary-foreground text-xs px-2 py-0.5 rounded">Primary</span>

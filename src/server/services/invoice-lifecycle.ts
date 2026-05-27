@@ -99,6 +99,156 @@ export async function tryIssueAdjustmentForBooking(args: {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Cancellation / no-show "supply not provided" credit
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Size + build the line items for a DECREASE adjustment that credits a
+ * rental invoice down to the consideration the business actually retained
+ * for a supply that was never provided. Shared by the cancellation service,
+ * the no-show detector, and the historical backfill so all three issue
+ * identically-sized notes.
+ *
+ * The decrease is the change in consideration, NOT the cash refunded:
+ *
+ *   considerationDecrease = invoiceTotal − retained
+ *
+ * where `retained` is the cash kept as consideration on the invoice:
+ *   - Cancellation  → amountPaid − refundAmount (the admin/cancellation fee;
+ *                     the full deposit in the no-refund window).
+ *   - No-show       → 0 (rental credited to $0; the punitive no-show fee /
+ *                     bond forfeiture stands as its own separate charge).
+ *
+ * The decrease splits naturally into the cash returned to the customer and
+ * the never-collected balance written off, rendered as two PDF lines.
+ *
+ * Returns null when there is nothing to credit (decrease ≤ 1c) — eg a
+ * fully-paid booking under a punitive zero-refund policy.
+ */
+export function buildSupplyNotProvidedDecrease(args: {
+  invoiceTotal: number;
+  retained: number;
+  /** Cash refunded to the customer — drives the line-item split only. */
+  refundAmount: number;
+  /** Free-text "why" rendered on the write-off line (eg the cancel reason). */
+  detail?: string;
+}): { lineItems: AdjustmentNoteLineItem[]; total: number } | null {
+  const invoiceTotal = roundCents(args.invoiceTotal);
+  // Clamp retained into [0, invoiceTotal] so the credit can never exceed the
+  // invoice or go negative.
+  const retainedRaw = roundCents(Math.max(0, args.retained));
+  const retained = retainedRaw.greaterThan(invoiceTotal) ? invoiceTotal : retainedRaw;
+  const decrease = roundCents(invoiceTotal.minus(retained));
+  if (decrease.lessThanOrEqualTo(0.01)) return null;
+
+  // Clamp the refund slice to the decrease so the two lines always sum to
+  // exactly `decrease`, even if the refund somehow exceeds the credit.
+  const refundRaw = roundCents(Math.max(0, args.refundAmount));
+  const refundSlice = refundRaw.greaterThan(decrease) ? decrease : refundRaw;
+  const writeOffSlice = roundCents(decrease.minus(refundSlice));
+
+  const lineItems: AdjustmentNoteLineItem[] = [];
+  if (writeOffSlice.greaterThan(0)) {
+    lineItems.push({
+      description: "Cancellation — rental not provided",
+      detail: args.detail,
+      quantity: 1,
+      unitPrice: writeOffSlice.toNumber(),
+      totalPrice: writeOffSlice.toNumber(),
+      gstIncluded: true,
+    });
+  }
+  if (refundSlice.greaterThan(0)) {
+    lineItems.push({
+      description: "Refund issued",
+      quantity: 1,
+      unitPrice: refundSlice.toNumber(),
+      totalPrice: refundSlice.toNumber(),
+      gstIncluded: true,
+    });
+  }
+  return { lineItems, total: decrease.toNumber() };
+}
+
+/**
+ * Best-effort issuance of the cancellation/no-show DECREASE against a
+ * booking's live invoice. Resolves the active invoice (skips + logs if the
+ * booking pre-dates auto-issuance — the sweep/backfill retries), guards
+ * against double-issuance, sizes the note via
+ * `buildSupplyNotProvidedDecrease`, then delegates to `issueAdjustmentNote`.
+ *
+ * Non-blocking: any failure is swallowed + logged so the caller's status
+ * transition doesn't roll back.
+ */
+export async function tryIssueCancellationAdjustment(args: {
+  bookingId: string;
+  /** Consideration retained on the invoice. Cancellation: amountPaid − refundAmount. No-show: 0. */
+  retained: number;
+  /** Cash refunded to the customer (line-item split only). */
+  refundAmount: number;
+  detail?: string;
+  description?: string;
+  paymentId?: string | null;
+  issuedById?: string | null;
+}): Promise<void> {
+  try {
+    const invoice = await prisma.invoice.findFirst({
+      where: { bookingId: args.bookingId, deletedAt: null, status: { not: "VOID" } },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, totalAmount: true },
+    });
+    if (!invoice) {
+      logger.info(
+        { bookingId: args.bookingId },
+        "tryIssueCancellationAdjustment: no active invoice — skipping (sweep/backfill will retry)",
+      );
+      return;
+    }
+    // Idempotency: at most one live CANCELLATION credit per invoice. The
+    // `paymentId` @unique constraint doesn't cover the no-refund case (no
+    // payment is linked), so guard explicitly on reason.
+    const existing = await prisma.adjustmentNote.findFirst({
+      where: { invoiceId: invoice.id, reason: "CANCELLATION", status: { not: "VOID" } },
+      select: { id: true },
+    });
+    if (existing) {
+      logger.info(
+        { bookingId: args.bookingId, adjustmentNoteId: existing.id },
+        "tryIssueCancellationAdjustment: cancellation credit already issued — skipping",
+      );
+      return;
+    }
+    const built = buildSupplyNotProvidedDecrease({
+      invoiceTotal: Number(invoice.totalAmount),
+      retained: args.retained,
+      refundAmount: args.refundAmount,
+      detail: args.detail,
+    });
+    if (!built) {
+      logger.info(
+        { bookingId: args.bookingId },
+        "tryIssueCancellationAdjustment: nothing to credit (decrease ≤ 1c) — skipping",
+      );
+      return;
+    }
+    await issueAdjustmentNote({
+      invoiceId: invoice.id,
+      type: "DECREASE",
+      reason: "CANCELLATION",
+      description: args.description ?? "Cancellation credit — rental not provided",
+      lineItems: built.lineItems,
+      paymentId: args.paymentId ?? null,
+      issuedById: args.issuedById,
+    });
+  } catch (err) {
+    logger.warn(
+      { err, bookingId: args.bookingId },
+      "tryIssueCancellationAdjustment: failed; non-blocking",
+    );
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Tax invoice on booking confirmation
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -262,6 +412,12 @@ interface IssueAdjustmentNoteArgs {
   paymentId?: string | null;
   issuedById?: string | null;
   issuedAt?: Date;
+  /**
+   * Suppress the courtesy customer email. The DB row + PDF are still the
+   * source of truth; used by backfills so a historical correction doesn't
+   * spam customers about long-settled bookings.
+   */
+  skipCustomerEmail?: boolean;
 }
 
 export async function issueAdjustmentNote(args: IssueAdjustmentNoteArgs) {
@@ -332,7 +488,7 @@ export async function issueAdjustmentNote(args: IssueAdjustmentNoteArgs) {
   // — the PDF row is the source of truth, the email is a courtesy copy.
   // Skipped when the note isn't linked to a customer (e.g. anonymous /
   // partner-attributed legacy rows).
-  if (invoice.customerId && invoice.bookingId) {
+  if (invoice.customerId && invoice.bookingId && !args.skipCustomerEmail) {
     try {
       await emailAdjustmentNoteToCustomer(note.id);
     } catch (err) {

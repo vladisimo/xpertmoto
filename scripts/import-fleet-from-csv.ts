@@ -564,7 +564,7 @@ async function main() {
     }
     try {
       const body = await readFile(file);
-      const { url } = await uploadFile({
+      const { url, checksum } = await uploadFile({
         folder: `vehicles/${v.internalCode}`,
         filename: path.basename(file),
         contentType: contentTypeFor(file),
@@ -574,6 +574,7 @@ async function main() {
         data: {
           vehicleId: v.id,
           url,
+          checksum,
           isPrimary: true,
           displayOrder: 0,
         },

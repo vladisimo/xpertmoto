@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
+// recordBookingCompletion now delegates the customer-profile counters to the
+// rewards recompute (net-collected spend / points / tier). Stub it so this
+// stays a pure unit test of the DailyRevenue side.
+const recomputeCustomerRewardsMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/customer-rewards", () => ({
+  recomputeCustomerRewards: (...a: unknown[]) => recomputeCustomerRewardsMock(...a),
+}));
+
 import {
   applyRevenueDelta,
   recordBookingCompletion,
@@ -59,8 +67,9 @@ describe("applyRevenueDelta", () => {
 });
 
 describe("recordBookingCompletion", () => {
-  it("upserts DailyRevenue and bumps CustomerProfile counters", async () => {
-    const { tx, dailyRevenueUpsert, customerProfileUpdateMany } = makeTx();
+  it("upserts DailyRevenue and recomputes the customer's rewards", async () => {
+    recomputeCustomerRewardsMock.mockClear();
+    const { tx, dailyRevenueUpsert } = makeTx();
     const when = new Date(Date.UTC(2026, 3, 18, 10));
     await recordBookingCompletion(tx, {
       id: "b-1",
@@ -81,13 +90,9 @@ describe("recordBookingCompletion", () => {
     expect(rev.update.totalRevenue.increment.toString()).toBe("135");
     expect(rev.update.netRevenue.increment.toString()).toBe("135");
 
-    expect(customerProfileUpdateMany).toHaveBeenCalledTimes(1);
-    const cust = firstUpdateManyCall(customerProfileUpdateMany);
-    expect(cust.where.userId).toBe("user-1");
-    expect(cust.data.totalBookings.increment).toBe(1);
-    expect(cust.data.completedBookings.increment).toBe(1);
-    expect(cust.data.totalSpend.increment.toString()).toBe("135");
-    expect(cust.data.lastBookingAt).toBe(when);
+    // Spend / bookings / points / tier are recomputed from source ledgers.
+    expect(recomputeCustomerRewardsMock).toHaveBeenCalledTimes(1);
+    expect(recomputeCustomerRewardsMock).toHaveBeenCalledWith(tx, "user-1");
   });
 
   it("falls back to now when actualReturnDateTime is null", async () => {

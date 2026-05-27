@@ -6,7 +6,7 @@ For a step-by-step walkthrough of a schema change, run the `prisma-migration` sk
 
 ## Scope vs spec
 
-The original CLAUDE.md spec listed ~60 entities. The actual schema has **117 models** across 62 migrations (May 2026). Scope additions include gift cards, referrals, eToLL integration, telematics revenue, subscriptions, loyalty, partner programs, support-AI tickets, yield pricing. Treat the entity lists in any historical spec doc as a starting point, not the inventory — `prisma/schema.prisma` is the source of truth.
+The original CLAUDE.md spec listed ~60 entities. The actual schema has **117 models** across 68 migrations (May 2026). Scope additions include gift cards, referrals, eToLL integration, telematics revenue, subscriptions, loyalty, partner programs, support-AI tickets, yield pricing. Treat the entity lists in any historical spec doc as a starting point, not the inventory — `prisma/schema.prisma` is the source of truth.
 
 ## Schema-edit discipline (enforced)
 

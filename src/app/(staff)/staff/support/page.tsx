@@ -9,6 +9,7 @@ import { PageSection, PageShell } from "@/components/layout/page-section";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Lightbulb, Ticket } from "lucide-react";
 import { SupportStats } from "@/components/staff/support-stats";
 import { AdminSupportStats } from "@/components/admin/admin-support-stats";
 import { formatDistanceToNow } from "date-fns";
@@ -70,8 +71,14 @@ export default function StaffSupportInbox() {
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
         <TabsList>
-          <TabsTrigger value="tickets">Tickets</TabsTrigger>
-          <TabsTrigger value="insights">Insights</TabsTrigger>
+          <TabsTrigger value="tickets" className="gap-1.5">
+            <Ticket className="h-3.5 w-3.5" aria-hidden />
+            Tickets
+          </TabsTrigger>
+          <TabsTrigger value="insights" className="gap-1.5">
+            <Lightbulb className="h-3.5 w-3.5" aria-hidden />
+            Insights
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="tickets" className="mt-6 space-y-6 data-[state=inactive]:hidden" forceMount>

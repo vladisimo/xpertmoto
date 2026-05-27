@@ -49,5 +49,5 @@ async function handlePost(req: Request) {
     body,
   });
 
-  return NextResponse.json({ url: result.url, key: result.key });
+  return NextResponse.json({ url: result.url, key: result.key, checksum: result.checksum });
 }

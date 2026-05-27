@@ -16,6 +16,7 @@ const invoiceUpdate = vi.fn();
 const adjustmentNoteCreate = vi.fn();
 const adjustmentNoteUpdate = vi.fn();
 const adjustmentNoteFindUnique = vi.fn();
+const adjustmentNoteFindFirst = vi.fn();
 const bookingFindUnique = vi.fn();
 const paymentFindUnique = vi.fn();
 const paymentUpdate = vi.fn();
@@ -40,6 +41,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     adjustmentNote: {
       findUnique: (...args: unknown[]) => adjustmentNoteFindUnique(...args),
+      findFirst: (...args: unknown[]) => adjustmentNoteFindFirst(...args),
       update: (...args: unknown[]) => adjustmentNoteUpdate(...args),
     },
     booking: {
@@ -89,6 +91,7 @@ beforeEach(() => {
   adjustmentNoteCreate.mockReset();
   adjustmentNoteUpdate.mockReset().mockResolvedValue({});
   adjustmentNoteFindUnique.mockReset();
+  adjustmentNoteFindFirst.mockReset().mockResolvedValue(null);
   bookingFindUnique.mockReset();
   paymentFindUnique.mockReset();
   paymentUpdate.mockReset().mockResolvedValue({});
@@ -441,5 +444,120 @@ describe("tryIssueAdjustmentForBooking", () => {
         ],
       }),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("buildSupplyNotProvidedDecrease", () => {
+  // The credit is sized to the change in *consideration* (invoiceTotal −
+  // retained), not the cash refunded. It splits into a never-collected
+  // write-off line and a refund line that sum to the decrease.
+  let build: typeof import("@/server/services/invoice-lifecycle").buildSupplyNotProvidedDecrease;
+  beforeEach(async () => {
+    ({ buildSupplyNotProvidedDecrease: build } = await import(
+      "@/server/services/invoice-lifecycle"
+    ));
+  });
+
+  it("deposit booking: credits down to the retained fee, splitting write-off + refund", () => {
+    // Worked example INV-2026-000016: $345 invoice, $172.50 deposit, $147.50
+    // refunded → retained $25. Decrease must be $320 (not the $147.50 refund).
+    const out = build({ invoiceTotal: 345, retained: 25, refundAmount: 147.5 });
+    expect(out).not.toBeNull();
+    expect(out!.total).toBeCloseTo(320, 2);
+    // Two lines summing to 320: write-off of the never-collected balance + refund.
+    expect(out!.lineItems).toHaveLength(2);
+    const sum = out!.lineItems.reduce((a, l) => a + l.totalPrice, 0);
+    expect(sum).toBeCloseTo(320, 2);
+    const refundLine = out!.lineItems.find((l) => l.description === "Refund issued");
+    const writeOff = out!.lineItems.find((l) => l.description.startsWith("Cancellation"));
+    expect(refundLine!.totalPrice).toBeCloseTo(147.5, 2);
+    expect(writeOff!.totalPrice).toBeCloseTo(172.5, 2);
+  });
+
+  it("no-refund window: single write-off line down to the retained deposit", () => {
+    const out = build({ invoiceTotal: 345, retained: 172.5, refundAmount: 0 });
+    expect(out!.total).toBeCloseTo(172.5, 2);
+    expect(out!.lineItems).toHaveLength(1);
+    expect(out!.lineItems[0]!.description).toMatch(/Cancellation/);
+  });
+
+  it("fully-paid booking: equals today's refund-sized note (no write-off)", () => {
+    // amountPaid == invoiceTotal → retained = total − refund → decrease = refund.
+    const out = build({ invoiceTotal: 345, retained: 197.5, refundAmount: 147.5 });
+    expect(out!.total).toBeCloseTo(147.5, 2);
+    expect(out!.lineItems).toHaveLength(1);
+    expect(out!.lineItems[0]!.description).toBe("Refund issued");
+  });
+
+  it("no-show: credits the whole rental to $0", () => {
+    const out = build({ invoiceTotal: 345, retained: 0, refundAmount: 0 });
+    expect(out!.total).toBeCloseTo(345, 2);
+    expect(out!.lineItems).toHaveLength(1);
+    expect(out!.lineItems[0]!.totalPrice).toBeCloseTo(345, 2);
+  });
+
+  it("returns null when there is nothing to credit (decrease ≤ 1c)", () => {
+    expect(build({ invoiceTotal: 345, retained: 345, refundAmount: 0 })).toBeNull();
+  });
+
+  it("clamps retained into [0, invoiceTotal] so the credit never exceeds the invoice", () => {
+    expect(build({ invoiceTotal: 100, retained: 250, refundAmount: 0 })).toBeNull();
+    const out = build({ invoiceTotal: 100, retained: -50, refundAmount: 0 });
+    expect(out!.total).toBeCloseTo(100, 2);
+  });
+});
+
+describe("tryIssueCancellationAdjustment", () => {
+  it("skips when the booking has no live invoice", async () => {
+    invoiceFindFirst.mockResolvedValue(null);
+    const { tryIssueCancellationAdjustment } = await import(
+      "@/server/services/invoice-lifecycle"
+    );
+    await tryIssueCancellationAdjustment({ bookingId: "b1", retained: 25, refundAmount: 110 });
+    expect(adjustmentNoteCreate).not.toHaveBeenCalled();
+  });
+
+  it("skips when a live CANCELLATION credit already exists (idempotent)", async () => {
+    invoiceFindFirst.mockResolvedValue({ id: "inv_1", totalAmount: 345 });
+    adjustmentNoteFindFirst.mockResolvedValue({ id: "adj_existing" });
+    const { tryIssueCancellationAdjustment } = await import(
+      "@/server/services/invoice-lifecycle"
+    );
+    await tryIssueCancellationAdjustment({ bookingId: "b1", retained: 25, refundAmount: 110 });
+    expect(adjustmentNoteCreate).not.toHaveBeenCalled();
+  });
+
+  it("issues a DECREASE sized to the consideration change", async () => {
+    invoiceFindFirst.mockResolvedValue({ id: "inv_1", totalAmount: 345 });
+    adjustmentNoteFindFirst.mockResolvedValue(null);
+    // issueAdjustmentNote's void check + render lookup. customerId null skips
+    // the courtesy email; the render lookup throws and is swallowed.
+    invoiceFindUnique.mockResolvedValue({
+      id: "inv_1",
+      bookingId: "b1",
+      customerId: null,
+      status: "SENT",
+    });
+    adjustmentNoteCreate.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "adj_new",
+      ...data,
+    }));
+    adjustmentNoteFindUnique.mockResolvedValue(null);
+
+    const { tryIssueCancellationAdjustment } = await import(
+      "@/server/services/invoice-lifecycle"
+    );
+    await tryIssueCancellationAdjustment({
+      bookingId: "b1",
+      retained: 25,
+      refundAmount: 147.5,
+      detail: "Change of plans",
+    });
+
+    expect(adjustmentNoteCreate).toHaveBeenCalledTimes(1);
+    const arg = adjustmentNoteCreate.mock.calls[0]![0] as { data: Record<string, unknown> };
+    expect(arg.data.type).toBe("DECREASE");
+    expect(arg.data.reason).toBe("CANCELLATION");
+    expect(Number(arg.data.totalAmount)).toBeCloseTo(320, 2);
   });
 });

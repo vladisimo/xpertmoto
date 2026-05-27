@@ -30,6 +30,8 @@ const scriptSrc = [
   "'unsafe-inline'",
   isDev ? "'unsafe-eval'" : null,
   "https://js.stripe.com",
+  // PostHog snippet loads array.js from <region>-assets.i.posthog.com.
+  "https://*.i.posthog.com",
 ]
   .filter(Boolean)
   .join(" ");
@@ -57,12 +59,15 @@ const cspDirectives = [
   "style-src 'self' 'unsafe-inline'",
   `img-src ${imgSrc}`,
   "font-src 'self' data:",
-  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io${
+  // *.i.posthog.com covers both event ingestion (us.i.posthog.com) and the
+  // static asset host (us-assets.i.posthog.com), plus the EU region.
+  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io https://*.i.posthog.com${
     process.env.NEXT_PUBLIC_MAP_STYLE_URL
       ? ""
       : " https://demotiles.maplibre.org"
   }`,
-  "frame-src https://js.stripe.com https://hooks.stripe.com",
+  // www.google.com hosts the Google Maps embed iframes (public depot map).
+  "frame-src https://js.stripe.com https://hooks.stripe.com https://www.google.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -81,6 +86,10 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  // Lets the e2e dev server (NEXT_DIST_DIR=.next-e2e) run from its own build
+  // dir, coexisting with a normal `next dev` on the dev DB (Next refuses two
+  // dev servers sharing one build dir).
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   reactStrictMode: true,
   poweredByHeader: false,
   devIndicators: false,
@@ -156,11 +165,15 @@ const sentryBuildOptions = {
   org: process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
   authToken: process.env.SENTRY_AUTH_TOKEN,
-  disableLogger: true,
   hideSourceMaps: true,
   widenClientFileUpload: true,
-  reactComponentAnnotation: { enabled: false },
   tunnelRoute: "/monitoring",
+  webpack: {
+    // disableLogger → webpack.treeshake.removeDebugLogging (Sentry SDK move)
+    treeshake: { removeDebugLogging: true },
+    // reactComponentAnnotation → webpack.reactComponentAnnotation
+    reactComponentAnnotation: { enabled: false },
+  },
 };
 
 export default process.env.SENTRY_DSN

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Prisma } from "@prisma/client";
+import { Prisma, type PaymentType } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { createTRPCRouter, adminProcedure, managerProcedure, superAdminProcedure } from "../trpc";
@@ -13,9 +13,19 @@ import {
   readCapturedCustomerId,
 } from "@/server/services/audit";
 import { geocodeAddress } from "@/lib/geo";
+import { trackServerGroupIdentify } from "@/lib/analytics";
 import { revalidateTag } from "next/cache";
 import { invalidateTag } from "@/lib/cache";
 import { CACHE_TAGS } from "@/lib/cache-tags";
+import { paymentNetWeight, signedPaymentAmount } from "@/lib/payment-labels";
+import { roundCents } from "@/lib/money";
+import { reconcilePayments } from "@/server/services/finance-reconciliation";
+import { computeGstSummary } from "@/server/services/gst-bas-export";
+import { runStripeReconcile } from "@/server/jobs/stripe-reconcile";
+import {
+  netCashByBooking,
+  reconcileInvoice,
+} from "@/lib/finance/invoice-reconciliation";
 
 const BRANDING_SETTING_KEYS = new Set([
   "org.tradingName",
@@ -29,15 +39,7 @@ const BRANDING_SETTING_KEYS = new Set([
   "org.logoSquareUrl",
   "org.faviconUrl",
 ]);
-import {
-  clearValue,
-  getSecret,
-  getString,
-  listConfigSources,
-  setSecret,
-  setString,
-} from "@/lib/integration-config";
-import { findField, flattenFields } from "@/lib/integration-fields";
+import { getSecret, getString } from "@/lib/integration-config";
 import { skipAutoAudit, writeAudit } from "@/server/services/audit";
 import { buildAuditWhere } from "@/server/services/audit-query";
 import {
@@ -72,6 +74,33 @@ function tierScopeWhere(scope: PricingTierScope, scopeId: string) {
   }
 }
 import { reassignFutureBookings } from "@/server/services/fleet-reassign";
+
+/**
+ * Register/update the depot's properties on its PostHog group so events
+ * tagged `$groups: { depot: slug }` can be sliced by depot attributes.
+ * Keyed on the depot slug to match the group key used on every event.
+ * Best-effort — fired on depot create/update only, never per event.
+ */
+async function identifyDepotGroup(depot: {
+  slug: string;
+  name: string;
+  state: string;
+  timezone: string;
+  isActive: boolean;
+  maxCapacity: number;
+}): Promise<void> {
+  await trackServerGroupIdentify({
+    groupType: "depot",
+    groupKey: depot.slug,
+    set: {
+      name: depot.name,
+      state: depot.state,
+      timezone: depot.timezone,
+      isActive: depot.isActive,
+      maxCapacity: depot.maxCapacity,
+    },
+  });
+}
 
 export const adminRouter = createTRPCRouter({
   // ----- KPIs -----
@@ -349,6 +378,11 @@ export const adminRouter = createTRPCRouter({
               position: input.position,
             },
           },
+          // Back-office users also get a CustomerProfile so they can rent
+          // personally. Bare on creation (only userId via the relation) —
+          // onboarding collects consent + licence before they can book, so
+          // we deliberately leave onboardedAt/consent/licence null here.
+          customerProfile: { create: {} },
         },
       });
       captureCustomerId(ctx, user.id);
@@ -550,6 +584,7 @@ export const adminRouter = createTRPCRouter({
         },
       });
       await invalidateTag(CACHE_TAGS.DEPOTS);
+      await identifyDepotGroup(depot);
       return depot;
     }),
 
@@ -591,6 +626,7 @@ export const adminRouter = createTRPCRouter({
       }
       const depot = await ctx.prisma.depot.update({ where: { id }, data });
       await invalidateTag(CACHE_TAGS.DEPOTS);
+      await identifyDepotGroup(depot);
       return depot;
     }),
 
@@ -1150,65 +1186,68 @@ export const adminRouter = createTRPCRouter({
     }),
 
   // ----- Finance (rebuilt) -----
+  //
+  // Overview summary on the SAME payment-weighted, settled-cash basis as the
+  // Transactions / GST / Invoices tabs, so the headline figures reconcile across
+  // the whole Finance section. Two date bases on purpose:
+  //   - cash.*  — payments that MOVED in range, keyed on processedAt (what the
+  //     business actually banked). Refunds subtract, bond authorisations count 0.
+  //   - booking.* — gross pipeline by booking createdAt (commercial value booked).
+  // Outstanding/aging are intentionally all-time AR (a balance owed isn't scoped
+  // to the report window).
   financeSummary: adminProcedure
     .input(z.object({ from: z.coerce.date(), to: z.coerce.date(), depotId: z.string().optional() }))
     .query(async ({ ctx, input }) => {
-      const where = {
+      const bookingWhere = {
         createdAt: { gte: input.from, lte: input.to },
         ...(input.depotId ? { depotId: input.depotId } : {}),
       };
-      const paymentWhere = {
-        createdAt: { gte: input.from, lte: input.to },
-        status: "SUCCEEDED" as const,
+      // Settled-cash statuses: a PARTIALLY_REFUNDED / REFUNDED original still
+      // represents money that settled (the refund is its own REFUND row,
+      // weighted -1). PENDING / FAILED never moved money.
+      const cashPaymentWhere: Prisma.PaymentWhereInput = {
+        status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"] },
+        processedAt: { gte: input.from, lte: input.to },
+        deletedAt: null,
         ...(input.depotId ? { booking: { depotId: input.depotId } } : {}),
       };
+      const invoiceWhere = {
+        createdAt: { gte: input.from, lte: input.to },
+        ...(input.depotId ? { booking: { depotId: input.depotId } } : {}),
+      };
+
       const now = new Date();
       const d30 = new Date(now.getTime() - 30 * 86400000);
       const d60 = new Date(now.getTime() - 60 * 86400000);
       const d90 = new Date(now.getTime() - 90 * 86400000);
-
       const depotClause = input.depotId
         ? Prisma.sql`AND "depotId" = ${input.depotId}`
         : Prisma.empty;
-      const [revenueAgg, byStatus, bookings, refunds, damageCharges, outstanding, paymentByType, agingRows] =
+
+      const [gst, cashGroups, bookingAgg, byStatus, outstanding, agingRows, bondAgg, invoices] =
         await Promise.all([
+          // Authoritative net cash + GST (shared with the GST/BAS tab + export).
+          computeGstSummary({ from: input.from, to: input.to, depotId: input.depotId }),
+          ctx.prisma.payment.groupBy({
+            by: ["type"],
+            where: cashPaymentWhere,
+            _sum: { amount: true },
+          }),
           ctx.prisma.booking.aggregate({
-            where: { ...where, status: { notIn: ["CANCELLED", "NO_SHOW"] } },
-            _sum: { totalAmount: true, gstAmount: true, addonTotal: true, insuranceTotal: true },
+            where: { ...bookingWhere, status: { notIn: ["CANCELLED", "NO_SHOW"] } },
+            _sum: { totalAmount: true, addonTotal: true, insuranceTotal: true },
             _count: true,
             _avg: { totalAmount: true },
           }),
-          ctx.prisma.booking.groupBy({ by: ["status"], where, _count: true, _sum: { totalAmount: true } }),
-          ctx.prisma.booking.findMany({
-            where,
-            select: {
-              id: true,
-              bookingReference: true,
-              totalAmount: true,
-              gstAmount: true,
-              status: true,
-              createdAt: true,
-            },
-            orderBy: { createdAt: "desc" },
-            take: 500,
-          }),
-          ctx.prisma.payment.aggregate({
-            where: { type: "REFUND", createdAt: { gte: input.from, lte: input.to } },
-            _sum: { amount: true },
-          }),
-          ctx.prisma.payment.aggregate({
-            where: { type: "DAMAGE_CHARGE", createdAt: { gte: input.from, lte: input.to } },
-            _sum: { amount: true },
-          }),
+          ctx.prisma.booking.groupBy({ by: ["status"], where: bookingWhere, _count: true, _sum: { totalAmount: true } }),
           ctx.prisma.booking.aggregate({
-            where: { balanceDue: { gt: 0 }, status: { notIn: ["CANCELLED"] } },
+            where: {
+              balanceDue: { gt: 0 },
+              status: { notIn: ["CANCELLED"] },
+              ...(input.depotId ? { depotId: input.depotId } : {}),
+            },
             _sum: { balanceDue: true },
             _count: true,
-          }),
-          ctx.prisma.payment.groupBy({
-            by: ["type"],
-            where: paymentWhere,
-            _sum: { amount: true },
           }),
           ctx.prisma.$queryRaw<
             Array<{ under30: string; under60: string; under90: string; over90: string }>
@@ -1223,39 +1262,190 @@ export const adminRouter = createTRPCRouter({
               AND status NOT IN ('CANCELLED')
               ${depotClause}
           `),
+          ctx.prisma.bondLedger.aggregate({
+            where: {
+              createdAt: { gte: input.from, lte: input.to },
+              ...(input.depotId ? { booking: { depotId: input.depotId } } : {}),
+            },
+            _sum: { heldAmount: true, capturedAmount: true, releasedAmount: true },
+          }),
+          ctx.prisma.invoice.findMany({
+            where: invoiceWhere,
+            select: {
+              bookingId: true,
+              totalAmount: true,
+              booking: { select: { status: true, balanceDue: true } },
+              adjustmentNotes: {
+                where: { status: { not: "VOID" }, deletedAt: null },
+                select: { type: true, totalAmount: true },
+              },
+            },
+          }),
         ]);
 
-      const byPaymentType: Record<string, number> = {};
-      for (const p of paymentByType) byPaymentType[p.type] = Number(p._sum.amount ?? 0);
+      // Cash flow + payment mix — weighted by paymentNetWeight (+1 in, -1 out,
+      // 0 for non-cash bond holds/releases, which are dropped from the mix).
+      const byType: Record<string, number> = {};
+      let inflows = 0;
+      let outflows = 0;
+      let refunds = 0;
+      let damage = 0;
+      for (const g of cashGroups) {
+        const amount = Number(g._sum?.amount ?? 0);
+        if (g.type === "REFUND") refunds += amount;
+        if (g.type === "DAMAGE_CHARGE") damage += amount;
+        const w = paymentNetWeight(g.type);
+        if (w === 0) continue;
+        byType[g.type] = roundCents(w * amount).toNumber();
+        if (w === 1) inflows += amount;
+        else outflows += amount;
+      }
+
+      // Invoices outstanding — reconcile each in-window invoice against its
+      // adjustment notes + net cash, exactly like the Invoices tab, then sum the
+      // still-collectible balances so the tile ties out to that view.
+      const invBookingIds = [
+        ...new Set(invoices.map((i) => i.bookingId).filter((id): id is string => !!id)),
+      ];
+      const invPaymentGroups = invBookingIds.length
+        ? await ctx.prisma.payment.groupBy({
+            by: ["bookingId", "type"],
+            where: {
+              bookingId: { in: invBookingIds },
+              status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"] },
+            },
+            _sum: { amount: true },
+          })
+        : [];
+      const invNetByBooking = netCashByBooking(
+        invPaymentGroups.map((g) => ({
+          bookingId: g.bookingId,
+          type: g.type,
+          amount: Number(g._sum.amount ?? 0),
+        })),
+      );
+      let invoicesOutstandingAmount = 0;
+      let invoicesOutstandingCount = 0;
+      for (const inv of invoices) {
+        const recon = reconcileInvoice(
+          {
+            bookingId: inv.bookingId,
+            bookingStatus: inv.booking?.status ?? null,
+            balanceDue: inv.booking ? Number(inv.booking.balanceDue) : null,
+            totalAmount: Number(inv.totalAmount),
+            adjustments: inv.adjustmentNotes.map((a) => ({ type: a.type, totalAmount: Number(a.totalAmount) })),
+          },
+          invNetByBooking,
+        );
+        if (recon.outstanding > 0.005) {
+          invoicesOutstandingAmount += recon.outstanding;
+          invoicesOutstandingCount += 1;
+        }
+      }
 
       const agingRow = agingRows[0] ?? { under30: "0", under60: "0", under90: "0", over90: "0" };
-      const agingBuckets = {
-        under30: Number(agingRow.under30),
-        under60: Number(agingRow.under60),
-        under90: Number(agingRow.under90),
-        over90: Number(agingRow.over90),
-      };
 
       return {
-        totalRevenue: Number(revenueAgg._sum.totalAmount ?? 0),
-        totalGst: Number(revenueAgg._sum.gstAmount ?? 0),
-        totalAddons: Number(revenueAgg._sum.addonTotal ?? 0),
-        totalInsurance: Number(revenueAgg._sum.insuranceTotal ?? 0),
-        avgBookingValue: Number(revenueAgg._avg.totalAmount ?? 0),
-        bookingCount: revenueAgg._count,
-        byStatus: byStatus.map((s) => ({
-          status: s.status,
-          count: s._count,
-          revenue: Number(s._sum.totalAmount ?? 0),
-        })),
-        bookings,
-        totalRefunds: Number(refunds._sum.amount ?? 0),
-        totalDamage: Number(damageCharges._sum.amount ?? 0),
-        outstandingBalance: Number(outstanding._sum.balanceDue ?? 0),
-        outstandingCount: outstanding._count,
-        byPaymentType,
-        aging: agingBuckets,
+        cash: {
+          revenueInc: gst.totalRevenueInc,
+          revenueEx: gst.totalRevenueEx,
+          gstCollected: gst.gstCollected,
+          gstOnRefunds: gst.gstOnRefunds,
+          netGst: gst.netGst,
+          inflows: roundCents(inflows).toNumber(),
+          outflows: roundCents(outflows).toNumber(),
+          net: roundCents(inflows - outflows).toNumber(),
+          byType,
+        },
+        booking: {
+          grossBooked: Number(bookingAgg._sum.totalAmount ?? 0),
+          bookingCount: bookingAgg._count,
+          avgBookingValue: Number(bookingAgg._avg.totalAmount ?? 0),
+          byStatus: byStatus.map((s) => ({
+            status: s.status,
+            count: s._count,
+            revenue: Number(s._sum.totalAmount ?? 0),
+          })),
+        },
+        outstanding: {
+          balance: Number(outstanding._sum.balanceDue ?? 0),
+          count: outstanding._count,
+          aging: {
+            under30: Number(agingRow.under30),
+            under60: Number(agingRow.under60),
+            under90: Number(agingRow.under90),
+            over90: Number(agingRow.over90),
+          },
+        },
+        invoicesOutstanding: {
+          amount: roundCents(invoicesOutstandingAmount).toNumber(),
+          count: invoicesOutstandingCount,
+        },
+        bonds: {
+          held: Number(bondAgg._sum.heldAmount ?? 0),
+          captured: Number(bondAgg._sum.capturedAmount ?? 0),
+          released: Number(bondAgg._sum.releasedAmount ?? 0),
+        },
+        totals: {
+          addons: Number(bookingAgg._sum.addonTotal ?? 0),
+          insurance: Number(bookingAgg._sum.insuranceTotal ?? 0),
+          refunds: roundCents(refunds).toNumber(),
+          damage: roundCents(damage).toNumber(),
+        },
       };
+    }),
+
+  // Year-over-year monthly net cash revenue: current year + the previous 3, as
+  // separate series for a comparison line chart. Own 4-year window (independent
+  // of the From/To filter); same payment-weighted settled-cash basis as
+  // computeGstSummary. Current-year months beyond "now" are null so the line
+  // ends at the present month rather than dropping to zero.
+  financeRevenueTrend: adminProcedure
+    .input(z.object({ depotId: z.string().optional() }))
+    .query(async ({ ctx, input }) => {
+      const now = new Date();
+      const currentYear = now.getUTCFullYear();
+      const currentMonth = now.getUTCMonth() + 1; // 1..12
+      const startYear = currentYear - 3;
+      const years = Array.from({ length: 4 }, (_, i) => startYear + i);
+      const start = new Date(Date.UTC(startYear, 0, 1));
+      const end = new Date(Date.UTC(currentYear + 1, 0, 1));
+
+      const rows = await ctx.prisma.$queryRaw<
+        Array<{ yr: number; mo: number; type: string; total: string }>
+      >(Prisma.sql`
+        SELECT
+          EXTRACT(YEAR FROM p."processedAt")::int AS yr,
+          EXTRACT(MONTH FROM p."processedAt")::int AS mo,
+          p."type"::text AS type,
+          COALESCE(SUM(p."amount"), 0)::text AS total
+        FROM "Payment" p
+        ${input.depotId ? Prisma.sql`JOIN "Booking" b ON b."id" = p."bookingId"` : Prisma.empty}
+        WHERE p."status" IN ('SUCCEEDED', 'PARTIALLY_REFUNDED', 'REFUNDED')
+          AND p."deletedAt" IS NULL
+          AND p."processedAt" >= ${start}
+          AND p."processedAt" < ${end}
+          ${input.depotId ? Prisma.sql`AND b."depotId" = ${input.depotId}` : Prisma.empty}
+        GROUP BY yr, mo, p."type"
+      `);
+
+      const months: Array<Record<string, number | null>> = Array.from({ length: 12 }, (_, i) => {
+        const monthNo = i + 1;
+        const row: Record<string, number | null> = { month: monthNo };
+        for (const y of years) {
+          row[String(y)] = y === currentYear && monthNo > currentMonth ? null : 0;
+        }
+        return row;
+      });
+      for (const r of rows) {
+        const w = paymentNetWeight(r.type as PaymentType);
+        if (w === 0) continue;
+        const row = months[r.mo - 1];
+        const key = String(r.yr);
+        if (!row || !(key in row)) continue;
+        row[key] = roundCents(Number(row[key] ?? 0) + w * Number(r.total)).toNumber();
+      }
+      return { years, months };
     }),
 
   financeTransactions: adminProcedure
@@ -1288,11 +1478,26 @@ export const adminRouter = createTRPCRouter({
         ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
       });
       const nextCursor = rows.length > input.take ? rows.pop()!.id : null;
-      const totalAgg = await ctx.prisma.payment.aggregate({
+      // Net totals: amounts are stored positive regardless of direction, so a
+      // plain SUM would count refunds as income. Group by type and weight each
+      // by paymentNetWeight (+1 in, -1 out, 0 for non-cash bond holds/releases)
+      // so the summary is a true cash net over the whole filtered set (not just
+      // the current page). count still tallies every row, including bonds.
+      const byType = await ctx.prisma.payment.groupBy({
+        by: ["type"],
         where,
         _sum: { amount: true, gstAmount: true },
-        _count: true,
+        _count: { _all: true },
       });
+      let amountTotal = 0;
+      let gstTotal = 0;
+      let count = 0;
+      for (const g of byType) {
+        const weight = paymentNetWeight(g.type);
+        amountTotal += weight * Number(g._sum.amount ?? 0);
+        gstTotal += weight * Number(g._sum.gstAmount ?? 0);
+        count += g._count._all;
+      }
       return {
         rows: rows.map((p) => ({
           id: p.id,
@@ -1301,17 +1506,196 @@ export const adminRouter = createTRPCRouter({
           type: p.type,
           method: p.method,
           status: p.status,
-          amount: Number(p.amount),
-          gst: Number(p.gstAmount),
+          amount: signedPaymentAmount(p.type, Number(p.amount)),
+          gst: signedPaymentAmount(p.type, Number(p.gstAmount)),
           bookingReference: p.booking?.bookingReference ?? null,
           customer: p.customer ? `${p.customer.firstName} ${p.customer.lastName}` : null,
         })),
         nextCursor,
         totals: {
-          amount: Number(totalAgg._sum.amount ?? 0),
-          gst: Number(totalAgg._sum.gstAmount ?? 0),
-          count: totalAgg._count,
+          amount: roundCents(amountTotal).toNumber(),
+          gst: roundCents(gstTotal).toNumber(),
+          count,
         },
+      };
+    }),
+
+  // Recurring (long-term-hire) billing dashboard. Unlike the other finance
+  // tabs this is a "state of the book" view — forward billing forecast,
+  // portfolio health, frequency mix and a trailing collected-revenue trend —
+  // so it takes no date window, only the depot filter. Data comes from
+  // BookingBillingPlan (the recurring schedules) + SUBSCRIPTION_CHARGE payments
+  // (what's actually been collected).
+  financeRecurring: adminProcedure
+    .input(z.object({ depotId: z.string().optional() }))
+    .query(async ({ ctx, input }) => {
+      const now = new Date();
+      const HORIZON_DAYS = 14;
+      const TREND_MONTHS = 6;
+      const depotFilter = input.depotId ? { booking: { depotId: input.depotId } } : {};
+      const periodDays = (f: string) => (f === "WEEKLY" ? 7 : f === "FORTNIGHTLY" ? 14 : 30);
+      const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+
+      const trendStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (TREND_MONTHS - 1), 1));
+
+      const [statusGroups, freqGroups, activePlans, payGroups, trendRows] = await Promise.all([
+        ctx.prisma.bookingBillingPlan.groupBy({
+          by: ["status"],
+          where: { ...depotFilter },
+          _count: { _all: true },
+        }),
+        ctx.prisma.bookingBillingPlan.groupBy({
+          by: ["frequency"],
+          where: { status: "ACTIVE", ...depotFilter },
+          _count: { _all: true },
+          _sum: { amountPerPeriod: true },
+        }),
+        ctx.prisma.bookingBillingPlan.findMany({
+          where: { status: "ACTIVE", ...depotFilter },
+          orderBy: { nextChargeAt: "asc" },
+          take: 500,
+          include: {
+            booking: {
+              select: {
+                bookingReference: true,
+                customer: { select: { id: true, firstName: true, lastName: true } },
+              },
+            },
+          },
+        }),
+        ctx.prisma.payment.groupBy({
+          by: ["status"],
+          where: { type: "SUBSCRIPTION_CHARGE", ...depotFilter },
+          _count: { _all: true },
+          _sum: { amount: true },
+        }),
+        ctx.prisma.payment.findMany({
+          where: {
+            type: "SUBSCRIPTION_CHARGE",
+            status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED"] },
+            processedAt: { gte: trendStart },
+            ...depotFilter,
+          },
+          select: { amount: true, processedAt: true },
+        }),
+      ]);
+
+      // Plans by status (donut) + headline counts.
+      const statusCounts: Record<string, number> = { ACTIVE: 0, PAUSED: 0, COMPLETED: 0, CANCELLED: 0 };
+      for (const g of statusGroups) statusCounts[g.status] = g._count._all;
+
+      // Cadence mix across ACTIVE plans.
+      const frequencyMix = freqGroups.map((g) => ({
+        frequency: g.frequency,
+        count: g._count._all,
+        perPeriod: roundCents(Number(g._sum.amountPerPeriod ?? 0)).toNumber(),
+      }));
+
+      // Forward billing forecast: project each ACTIVE plan's remaining charge
+      // dates from nextChargeAt and bucket them into the next 14 days. Also tally
+      // committed (contracted but not-yet-collected) revenue across all ACTIVE
+      // plans = remaining periods × amount per period.
+      const buckets = new Map<string, { amount: number; count: number }>();
+      const base = new Date(now);
+      base.setUTCHours(0, 0, 0, 0);
+      for (let i = 0; i < HORIZON_DAYS; i++) {
+        buckets.set(dayKey(new Date(base.getTime() + i * 86_400_000)), { amount: 0, count: 0 });
+      }
+      const lastKey = dayKey(new Date(base.getTime() + (HORIZON_DAYS - 1) * 86_400_000));
+      let committedRevenue = 0;
+      for (const p of activePlans) {
+        const remaining = Math.max(0, p.periodsTotal - p.periodsCompleted);
+        const amount = Number(p.amountPerPeriod);
+        committedRevenue += remaining * amount;
+        const stepMs = periodDays(p.frequency) * 86_400_000;
+        let t = p.nextChargeAt.getTime();
+        for (let k = 0; k < remaining; k++) {
+          const key = dayKey(new Date(t));
+          if (key > lastKey) break;
+          const b = buckets.get(key);
+          if (b) {
+            b.amount += amount;
+            b.count += 1;
+          }
+          t += stepMs;
+        }
+      }
+      const forecast = [...buckets.entries()].map(([date, v]) => ({
+        date,
+        amount: roundCents(v.amount).toNumber(),
+        count: v.count,
+      }));
+      const forecastTotal = roundCents(forecast.reduce((a, f) => a + f.amount, 0)).toNumber();
+      const forecastCount = forecast.reduce((a, f) => a + f.count, 0);
+
+      // Capture health + all-time collected, from the SUBSCRIPTION_CHARGE ledger.
+      let collectedAllTime = 0;
+      let succeeded = 0;
+      let failed = 0;
+      let pending = 0;
+      for (const g of payGroups) {
+        if (g.status === "SUCCEEDED" || g.status === "PARTIALLY_REFUNDED") {
+          collectedAllTime += Number(g._sum.amount ?? 0);
+          succeeded += g._count._all;
+        } else if (g.status === "FAILED") {
+          failed += g._count._all;
+        } else if (g.status === "PENDING") {
+          pending += g._count._all;
+        }
+      }
+      const settled = succeeded + failed;
+      const captureRate = settled > 0 ? succeeded / settled : 1;
+
+      // Trailing collected-revenue trend (cash basis on processedAt) + last-30-day total.
+      const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const trend = Array.from({ length: TREND_MONTHS }, (_, i) => {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (TREND_MONTHS - 1) + i, 1));
+        return { key: `${d.getUTCFullYear()}-${d.getUTCMonth()}`, label: MONTH_LABELS[d.getUTCMonth()]!, amount: 0 };
+      });
+      const trendIdx = new Map(trend.map((t, i) => [t.key, i]));
+      const cutoff30 = now.getTime() - 30 * 86_400_000;
+      let collected30d = 0;
+      for (const r of trendRows) {
+        if (!r.processedAt) continue;
+        const key = `${r.processedAt.getUTCFullYear()}-${r.processedAt.getUTCMonth()}`;
+        const i = trendIdx.get(key);
+        if (i !== undefined) trend[i]!.amount = roundCents(trend[i]!.amount + Number(r.amount)).toNumber();
+        if (r.processedAt.getTime() >= cutoff30) collected30d += Number(r.amount);
+      }
+
+      return {
+        kpis: {
+          activePlans: statusCounts.ACTIVE ?? 0,
+          pausedPlans: statusCounts.PAUSED ?? 0,
+          committedRevenue: roundCents(committedRevenue).toNumber(),
+          collected30d: roundCents(collected30d).toNumber(),
+          collectedAllTime: roundCents(collectedAllTime).toNumber(),
+          captureRate,
+          captureSucceeded: succeeded,
+          captureFailed: failed,
+          capturePending: pending,
+        },
+        statusCounts,
+        frequencyMix,
+        forecast,
+        forecastTotal,
+        forecastCount,
+        trend: trend.map((t) => ({ label: t.label, amount: t.amount })),
+        plans: activePlans.slice(0, 100).map((p) => ({
+          id: p.id,
+          bookingId: p.bookingId,
+          bookingReference: p.booking?.bookingReference ?? null,
+          customerId: p.booking?.customer?.id ?? null,
+          customer: p.booking?.customer
+            ? `${p.booking.customer.firstName} ${p.booking.customer.lastName}`
+            : null,
+          frequency: p.frequency,
+          amountPerPeriod: roundCents(Number(p.amountPerPeriod)).toNumber(),
+          periodsCompleted: p.periodsCompleted,
+          periodsTotal: p.periodsTotal,
+          nextChargeAt: p.nextChargeAt,
+          status: p.status,
+        })),
       };
     }),
 
@@ -1337,10 +1721,16 @@ export const adminRouter = createTRPCRouter({
           booking: {
             select: {
               bookingReference: true,
+              status: true,
+              balanceDue: true,
               customer: { select: { firstName: true, lastName: true } },
             },
           },
           creditNotes: { select: { amount: true } },
+          adjustmentNotes: {
+            where: { status: { not: "VOID" }, deletedAt: null },
+            select: { type: true, totalAmount: true },
+          },
         },
         orderBy: { createdAt: "desc" },
         take: input.take,
@@ -1350,12 +1740,55 @@ export const adminRouter = createTRPCRouter({
         _sum: { totalAmount: true, gstAmount: true, subtotal: true },
         _count: true,
       });
-      return {
-        rows: invoices.map((i) => ({
+      // Reconciliation: join each invoice to net cash (Payment ledger,
+      // weighted so refunds subtract and bond auths are zero — same basis as
+      // the Transactions tab) and to its adjustment-note delta. Payments are
+      // fetched all-time for the invoices' bookings, NOT date-filtered: a
+      // refund issued today can settle an invoice from a prior period.
+      const bookingIds = [
+        ...new Set(invoices.map((i) => i.bookingId).filter((id): id is string => !!id)),
+      ];
+      const paymentGroups = bookingIds.length
+        ? await ctx.prisma.payment.groupBy({
+            by: ["bookingId", "type"],
+            // Settled-cash statuses only: a PARTIALLY_REFUNDED / REFUNDED
+            // original still represents cash that was collected (the refund is
+            // its own REFUND row, weighted -1). PENDING / FAILED never moved
+            // money, so they're excluded.
+            where: {
+              bookingId: { in: bookingIds },
+              status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"] },
+            },
+            _sum: { amount: true },
+          })
+        : [];
+      const netByBooking = netCashByBooking(
+        paymentGroups.map((g) => ({
+          bookingId: g.bookingId,
+          type: g.type,
+          amount: Number(g._sum.amount ?? 0),
+        })),
+      );
+      const rows = invoices.map((i) => {
+        const recon = reconcileInvoice(
+          {
+            bookingId: i.bookingId,
+            bookingStatus: i.booking?.status ?? null,
+            balanceDue: i.booking ? Number(i.booking.balanceDue) : null,
+            totalAmount: Number(i.totalAmount),
+            adjustments: i.adjustmentNotes.map((a) => ({
+              type: a.type,
+              totalAmount: Number(a.totalAmount),
+            })),
+          },
+          netByBooking,
+        );
+        return {
           id: i.id,
           invoiceNumber: i.invoiceNumber,
           status: i.status,
           bookingReference: i.booking?.bookingReference ?? null,
+          bookingStatus: i.booking?.status ?? null,
           customer: i.booking?.customer
             ? `${i.booking.customer.firstName} ${i.booking.customer.lastName}`
             : null,
@@ -1363,15 +1796,27 @@ export const adminRouter = createTRPCRouter({
           gstAmount: Number(i.gstAmount),
           totalAmount: Number(i.totalAmount),
           creditNoteTotal: i.creditNotes.reduce((a, c) => a + Number(c.amount), 0),
+          adjustmentTotal: recon.adjustmentTotal,
+          netTotal: recon.netTotal,
+          collected: recon.collected,
+          outstanding: recon.outstanding,
           dueDate: i.dueDate,
           sentAt: i.sentAt,
           paidAt: i.paidAt,
           createdAt: i.createdAt,
-        })),
+        };
+      });
+      return {
+        rows,
         totals: {
           subtotal: Number(totalAgg._sum.subtotal ?? 0),
           gst: Number(totalAgg._sum.gstAmount ?? 0),
           total: Number(totalAgg._sum.totalAmount ?? 0),
+          // Reconciliation totals sum the per-row computed values so the
+          // summary always ties out to the rows shown (not a separate aggregate).
+          net: roundCents(rows.reduce((a, r) => a + r.netTotal, 0)).toNumber(),
+          collected: roundCents(rows.reduce((a, r) => a + r.collected, 0)).toNumber(),
+          outstanding: roundCents(rows.reduce((a, r) => a + r.outstanding, 0)).toNumber(),
           count: totalAgg._count,
         },
       };
@@ -1586,89 +2031,42 @@ export const adminRouter = createTRPCRouter({
       };
     }),
 
+  // GST/BAS figures on a payment-ledger cash basis — see computeGstSummary in
+  // gst-bas-export.ts (shared with the finance.gst export and generateBasCsv).
   financeGst: adminProcedure
     .input(z.object({ from: z.coerce.date(), to: z.coerce.date(), depotId: z.string().optional() }))
-    .query(async ({ ctx, input }) => {
-      const where = {
-        createdAt: { gte: input.from, lte: input.to },
-        status: { notIn: ["CANCELLED", "NO_SHOW"] as never[] },
-        ...(input.depotId ? { depotId: input.depotId } : {}),
-      };
-      const [agg, byDepotRaw, refundAgg] = await Promise.all([
-        ctx.prisma.booking.aggregate({
-          where,
-          _sum: { totalAmount: true, gstAmount: true },
-        }),
-        ctx.prisma.booking.groupBy({
-          by: ["depotId"],
-          where,
-          _sum: { totalAmount: true, gstAmount: true },
-        }),
-        ctx.prisma.payment.aggregate({
-          where: { type: "REFUND", createdAt: { gte: input.from, lte: input.to } },
-          _sum: { amount: true },
-        }),
-      ]);
+    .query(async ({ input }) =>
+      computeGstSummary({ from: input.from, to: input.to, depotId: input.depotId }),
+    ),
 
-      const depots = await ctx.prisma.depot.findMany({
-        where: { id: { in: byDepotRaw.map((d) => d.depotId) } },
-        select: { id: true, name: true },
-      });
-      const depotName = new Map(depots.map((d) => [d.id, d.name]));
-
-      const totalInc = Number(agg._sum.totalAmount ?? 0);
-      const gst = Number(agg._sum.gstAmount ?? 0);
-      const refunds = Number(refundAgg._sum.amount ?? 0);
-      const gstOnRefunds = refunds / 11;
-      return {
-        totalRevenueInc: totalInc,
-        totalRevenueEx: totalInc - gst,
-        gstCollected: gst,
-        gstOnRefunds,
-        netGst: gst - gstOnRefunds,
-        byDepot: byDepotRaw.map((d) => ({
-          depotId: d.depotId,
-          depotName: depotName.get(d.depotId) ?? "Unknown",
-          revenue: Number(d._sum.totalAmount ?? 0),
-          gst: Number(d._sum.gstAmount ?? 0),
-        })),
-      };
-    }),
-
+  // Transaction-level reconciliation: matches each cash-settling Payment to its
+  // Stripe charge (via finance-reconciliation service). In dev we refresh the
+  // Stripe mirror live so just-created test data shows; in prod we read the
+  // mirror maintained by the nightly stripe-reconcile job (+ Refresh button).
   financeReconciliation: adminProcedure
     .input(z.object({ from: z.coerce.date(), to: z.coerce.date(), depotId: z.string().optional() }))
-    .query(async ({ ctx, input }) => {
-      const where = {
-        createdAt: { gte: input.from, lte: input.to },
-        status: "SUCCEEDED" as const,
-        ...(input.depotId ? { booking: { depotId: input.depotId } } : {}),
-      };
-      const [stripePayments, paymentsAll, refunds] = await Promise.all([
-        ctx.prisma.payment.aggregate({
-          where: { ...where, stripeChargeId: { not: null } },
-          _sum: { amount: true },
-          _count: true,
-        }),
-        ctx.prisma.payment.aggregate({
-          where,
-          _sum: { amount: true },
-          _count: true,
-        }),
-        ctx.prisma.payment.aggregate({
-          where: { type: "REFUND", createdAt: { gte: input.from, lte: input.to } },
-          _sum: { amount: true },
-        }),
-      ]);
-      return {
-        stripeGross: Number(stripePayments._sum.amount ?? 0),
-        stripeCount: stripePayments._count,
-        bookGross: Number(paymentsAll._sum.amount ?? 0),
-        bookCount: paymentsAll._count,
-        refunds: Number(refunds._sum.amount ?? 0),
-        variance:
-          Number(paymentsAll._sum.amount ?? 0) - Number(stripePayments._sum.amount ?? 0),
-      };
+    .query(async ({ input }) => {
+      return reconcilePayments({
+        from: input.from,
+        to: input.to,
+        depotId: input.depotId,
+        live: process.env.NODE_ENV !== "production",
+      });
     }),
+
+  // Operator-triggered Stripe reconcile (the prod "Refresh from Stripe" button).
+  refreshStripeReconcile: adminProcedure.mutation(async ({ ctx }) => {
+    const result = await runStripeReconcile();
+    await writeAudit(ctx.prisma, {
+      userId: ctx.session.user.id,
+      category: "JOB",
+      action: "stripe.reconcile.manual",
+      entity: "StripeFeeLedger",
+      entityId: "manual",
+      newData: { ...result },
+    });
+    return result;
+  }),
 
   // ----- Reports -----
   bookingsByPeriod: adminProcedure
@@ -3171,86 +3569,5 @@ export const adminRouter = createTRPCRouter({
       .delete({ where: { key: "xero:tokens" } })
       .catch(() => null);
     return { ok: true };
-  }),
-
-  // ----- Integration credential management (SUPER_ADMIN) -----
-  listIntegrationConfig: superAdminProcedure.query(async () => {
-    const fields = flattenFields();
-    const sources = await listConfigSources(
-      fields.map((f) => ({ key: f.key, envFallback: f.envFallback })),
-    );
-    return sources;
-  }),
-
-  setIntegrationConfig: superAdminProcedure
-    .input(z.object({ key: z.string().min(1), value: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      skipAutoAudit(ctx);
-      const field = findField(input.key);
-      if (!field) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown integration field" });
-
-      if (field.secret) {
-        await setSecret(input.key, input.value);
-      } else {
-        await setString(input.key, input.value);
-      }
-
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "INTEGRATION_CONFIG_SET",
-        entity: "SystemSetting",
-        entityId: input.key,
-        newData: { key: input.key, secret: field.secret },
-      });
-
-      return { ok: true };
-    }),
-
-  clearIntegrationConfig: superAdminProcedure
-    .input(z.object({ key: z.string().min(1) }))
-    .mutation(async ({ ctx, input }) => {
-      skipAutoAudit(ctx);
-      const field = findField(input.key);
-      if (!field) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown integration field" });
-
-      await clearValue(input.key);
-
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "INTEGRATION_CONFIG_CLEARED",
-        entity: "SystemSetting",
-        entityId: input.key,
-      });
-
-      return { ok: true };
-    }),
-
-  generateVapidKeys: superAdminProcedure.mutation(async ({ ctx }) => {
-    skipAutoAudit(ctx);
-    const webpushMod = await import("web-push");
-    const webpush = (webpushMod as unknown as { default?: typeof webpushMod }).default ?? webpushMod;
-    const pair = webpush.generateVAPIDKeys();
-    await setString("integration:vapid:publicKey", pair.publicKey);
-    await setSecret("integration:vapid:privateKey", pair.privateKey);
-    await writeAudit(ctx.prisma, {
-      userId: ctx.user.id,
-      action: "INTEGRATION_VAPID_ROTATED",
-      entity: "SystemSetting",
-      entityId: "integration:vapid",
-    });
-    return { publicKey: pair.publicKey };
-  }),
-
-  generateTelemetryToken: superAdminProcedure.mutation(async ({ ctx }) => {
-    skipAutoAudit(ctx);
-    const token = crypto.randomBytes(32).toString("base64url");
-    await setSecret("integration:telemetry:ingestToken", token);
-    await writeAudit(ctx.prisma, {
-      userId: ctx.user.id,
-      action: "INTEGRATION_TELEMETRY_TOKEN_ROTATED",
-      entity: "SystemSetting",
-      entityId: "integration:telemetry:ingestToken",
-    });
-    return { token };
   }),
 });

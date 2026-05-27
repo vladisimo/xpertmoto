@@ -1,15 +1,45 @@
 /**
- * One-off backfill: tag every VehicleModel with its FleetUseCase[] and,
- * where useful, a short marketing tagline. Idempotent — safe to re-run.
+ * Backfill: classify every VehicleModel across the browse/filter axes and,
+ * where useful, set a short marketing tagline. Idempotent — safe to re-run.
+ *
+ * The per-slug map below is still expressed with the original six "use case"
+ * tags (incl. SPORT_CRUISER / LEARNER_APPROVED) for readability. Those two were
+ * split out of FleetUseCase into the BikeType and RiderLevel axes (see the
+ * bike_classification_axes migration); `normalizeTags()` translates the legacy
+ * tags into the three current axes at write time, so the data here stays terse.
  *
  * Run:  npx tsx scripts/backfill-use-cases.ts
  */
 
-import { PrismaClient, type FleetUseCase } from "@prisma/client";
+import { PrismaClient, type BikeType, type FleetUseCase, type RiderLevel } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-type Tagging = { useCases: FleetUseCase[]; tagline?: string };
+/** The original six tags, kept as the script's input vocabulary. */
+type LegacyUseCase = FleetUseCase | "SPORT_CRUISER" | "LEARNER_APPROVED";
+type Tagging = { useCases: LegacyUseCase[]; tagline?: string };
+
+/** Split legacy tags into the current three axes. */
+function normalizeTags(legacy: LegacyUseCase[]): {
+  useCases: FleetUseCase[];
+  bikeTypes: BikeType[];
+  riderLevels: RiderLevel[];
+} {
+  const useCases: FleetUseCase[] = [];
+  const bikeTypes = new Set<BikeType>();
+  const riderLevels = new Set<RiderLevel>();
+  for (const tag of legacy) {
+    if (tag === "SPORT_CRUISER") {
+      bikeTypes.add("SPORT");
+      bikeTypes.add("CRUISER");
+    } else if (tag === "LEARNER_APPROVED") {
+      riderLevels.add("BEGINNER");
+    } else {
+      useCases.push(tag);
+    }
+  }
+  return { useCases, bikeTypes: [...bikeTypes], riderLevels: [...riderLevels] };
+}
 
 /**
  * Explicit per-slug tagging. When a slug lands here, its tags are applied
@@ -285,10 +315,13 @@ async function main() {
   for (const m of models) {
     const explicit = TAG_BY_SLUG[m.slug];
     const tagging = explicit ?? fallback(m);
+    const { useCases, bikeTypes, riderLevels } = normalizeTags(tagging.useCases);
     await prisma.vehicleModel.update({
       where: { id: m.id },
       data: {
-        useCases: { set: tagging.useCases },
+        useCases: { set: useCases },
+        bikeTypes: { set: bikeTypes },
+        riderLevels: { set: riderLevels },
         ...(tagging.tagline && !m.tagline ? { tagline: tagging.tagline } : {}),
       },
     });

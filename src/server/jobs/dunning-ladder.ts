@@ -4,6 +4,8 @@ import { debtorsList, type Debtor } from "@/server/services/admin-risk-signals";
 import { sendNotification } from "@/server/services/notification-sender";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { getBranding } from "@/lib/branding";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import { getQueue, registerWorker } from "./queue";
 
 /**
@@ -166,6 +168,17 @@ export async function runDunningLadder(): Promise<{ progressed: number; stages: 
       userId: d.customerId,
       status: "SUCCESS",
       newData: { stage, totalOwed: d.totalOwed, daysSinceLast, previousStage: last },
+    });
+
+    await trackServer({
+      event: SERVER_EVENTS.dunningAdvanced,
+      distinctId: d.customerId,
+      properties: {
+        stage,
+        previousStage: last,
+        totalOwedAud: d.totalOwed,
+        daysSinceLast,
+      },
     });
 
     progressed += 1;

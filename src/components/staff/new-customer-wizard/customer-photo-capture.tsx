@@ -50,7 +50,6 @@ export function CustomerPhotoCapture({ value, onChange }: CustomerPhotoCapturePr
       typeof navigator.mediaDevices.getUserMedia === "function";
     // Can't run this during render (SSR has no `navigator`). Post-mount
     // setState is the idiomatic detection path for client-only APIs.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSupported(hasMedia);
   }, []);
 

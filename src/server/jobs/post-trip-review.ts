@@ -4,8 +4,6 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { sendNotification } from "@/server/services/notification-sender";
 import { ensureReferralCode } from "@/server/services/referral";
-import { awardLoyaltyPoints } from "@/server/services/loyalty";
-import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
 import { getBranding } from "@/lib/branding";
 import PostTripReviewEmail from "../../../emails/post-trip-review";
 import { getQueue, registerWorker } from "./queue";
@@ -79,25 +77,11 @@ export async function runPostTripReview(
       continue;
     }
 
-    // Lever 9: award loyalty points. Rate comes from loyalty.pointsPerDollar.
-    try {
-      const pointsPerDollar = await getSetting(
-        "loyalty.pointsPerDollar",
-        SETTING_DEFAULTS["loyalty.pointsPerDollar"],
-      );
-      const pointsAwarded = await awardLoyaltyPoints(prisma, {
-        userId: b.customerId,
-        bookingId: b.id,
-        points: Math.floor(Number(b.totalAmount) * pointsPerDollar),
-        reason: `Booking ${b.bookingReference}`,
-      });
-      if (pointsAwarded > 0) counters.pointsAwarded += 1;
-    } catch (err) {
-      logger.warn(
-        { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
-        "post-trip-review: loyalty award failed",
-      );
-    }
+    // Lever 9: loyalty spend points are no longer awarded here. They are
+    // derived from net money collected by the customer-rewards recompute
+    // (at completion + nightly), so penalty/extension/no-show money counts
+    // and points can't drift from the ledger. Review/referral bonuses are
+    // still event-sourced via awardLoyaltyPoints elsewhere.
 
     // Unique next-booking discount code.
     const discountCode = `RIDE-AGAIN-${b.bookingReference.slice(-6).toUpperCase()}`;

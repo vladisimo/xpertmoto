@@ -11,6 +11,7 @@ import type {
 } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
+import * as Sentry from "@sentry/nextjs";
 import { GST_RATE } from "@/lib/constants";
 import { lookupOrComputeMultiplier } from "./yield-pricing";
 import {
@@ -641,7 +642,36 @@ function buildPayOnlineBreakdown(args: {
   }
 }
 
+/**
+ * The pricing cascade (CLAUDE.md rule #2): base rate → duration discount →
+ * seasonal multiplier → yield → discount code. Wrapped in a Sentry span so
+ * the cascade's DB round-trips and arithmetic show up as a node under the
+ * request transaction — turning "checkout feels slow" into a flame graph.
+ */
 export async function quote(prisma: PrismaClient, input: PricingInput): Promise<PricingQuote> {
+  return Sentry.startSpan(
+    {
+      name: "pricing.quote",
+      op: "pricing.cascade",
+      attributes: {
+        categoryId: input.categoryId,
+        depotId: input.pickupDepotId ?? undefined,
+        vehicleAllocated: Boolean(input.vehicleId),
+      },
+    },
+    async (span) => {
+      const result = await quoteImpl(prisma, input);
+      span.setAttributes({
+        pricingMethod: result.pricingMethod,
+        durationDays: result.durationDays,
+        totalAmount: result.totalAmount,
+      });
+      return result;
+    },
+  );
+}
+
+async function quoteImpl(prisma: PrismaClient, input: PricingInput): Promise<PricingQuote> {
   const category = await prisma.vehicleCategory.findUniqueOrThrow({
     where: { id: input.categoryId },
   });
@@ -1007,10 +1037,14 @@ export async function quote(prisma: PrismaClient, input: PricingInput): Promise<
   if (isLongTerm) {
     recurringFrequency = category.longTermDefaultFrequency;
     const periodDays = periodLengthDays(recurringFrequency);
-    // Total number of whole periods in this booking. Any remainder days
-    // (e.g. days 22–23 on a 23-day weekly hire) collapse into the first
-    // period so the customer never sees a fractional final charge.
-    const totalPeriods = Math.max(1, Math.floor(durationDays / periodDays));
+    // Number of charges this booking is split into, rounding UP so any
+    // remainder days form their own (smaller) FIRST charge rather than
+    // inflating it. e.g. a 20-day weekly hire bills as ~6 days up-front +
+    // 2 full weeks, not 13 days up-front + 1 week. Recurring charges stay
+    // clean full periods; the first period absorbs the remainder + flat
+    // fees + rounding residual, so the customer never sees a fractional
+    // *final* charge and pays the least up-front the schedule allows.
+    const totalPeriods = Math.max(1, Math.ceil(durationDays / periodDays));
 
     // Split totalDec into the per-day-billable portion (base rental +
     // per-day add-ons + per-day insurance) and the flat one-time fees
@@ -1129,6 +1163,20 @@ export type ExtensionQuote = {
 };
 
 export async function quoteExtension(
+  prisma: PrismaClient,
+  input: ExtensionQuoteInput,
+): Promise<ExtensionQuote> {
+  return Sentry.startSpan(
+    { name: "pricing.quoteExtension", op: "pricing.cascade", attributes: { categoryId: input.categoryId } },
+    async (span) => {
+      const result = await quoteExtensionImpl(prisma, input);
+      span.setAttributes({ extensionDays: result.extensionDays, totalAmount: result.totalAmount });
+      return result;
+    },
+  );
+}
+
+async function quoteExtensionImpl(
   prisma: PrismaClient,
   input: ExtensionQuoteInput,
 ): Promise<ExtensionQuote> {
@@ -1278,6 +1326,20 @@ export type SwapDeltaQuote = {
  * field is a convenience for UI rendering.
  */
 export async function quoteSwapDelta(
+  prisma: PrismaClient,
+  input: SwapDeltaInput,
+): Promise<SwapDeltaQuote> {
+  return Sentry.startSpan(
+    { name: "pricing.quoteSwapDelta", op: "pricing.cascade" },
+    async (span) => {
+      const result = await quoteSwapDeltaImpl(prisma, input);
+      span.setAttributes({ deltaAmount: result.deltaAmount });
+      return result;
+    },
+  );
+}
+
+async function quoteSwapDeltaImpl(
   prisma: PrismaClient,
   input: SwapDeltaInput,
 ): Promise<SwapDeltaQuote> {

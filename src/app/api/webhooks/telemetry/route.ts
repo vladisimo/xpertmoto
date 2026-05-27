@@ -5,6 +5,10 @@ import { logger } from "@/lib/logger";
 import { getSecret } from "@/lib/integration-config";
 import { TelemetryBatchSchema, haversineKm, type TelemetryPing } from "@/lib/telemetry";
 import { withAudit } from "@/lib/with-audit";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
+
+const BATTERY_LOW_PCT = 20;
 
 /**
  * Generic GPS telemetry ingest. Tracker vendors (Teltonika, Queclink,
@@ -46,10 +50,14 @@ async function handlePost(req: Request) {
 
   let persisted = 0;
   let matched = 0;
+  // Dedupe the battery-low alert to at most one per vehicle per request so a
+  // multi-ping batch can't flood PostHog. Raw GPS pings + odometer (which
+  // arrives on every ping) are deliberately NOT sent — far too high-volume.
+  const batteryLowEmitted = new Set<string>();
   for (const p of pings) {
     const vehicle = await prisma.vehicle.findFirst({
       where: { gpsTrackerId: p.deviceId },
-      select: { id: true, currentOdometerKm: true },
+      select: { id: true, currentOdometerKm: true, depot: { select: { slug: true } } },
     });
     if (vehicle) matched++;
 
@@ -83,6 +91,23 @@ async function handlePost(req: Request) {
           "telemetry: odometer delta out of bounds, ignored",
         );
       }
+    }
+
+    if (
+      vehicle &&
+      p.batteryPct != null &&
+      p.batteryPct < BATTERY_LOW_PCT &&
+      !batteryLowEmitted.has(vehicle.id)
+    ) {
+      batteryLowEmitted.add(vehicle.id);
+      await trackServer({
+        event: SERVER_EVENTS.vehicleBatteryLow,
+        distinctId: vehicle.id,
+        // Vehicle id is not a person — don't mint a person profile per bike.
+        processPerson: false,
+        properties: { batteryPct: p.batteryPct, deviceId: p.deviceId },
+        ...(vehicle.depot?.slug ? { groups: { depot: vehicle.depot.slug } } : {}),
+      });
     }
   }
 

@@ -7,10 +7,12 @@ import { BOOKING_RULES } from "@/lib/constants";
 import { getBranding } from "@/lib/branding";
 import { sendNotification } from "@/server/services/notification-sender";
 import OverdueNotice from "../../../emails/overdue-notice";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 import { logger } from "@/lib/logger";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
 const QUEUE = "overdue-check" as const;
 
@@ -61,7 +63,12 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
       status: { in: ["ACTIVE", "CHECKED_OUT", "OVERDUE"] },
       returnDateTime: { lt: new Date(now) },
     },
-    include: { customer: true, category: true, vehicle: true },
+    include: {
+      customer: true,
+      category: true,
+      vehicle: true,
+      pickupDepot: { select: { slug: true } },
+    },
   });
 
   for (const b of candidates) {
@@ -78,6 +85,31 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
         stageAdvances[stage.stage] = (stageAdvances[stage.stage] ?? 0) + 1;
         if (stage.stage === 1) transitionedToOverdue += 1;
         if (stage.stage === 4) incidentsCreated += 1;
+        await trackServer({
+          event: SERVER_EVENTS.bookingOverdue,
+          distinctId: b.customer.id,
+          properties: {
+            bookingId: b.id,
+            reference: b.bookingReference,
+            stage: stage.stage,
+            hoursLate: Math.round(hoursLate),
+          },
+          groups: { depot: b.pickupDepot.slug },
+        });
+        if (stage.stage === 4 && b.vehicle) {
+          await trackServer({
+            event: SERVER_EVENTS.incidentAutoCreated,
+            distinctId: b.customer.id,
+            properties: {
+              bookingId: b.id,
+              reference: b.bookingReference,
+              vehicleId: b.vehicle.id,
+              type: "THEFT",
+              trigger: "overdue_72h",
+            },
+            groups: { depot: b.pickupDepot.slug },
+          });
+        }
       } catch (err) {
         logger.error(
           {
@@ -289,6 +321,9 @@ async function notifyManagers(b: CandidateBooking, title: string, body: string):
 
 export function startOverdueCheckScheduler() {
   registerWorker(QUEUE, async () => runOverdueCheck());
+  // Monitor approximates the 15-min interval as a crontab so Sentry can flag
+  // a stalled worker (a missed overdue sweep delays OVERDUE transitions).
+  monitorCron(QUEUE, "*/15 * * * *");
   const q = getQueue(QUEUE);
   if (!q) return;
   q.add(

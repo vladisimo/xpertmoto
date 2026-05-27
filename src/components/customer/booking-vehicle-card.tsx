@@ -42,7 +42,7 @@ export function BookingVehicleCard({
             src={heroSrc}
             alt={heroAlt}
             fill
-            className="object-cover"
+            className="object-contain"
             sizes="(max-width: 640px) 100vw, 768px"
             priority
           />

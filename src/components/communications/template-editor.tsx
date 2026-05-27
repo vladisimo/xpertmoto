@@ -83,7 +83,7 @@ export function TemplateEditor({ template }: Props) {
   );
 
   const save = trpc.communication.templateUpsert.useMutation({
-    onSuccess: (t) => router.push(`/admin/notification-templates/${t.id}`),
+    onSuccess: (t) => router.push(`/staff/communications/templates/${t.id}`),
   });
 
   const previewVars = useMemo(() => {

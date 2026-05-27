@@ -11,19 +11,25 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DepotSelect } from "@/components/admin/depot-select";
 import { ExportMenu } from "@/components/admin/export-menu";
 import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
-import { formatCurrency, formatDateTime, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
+import { TERMINAL_BOOKING_STATUSES } from "@/lib/finance/invoice-reconciliation";
 
 type Row = {
   id: string;
   invoiceNumber: string;
   status: string;
   bookingReference: string | null;
+  bookingStatus: string | null;
   customer: string | null;
   subtotal: number;
   gstAmount: number;
   totalAmount: number;
   creditNoteTotal: number;
+  adjustmentTotal: number;
+  netTotal: number;
+  collected: number;
+  outstanding: number;
   dueDate: Date | null;
   sentAt: Date | null;
   paidAt: Date | null;
@@ -54,7 +60,7 @@ export default function FinanceInvoicesPage() {
   });
 
   function handleCredit(r: Row) {
-    const remaining = r.totalAmount - r.creditNoteTotal;
+    const remaining = r.outstanding;
     const raw = window.prompt(
       `Credit note amount (max A$${remaining.toFixed(2)}):`,
       remaining.toFixed(2),
@@ -81,10 +87,19 @@ export default function FinanceInvoicesPage() {
     { id: "subtotal", header: "Subtotal", cell: (r) => <span className="tabular-nums">{formatCurrency(r.subtotal)}</span>, align: "right", mobileHidden: true },
     { id: "gst", header: "GST", cell: (r) => <span className="tabular-nums text-muted-foreground">{formatCurrency(r.gstAmount)}</span>, align: "right", mobileHidden: true },
     { id: "total", header: "Total", cell: (r) => <span className="tabular-nums font-semibold">{formatCurrency(r.totalAmount)}</span>, align: "right" },
-    { id: "status", header: "Status", cell: (r) => <StatusBadge status={r.status as StatusKey} /> },
+    { id: "adjustments", header: "Adjustments", cell: (r) => Math.abs(r.adjustmentTotal) < 0.005 ? "—" : <span className={`tabular-nums ${r.adjustmentTotal < 0 ? "text-destructive" : ""}`}>{r.adjustmentTotal < 0 ? `-${formatCurrency(-r.adjustmentTotal)}` : `+${formatCurrency(r.adjustmentTotal)}`}</span>, align: "right", mobileHidden: true },
+    { id: "net", header: "Net", cell: (r) => <span className="tabular-nums">{formatCurrency(r.netTotal)}</span>, align: "right", mobileHidden: true },
+    { id: "collected", header: "Collected", cell: (r) => <span className="tabular-nums">{formatCurrency(r.collected)}</span>, align: "right" },
+    { id: "outstanding", header: "Outstanding", cell: (r) => Math.abs(r.outstanding) < 0.005 ? <span className="tabular-nums text-muted-foreground">{formatCurrency(0)}</span> : <span className={`tabular-nums font-semibold ${r.outstanding < 0 ? "text-destructive" : ""}`}>{formatCurrency(r.outstanding)}</span>, align: "right" },
+    { id: "status", header: "Status", cell: (r) => (
+      <div className="flex flex-col items-start gap-1">
+        <StatusBadge status={r.status as StatusKey} />
+        {r.bookingStatus && TERMINAL_BOOKING_STATUSES.has(r.bookingStatus) && (
+          <StatusBadge status={r.bookingStatus as StatusKey} />
+        )}
+      </div>
+    ) },
     { id: "due", header: "Due", cell: (r) => (r.dueDate ? formatDate(r.dueDate) : "—") },
-    { id: "paid", header: "Paid", cell: (r) => (r.paidAt ? formatDateTime(r.paidAt) : "—"), mobileHidden: true },
-    { id: "credit", header: "Credited", cell: (r) => r.creditNoteTotal > 0 ? <span className="text-destructive">-{formatCurrency(r.creditNoteTotal)}</span> : "—", align: "right", mobileHidden: true },
   ];
 
   const renderRowActions = (r: Row) => (
@@ -150,6 +165,9 @@ export default function FinanceInvoicesPage() {
           <T label="Subtotal" value={formatCurrency(data.totals.subtotal)} />
           <T label="GST" value={formatCurrency(data.totals.gst)} />
           <T label="Total" value={formatCurrency(data.totals.total)} />
+          <T label="Net" value={formatCurrency(data.totals.net)} />
+          <T label="Collected" value={formatCurrency(data.totals.collected)} />
+          <T label="Outstanding" value={formatCurrency(data.totals.outstanding)} />
         </div>
       )}
 

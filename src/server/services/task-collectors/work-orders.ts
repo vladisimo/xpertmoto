@@ -29,7 +29,7 @@ export async function collectWorkOrderTasks(
       scheduledStartAt: true,
       createdAt: true,
       type: true,
-      vehicle: { select: { internalCode: true, rego: true } },
+      vehicle: { select: { id: true, internalCode: true, rego: true } },
       assignedTo: { select: { firstName: true, lastName: true } },
     },
     orderBy: [{ priority: "desc" }, { createdAt: "asc" }],
@@ -65,6 +65,7 @@ export async function collectWorkOrderTasks(
       actionableSince: wo.scheduledStartAt ?? wo.createdAt,
       dueAt: wo.scheduledStartAt ?? null,
       metadata: { workOrderStatus: wo.status, workOrderType: wo.type },
+      links: { vehicleId: wo.vehicle.id },
     };
   });
 }

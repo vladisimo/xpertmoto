@@ -212,7 +212,7 @@ export function StepPayment() {
         {layout === "desktop" && (
           <div className="flex justify-between">
             <Button variant="outline" onClick={() => w.back()}>Back</Button>
-            <Button onClick={goBackToDetails}>Back to your details</Button>
+            <Button variant="cta" onClick={goBackToDetails}>Back to your details</Button>
           </div>
         )}
       </div>
@@ -295,6 +295,7 @@ export function StepPayment() {
                 Back
               </Button>
               <Button
+                variant="cta"
                 onClick={() => {
                   autoStartedRef.current = true;
                   void handleStart();

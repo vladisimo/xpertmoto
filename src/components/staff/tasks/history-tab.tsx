@@ -102,7 +102,6 @@ export function HistoryTab({
   }, [searchDraft]);
 
   React.useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSearchDraft(search);
   }, [search]);
 

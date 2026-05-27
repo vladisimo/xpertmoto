@@ -9,6 +9,9 @@ export interface HeroSectionProps {
   title: React.ReactNode;
   description: string;
   secondaryCta: { label: string; href: string };
+  /** Optional background video; falls back to the slide images as poster. */
+  videoMp4?: string;
+  videoWebm?: string;
 }
 
 export function HeroSection({
@@ -17,6 +20,8 @@ export function HeroSection({
   title,
   description,
   secondaryCta,
+  videoMp4,
+  videoWebm,
 }: HeroSectionProps) {
   const [showWidget, setShowWidget] = useState(false);
 
@@ -32,6 +37,8 @@ export function HeroSection({
         eyebrow={eyebrow}
         title={title}
         description={description}
+        videoMp4={videoMp4}
+        videoWebm={videoWebm}
         primaryCta={{
           label: "Find Available Bikes for Your Dates",
           onClick: openWidget,

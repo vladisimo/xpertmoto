@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
+import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -128,11 +129,14 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
             <CardTitle className="h3">Signed agreement</CardTitle>
           </CardHeader>
           <CardContent>
-            <Button variant="secondary" asChild>
-              <Link href={signed.pdfUrl} target="_blank">
-                View / download PDF
-              </Link>
-            </Button>
+            <DocumentViewerButton
+              variant="secondary"
+              fileUrl={signed.pdfUrl}
+              title={`Agreement ${signed.agreementNumber}`}
+              kind="pdf"
+            >
+              View / download PDF
+            </DocumentViewerButton>
             {signed.timestampStatus === "OK" && signed.timestampedAt && (
               <p className="caption mt-2">
                 Timestamped via RFC3161 on{" "}
@@ -140,7 +144,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
               </p>
             )}
             {signed.timestampStatus === "FAILED" && (
-              <p className="caption mt-2 text-amber-600">Timestamping failed — retry available from the booking page.</p>
+              <p className="caption mt-2 text-destructive">Timestamping failed — retry available from the booking page.</p>
             )}
           </CardContent>
         </Card>

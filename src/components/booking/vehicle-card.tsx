@@ -29,12 +29,21 @@ export function VehicleCard({
   onSelect,
   compact,
   availableCount,
+  subtitle,
+  secondaryBadge,
+  notice,
 }: {
   vehicle: VehicleCardVehicle;
   selected: boolean;
   onSelect: () => void;
   compact?: boolean;
   availableCount?: number;
+  /** Identifier line under the make/model title (e.g. staff code · rego). */
+  subtitle?: React.ReactNode;
+  /** Extra badge shown next to the condition badge (e.g. cross-category tag). */
+  secondaryBadge?: React.ReactNode;
+  /** Small warning line at the card foot (e.g. doc-expiry risk). */
+  notice?: React.ReactNode;
 }) {
   const [specOpen, setSpecOpen] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
@@ -116,8 +125,16 @@ export function VehicleCard({
                 {vehicle.make} {vehicle.model}
               </h3>
               <div className="caption truncate">{vehicle.colour}</div>
+              {subtitle && (
+                <div className="mt-0.5 truncate text-[11px] font-medium tabular-nums text-foreground">
+                  {subtitle}
+                </div>
+              )}
             </div>
-            <StatusBadge status={vehicle.condition} />
+            <div className="flex shrink-0 flex-col items-end gap-1">
+              <StatusBadge status={vehicle.condition} />
+              {secondaryBadge}
+            </div>
           </div>
           {!compact && (
             <dl className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px]">
@@ -150,6 +167,11 @@ export function VehicleCard({
             >
               View full specs
             </span>
+          )}
+          {notice && (
+            <div className="mt-1 text-[11px] font-medium text-amber-600 dark:text-amber-500">
+              {notice}
+            </div>
           )}
         </div>
       </button>

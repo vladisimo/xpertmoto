@@ -5,6 +5,8 @@ import { prisma } from "@/lib/prisma";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
 import { getBranding } from "@/lib/branding";
 import { sendNotification } from "@/server/services/notification-sender";
+import { trackServer } from "@/lib/analytics";
+import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import BookingReminder from "../../../emails/booking-reminder";
 import { getQueue, registerWorker } from "./queue";
 
@@ -61,10 +63,11 @@ export async function runBookingReminders(): Promise<number> {
         siteName,
       }),
     );
+    const sentChannels = b.customer.phone ? channels : channels.filter((c) => c !== "SMS");
     await sendNotification({
       userId: b.customerId,
       type: "BOOKING_REMINDER",
-      channels: b.customer.phone ? channels : channels.filter((c) => c !== "SMS"),
+      channels: sentChannels,
       subject: `Reminder: your ${siteName} pickup is tomorrow (${b.bookingReference})`,
       title: `Pickup tomorrow — ${b.bookingReference}`,
       html,
@@ -75,6 +78,17 @@ export async function runBookingReminders(): Promise<number> {
         pickupAt: b.pickupDateTime.toISOString(),
         depotName: b.pickupDepot.name,
       },
+    });
+    await trackServer({
+      event: SERVER_EVENTS.bookingReminderSent,
+      distinctId: b.customerId,
+      properties: {
+        bookingId: b.id,
+        reference: b.bookingReference,
+        channels: sentChannels,
+        pickupAt: b.pickupDateTime.toISOString(),
+      },
+      groups: { depot: b.pickupDepot.slug },
     });
   }
 

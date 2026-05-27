@@ -1,12 +1,11 @@
-import Link from "next/link";
 import { FleetUseCase } from "@prisma/client";
-import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/utils";
 import { ModelGallery, type ModelGalleryImage } from "@/components/fleet/model-gallery";
 import {
   RentalEstimate,
   type RentalEstimateTier,
 } from "@/components/fleet/rental-estimate";
+import { ModelBookingPanel } from "@/components/fleet/model-booking-panel";
 import { USE_CASE_LABELS } from "@/lib/fleet-use-cases";
 
 export interface ModelHeroProps {
@@ -22,9 +21,13 @@ export interface ModelHeroProps {
   monthlyRate: number;
   bondAmount: number;
   availableCount: number;
+  inventoryCount: number;
   categoryId: string;
+  modelId: string;
+  sampleVehicleId: string | null;
   firstAvailableVehicleId: string | null;
   depotsWithStock: Array<{ id: string; name: string; state: string; availableCount: number }>;
+  modelDepots: Array<{ id: string; name: string; state: string }>;
   pricingTiers?: RentalEstimateTier[];
 }
 
@@ -41,15 +44,14 @@ export function ModelHero({
   monthlyRate,
   bondAmount,
   availableCount,
+  inventoryCount,
   categoryId,
-  firstAvailableVehicleId,
-  depotsWithStock,
+  modelId,
+  sampleVehicleId,
+  modelDepots,
   pricingTiers,
 }: ModelHeroProps) {
-  const bookParams = new URLSearchParams({ categoryId });
-  if (firstAvailableVehicleId) bookParams.set("vehicleId", firstAvailableVehicleId);
-  const bookHref = `/booking?${bookParams.toString()}`;
-
+  const offTheRoad = availableCount === 0 && inventoryCount > 0;
   return (
     <div className="grid gap-8 lg:grid-cols-[1.1fr_1fr] lg:gap-12">
       <ModelGallery images={images} alt={`${year} ${make} ${model}`} />
@@ -103,28 +105,21 @@ export function ModelHero({
           />
         </div>
 
-        <div className="flex flex-col gap-2">
-          {availableCount > 0 ? (
-            <Button asChild variant="cta" size="lg" className="w-full sm:w-auto">
-              <Link href={bookHref}>Book this bike ➔</Link>
-            </Button>
-          ) : (
-            <Button variant="cta" size="lg" className="w-full sm:w-auto" disabled aria-disabled>
-              Currently fully booked
-            </Button>
-          )}
-          <p className="text-sm text-muted-foreground">
-            {availableCount > 0
-              ? `${availableCount} available now${
-                  depotsWithStock.length > 0
-                    ? ` at ${depotsWithStock
-                        .map((d) => `${d.name} (${d.availableCount})`)
-                        .join(", ")}`
-                    : ""
-                }.`
-              : "All units currently on hire — check back soon or contact us for availability."}
+        {offTheRoad ? (
+          <p className="rounded-md border border-amber-600/30 bg-amber-50/70 p-3 text-sm text-amber-800 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-200">
+            Currently off the road for servicing. Pick your dates below to check for
+            future availability, or contact us.
           </p>
-        </div>
+        ) : null}
+
+        <ModelBookingPanel
+          categoryId={categoryId}
+          modelId={modelId}
+          modelLabel={`${make} ${model}`}
+          bondAmount={bondAmount}
+          sampleVehicleId={sampleVehicleId}
+          modelDepots={modelDepots}
+        />
       </div>
     </div>
   );

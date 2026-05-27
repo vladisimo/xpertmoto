@@ -5,11 +5,13 @@ procedure for rotating each. Follow the order precisely — some secrets
 depend on others (e.g. rotating `AUTH_SECRET` invalidates every active
 session).
 
-All integration secrets live in `SystemSetting` rows keyed
-`integration:<service>:<field>` via [src/lib/integration-config.ts](../../src/lib/integration-config.ts)
-and surface in `/admin/integrations`. Database-level secrets
-(`DATABASE_URL`, `REDIS_URL`, `AUTH_SECRET`, `SECRET_ENC_KEY`,
-`ETOLL_ENC_KEY`) still live in `.env` and require a deploy.
+**All integration secrets are environment variables.** Stripe, Twilio, Resend,
+Xero, web-push (VAPID), PostHog and the GPS telemetry token are read from the
+deployment environment (`.env` / hosting secrets) — there is no in-app editor.
+Rotating any of them means updating the env var and restarting the affected
+processes. `/admin/integrations` is a read-only status dashboard for confirming
+the new value is live. Other env secrets (`DATABASE_URL`, `REDIS_URL`,
+`AUTH_SECRET`, `SECRET_ENC_KEY`, `ETOLL_ENC_KEY`) rotate the same way.
 
 ## Cadence
 
@@ -29,15 +31,15 @@ and surface in `/admin/integrations`. Database-level secrets
 
 1. In the Stripe dashboard (sandbox + live separately): **Developers → API keys → Roll secret key**.
 2. Copy the new `sk_live_...` / `sk_test_...`.
-3. In `/admin/integrations`, click **Rotate now** on the Stripe Secret Key row, paste the new value.
-4. Verify: open `/admin/integrations` again, confirm the "Last rotated" column shows now. Make a test booking on staging.
+3. Update `STRIPE_SECRET_KEY` in the target environment and restart the web + worker processes.
+4. Verify: open `/admin/integrations` → **Payments & ID** and confirm Stripe shows as configured. Make a test booking on staging.
 5. Revoke the previous key in the Stripe dashboard.
 
 ## Procedure — Stripe Webhook Signing Secret
 
 1. Stripe dashboard → **Developers → Webhooks → [your endpoint] → Roll secret**.
 2. Copy the new `whsec_...`.
-3. In `/admin/integrations`, **Rotate now** on the Stripe Webhook Secret row.
+3. Update `STRIPE_WEBHOOK_SECRET` in the target environment and restart the web process.
 4. Verify: click **Send test webhook** in Stripe — the event should process with status `200` and appear in `StripeWebhookEvent` with status `PROCESSED`.
 
 ## Procedure — AUTH_SECRET
@@ -63,13 +65,13 @@ Same shape as Database, but `REDIS_URL`. Rate limiting fails open on Redis outag
 ## Procedure — Twilio auth token
 
 1. Twilio console → **Account → API keys & tokens → Primary auth token → Roll**.
-2. In `/admin/integrations`, **Rotate now** on the Twilio Auth Token row.
+2. Update `TWILIO_AUTH_TOKEN` in the target environment and restart the web + worker processes.
 3. Verify: trigger a booking reminder (or manual SMS) to a test number; confirm the SMS arrives and `notification.status` flips to `DELIVERED` via the Twilio status callback.
 
 ## Procedure — Resend API key
 
 1. Resend dashboard → **API keys → Revoke old key, Create new key**.
-2. In `/admin/integrations`, **Rotate now** on the Resend API Key row.
+2. Update `RESEND_API_KEY` in the target environment and restart the web + worker processes.
 3. Verify: send a password reset email to a test account.
 
 ## Incident — suspected secret compromise

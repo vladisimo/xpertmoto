@@ -2,10 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   flushBookingWizard,
   isCustomerComplete,
+  isPickupTooLate,
   maxReachableStep,
   POST_BOOKING_RESET_FLAG,
+  resetStaleBookingWizard,
+  STALE_RESET_FLAG,
   useBookingWizard,
 } from "@/stores/booking-wizard";
+import { BOOKING_RULES } from "@/lib/constants";
 
 /**
  * Populate the wizard with the prerequisites for a target step so
@@ -34,8 +38,9 @@ function seedReachable(step: 1 | 2 | 3 | 4 | 5 | 6) {
     s.set("identityPath", "AU_LICENCE");
   }
   if (step >= 6) {
+    // Step 6 unlocks on terms acceptance alone — the customer wizard
+    // doesn't capture a signature (that happens with staff at pickup).
     s.set("agreedToTerms", true);
-    s.set("signatureDataUrl", "data:image/png;base64,abc");
   }
 }
 
@@ -173,6 +178,72 @@ describe("booking wizard store", () => {
     });
   });
 
+  describe("isPickupTooLate()", () => {
+    const cutoffMs = BOOKING_RULES.cutoffMinutesBeforePickup * 60_000;
+    const now = Date.UTC(2026, 4, 24, 12, 0, 0); // 2026-05-24T12:00:00Z
+
+    it("returns false for a null pickup", () => {
+      expect(isPickupTooLate(null, now)).toBe(false);
+    });
+
+    it("returns false for an unparseable date", () => {
+      expect(isPickupTooLate("not-a-date", now)).toBe(false);
+    });
+
+    it("returns true when pickup is in the past", () => {
+      expect(isPickupTooLate(new Date(now - 60_000).toISOString(), now)).toBe(true);
+    });
+
+    it("returns true when pickup is within the cut-off window", () => {
+      // 30 min out, cut-off is 60 min → too late.
+      expect(isPickupTooLate(new Date(now + cutoffMs / 2).toISOString(), now)).toBe(true);
+    });
+
+    it("returns false when pickup is comfortably beyond the cut-off", () => {
+      // 2h out, well past the 60-min cut-off.
+      expect(isPickupTooLate(new Date(now + cutoffMs * 2).toISOString(), now)).toBe(false);
+    });
+
+    it("treats the exact cut-off boundary as too late", () => {
+      expect(isPickupTooLate(new Date(now + cutoffMs).toISOString(), now)).toBe(true);
+    });
+  });
+
+  describe("resetStaleBookingWizard()", () => {
+    it("zeroes state to step 1 and wipes the persisted localStorage row", () => {
+      seedReachable(5);
+      useBookingWizard.getState().setStep(5);
+      expect(localStorage.getItem("xpertmoto-booking-wizard")).not.toBeNull();
+
+      resetStaleBookingWizard("PICKUP_PASSED");
+
+      const after = useBookingWizard.getState();
+      expect(after.step).toBe(1);
+      expect(after.categoryId).toBeNull();
+      expect(after.preferredVehicleId).toBeNull();
+      expect(localStorage.getItem("xpertmoto-booking-wizard")).toBeNull();
+    });
+
+    it("records the reason in sessionStorage under STALE_RESET_FLAG", () => {
+      resetStaleBookingWizard("UNAVAILABLE");
+      expect(sessionStorage.getItem(STALE_RESET_FLAG)).toBe("UNAVAILABLE");
+    });
+
+    it("does NOT set the post-booking flag (so it isn't mistaken for completion)", () => {
+      resetStaleBookingWizard("PICKUP_PASSED");
+      expect(sessionStorage.getItem(POST_BOOKING_RESET_FLAG)).toBeNull();
+    });
+
+    it("strips ?step= and anchors history at step 1", () => {
+      window.history.replaceState({ wizardStep: 4 }, "", "/booking?step=4");
+      const replaceSpy = vi.spyOn(window.history, "replaceState");
+      resetStaleBookingWizard("UNAVAILABLE");
+      expect(window.location.search).toBe("");
+      const lastCall = replaceSpy.mock.calls.at(-1)!;
+      expect(lastCall[0]).toEqual({ wizardStep: 1 });
+    });
+  });
+
   describe("isCustomerComplete()", () => {
     it("returns false without an identityPath", () => {
       expect(
@@ -254,13 +325,20 @@ describe("booking wizard store", () => {
       expect(maxReachableStep(useBookingWizard.getState())).toBe(4);
     });
 
-    it("returns 5 with full customer details but no terms/signature", () => {
+    it("returns 5 with full customer details but terms not yet agreed", () => {
       seedReachable(5);
       expect(maxReachableStep(useBookingWizard.getState())).toBe(5);
     });
 
-    it("returns 6 once terms agreed and signature captured", () => {
+    it("returns 6 once terms are agreed (no signature required in the wizard)", () => {
       seedReachable(6);
+      expect(maxReachableStep(useBookingWizard.getState())).toBe(6);
+    });
+
+    it("does not require a signature to reach step 6 — it's captured at pickup", () => {
+      seedReachable(5);
+      useBookingWizard.getState().set("agreedToTerms", true);
+      expect(useBookingWizard.getState().signatureDataUrl).toBeNull();
       expect(maxReachableStep(useBookingWizard.getState())).toBe(6);
     });
   });

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { uploadFile } from "@/lib/storage";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 const QUEUE = "db-backup" as const;
 const RETENTION_QUEUE = "db-backup-retention" as const;
@@ -147,6 +147,7 @@ export function startDbBackupScheduler() {
   const q = getQueue(QUEUE);
   if (q) {
     const schedule = process.env.BACKUP_CRON ?? "0 3 * * *";
+    monitorCron(QUEUE, schedule);
     q.add(
       "nightly",
       { triggeredBy: "SCHEDULED" },
@@ -155,6 +156,7 @@ export function startDbBackupScheduler() {
   }
   const rq = getQueue(RETENTION_QUEUE);
   if (rq) {
+    monitorCron(RETENTION_QUEUE, "15 3 * * *");
     rq.add(
       "retention-daily",
       {},

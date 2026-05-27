@@ -4,12 +4,14 @@ import { TRPCError } from "@trpc/server";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma as defaultPrisma } from "@/lib/prisma";
 import { CANCELLATION_POLICY } from "@/lib/constants";
+import { gstFromInclusive, roundCents } from "@/lib/money";
 import { getSettings } from "@/lib/settings";
 import { cancelPaymentIntent, refundCharge } from "@/lib/stripe";
 import { sendNotification } from "@/server/services/notification-sender";
 import { invalidateRevenueCaches } from "@/server/services/revenue-aggregator";
 import { supersedeByTarget } from "@/server/services/staff-tasks";
 import { writeAudit } from "@/server/services/audit";
+import { trackServer } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 import { getBranding } from "@/lib/branding";
 import { formatCurrency } from "@/lib/utils";
@@ -279,6 +281,7 @@ export async function cancel(
     where: { id: input.bookingId },
     include: {
       customer: { select: { id: true, firstName: true } },
+      pickupDepot: { select: { slug: true } },
       bondLedger: true,
       payments: {
         where: { type: "BOOKING_PAYMENT", status: "SUCCEEDED" },
@@ -442,6 +445,10 @@ export async function cancel(
           type: "REFUND",
           method: "STRIPE",
           amount: refundAmount,
+          // The refunded money is GST-inclusive booking revenue (10%), so the
+          // reversal carries a proportional GST credit. Without it the GST/BAS
+          // export overstates GST collected on cancelled bookings.
+          gstAmount: gstFromInclusive(refundAmount),
           status:
             refundStatus === "NOT_APPLICABLE" ? "PENDING" : refundStatus,
           stripeChargeId: refundStripeId,
@@ -529,41 +536,49 @@ export async function cancel(
     },
   });
 
-  // Issue an ATO §29-75 adjustment note for the cancellation refund
-  // (DECREASE) so the audit trail and the customer's documents page
-  // reflect the consideration change against the original tax invoice.
-  if (refundAmount > 0) {
-    try {
-      const { tryIssueAdjustmentForBooking } = await import(
-        "@/server/services/invoice-lifecycle"
-      );
-      const refundPayment = await prisma.payment.findFirst({
-        where: { bookingId: booking.id, type: "REFUND" },
-        orderBy: { createdAt: "desc" },
-        select: { id: true },
-      });
-      const pctLabel = Math.round(refundPct * 100);
-      await tryIssueAdjustmentForBooking({
-        bookingId: booking.id,
-        type: "DECREASE",
-        reason: "CANCELLATION",
-        description: `Cancellation refund (${pctLabel}% of paid amount)`,
-        lineItems: [
-          {
-            description: `Refund — booking cancelled`,
-            detail: input.reason,
-            quantity: 1,
-            unitPrice: refundAmount,
-            totalPrice: refundAmount,
-            gstIncluded: true,
-          },
-        ],
-        paymentId: refundPayment?.id ?? null,
-        issuedById: input.actorUserId,
-      });
-    } catch {
-      // tryIssueAdjustmentForBooking already logs.
-    }
+  // Issue an ATO §29-75 adjustment note (DECREASE) sized to the *change in
+  // consideration*, not the cash refunded. A cancelled booking is a supply
+  // never rendered, so the invoice must be credited down to the cash the
+  // business retains as consideration (the admin fee, or the full deposit in
+  // the no-refund window). For a deposit booking this is larger than the
+  // refund: it also writes off the never-collected at-pickup balance.
+  //
+  //   retained = amountPaid − refundAmount   (cash kept as consideration)
+  //   decrease = invoiceTotal − retained     (computed in the shared helper)
+  //
+  // Issued even when refundAmount == 0 (no-refund window) so the invoice for
+  // a non-rendered supply never overstates consideration.
+  try {
+    const { tryIssueCancellationAdjustment } = await import(
+      "@/server/services/invoice-lifecycle"
+    );
+    const refundPayment =
+      refundAmount > 0
+        ? await prisma.payment.findFirst({
+            where: { bookingId: booking.id, type: "REFUND" },
+            orderBy: { createdAt: "desc" },
+            select: { id: true },
+          })
+        : null;
+    const pctLabel = Math.round(refundPct * 100);
+    await tryIssueCancellationAdjustment({
+      bookingId: booking.id,
+      retained: roundCents(amountPaid - refundAmount).toNumber(),
+      refundAmount,
+      detail: input.reason,
+      description:
+        refundAmount > 0
+          ? `Cancellation credit — rental not provided (${pctLabel}% refunded, balance written off)`
+          : `Cancellation credit — rental not provided (no-refund window)`,
+      // Link the refund Payment when one exists — informational, and it keeps
+      // the retroactive sweep from issuing a second refund-sized note for the
+      // same payment. Null in the no-refund window (no payment to link).
+      paymentId: refundPayment?.id ?? null,
+      issuedById: input.actorUserId,
+    });
+  } catch {
+    // tryIssueCancellationAdjustment already swallows + logs; this outer
+    // guard only catches the dynamic-import failure path.
   }
 
   await sendCancellationEmail({
@@ -581,6 +596,23 @@ export async function cancel(
   });
 
   await invalidateRevenueCaches(booking.depotId);
+
+  await trackServer({
+    event: "booking.cancelled",
+    distinctId: booking.customerId,
+    properties: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      source: input.source,
+      refundAud: refundAmount,
+      refundPct,
+      refundStatus,
+      bondReleasedAud: bondReleasedAmount,
+      adminFeeAud: adminFeeCharged,
+      cascadedCount: cascadedBookingIds.length,
+    },
+    groups: booking.pickupDepot ? { depot: booking.pickupDepot.slug } : undefined,
+  });
 
   return {
     bookingId: booking.id,
