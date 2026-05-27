@@ -27,6 +27,12 @@ jobs:
       AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
       AUTH_URL: http://localhost:3000
       AUTH_TRUST_HOST: "true"
+      # Throwaway AES-256 key (base64 of 32 bytes) so env.ts validation passes
+      # in CI. Not a real secret — env.ts requires SECRET_ENC_KEY in every
+      # environment (crypto.ts at-rest encryption); without it the test,
+      # integration and build steps fail at import with "Invalid environment
+      # variables". Real deploys set their own via secrets.
+      SECRET_ENC_KEY: zlGuVHEjGOaCSjqLhgmHsf5r97YF9EdQHHdoibKNUug=
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
