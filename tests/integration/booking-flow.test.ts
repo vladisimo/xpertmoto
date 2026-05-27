@@ -24,9 +24,20 @@ function makeFake(): Fake {
         baseWeeklyRate: 399,
         baseMonthlyRate: 1149,
         bondAmount: 500,
+        // Phase A1/A2 pricing fields. FULL strategy → pay the whole total
+        // up front (no deposit split); no long-term threshold → not a
+        // progressive-billing hire. Keeps the flat-rate assertions below valid.
+        onlinePaymentStrategy: "FULL",
+        bookingFeeFlat: null,
+        bookingFeePercent: null,
+        longTermMinDays: null,
+        longTermDefaultFrequency: null,
       }),
     },
     season: { findMany: async () => [] },
+    // No per-vehicle/model/category tiers configured → resolvePricingTiers
+    // returns null and quote falls back to the flat category daily rate.
+    pricingTier: { findMany: async () => [] },
     addon: {
       findMany: async () => [
         { id: "helmet", name: "Helmet", dailyRate: 5, flatRate: 0, isPerDay: true },

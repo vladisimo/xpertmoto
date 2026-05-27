@@ -33,6 +33,14 @@ jobs:
       # integration and build steps fail at import with "Invalid environment
       # variables". Real deploys set their own via secrets.
       SECRET_ENC_KEY: zlGuVHEjGOaCSjqLhgmHsf5r97YF9EdQHHdoibKNUug=
+      # `next build` runs with NODE_ENV=production, so env.ts enforces its
+      # production-only requirements during page-data collection. Provide the
+      # schema's stub-friendly placeholders so the build validates without
+      # real third-party credentials (real deploys supply their own secrets).
+      ALLOW_STUB_STRIPE: "1"
+      APP_URL: http://localhost:3000
+      IP_HASH_SALT: ci-ip-hash-salt-placeholder
+      SMTP_HOST: localhost
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
