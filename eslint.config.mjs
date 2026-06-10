@@ -9,6 +9,7 @@ export default [
       "node_modules/**",
       ".next/**",
       ".next-e2e/**",
+      ".next-loadtest/**",
       "coverage/**",
       "playwright-report/**",
       "test-results/**",

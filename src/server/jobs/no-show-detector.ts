@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
+import { capturePaymentIntent } from "@/lib/stripe";
 import { getSettings } from "@/lib/settings";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { sendNotification } from "@/server/services/notification-sender";
@@ -73,6 +74,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           capturedAmount: true,
           releasedAmount: true,
           deductions: true,
+          stripePaymentIntentId: true,
         },
       },
     },
@@ -82,7 +84,37 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
   for (const b of candidates) {
     const ledger = b.bondLedger;
     const canForfeitBond = !!ledger && ledger.status === "HELD";
-    const forfeitedAmount = canForfeitBond ? Number(ledger.heldAmount) : 0;
+    // Forfeit only the still-capturable remainder so a bond that was already
+    // part-released can't push captured+released over heldAmount (DB CHECK).
+    const forfeitedAmount =
+      canForfeitBond && ledger
+        ? Math.max(
+            0,
+            Number(ledger.heldAmount) -
+              Number(ledger.capturedAmount) -
+              Number(ledger.releasedAmount),
+          )
+        : 0;
+
+    // Capture the bond hold at Stripe BEFORE the DB transaction. On a Stripe
+    // failure, skip this booking entirely — the CONFIRMED filter makes the
+    // next run retry rather than leaving a phantom forfeiture on the books.
+    let bondChargeId: string | null = null;
+    if (canForfeitBond && forfeitedAmount > 0 && ledger) {
+      try {
+        const capture = await capturePaymentIntent(ledger.stripePaymentIntentId, {
+          amountToCaptureCents: Math.round(forfeitedAmount * 100),
+          idempotencyKey: `bond-capture-noshow-${b.id}`,
+        });
+        bondChargeId = capture.latestChargeId;
+      } catch (err) {
+        logger.warn(
+          { err, bookingId: b.id, bookingReference: b.bookingReference },
+          "no-show-detector: bond capture failed at Stripe; skipping this booking (will retry next run)",
+        );
+        continue;
+      }
+    }
 
     try {
       await prisma.$transaction(async (tx) => {
@@ -110,16 +142,21 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           data: { status: "CANCELLED", cancelReason: "Booking marked as no-show" },
         });
 
-        if (canForfeitBond && ledger) {
+        if (canForfeitBond && forfeitedAmount > 0 && ledger) {
           const existingDeductions = Array.isArray(ledger.deductions)
             ? [...(ledger.deductions as Array<{ reason: string; amount: number }>)]
             : [];
           existingDeductions.push({ reason: "No-show forfeiture", amount: forfeitedAmount });
+          // A single capture finalises the hold — land terminal so the DB
+          // CHECK (captured + released == held) holds.
+          const newCaptured = Number(ledger.capturedAmount) + forfeitedAmount;
+          const newReleased = Number(ledger.heldAmount) - newCaptured;
           await tx.bondLedger.update({
             where: { id: ledger.id },
             data: {
               status: "FULLY_CAPTURED",
-              capturedAmount: forfeitedAmount,
+              capturedAmount: newCaptured,
+              releasedAmount: newReleased,
               deductions: existingDeductions as unknown as Prisma.InputJsonValue,
             },
           });
@@ -133,6 +170,9 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
               amount: forfeitedAmount,
               gstAmount: 0,
               status: "SUCCEEDED",
+              // Link the Stripe ids so reconcile matches this to the charge.
+              stripePaymentIntentId: ledger.stripePaymentIntentId,
+              stripeChargeId: bondChargeId,
               processedAt: new Date(),
               notes: "Bond capture: no-show forfeiture",
             },

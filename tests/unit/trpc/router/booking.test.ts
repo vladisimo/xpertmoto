@@ -18,6 +18,13 @@ vi.mock("@/server/services/pricing", async (importActual) => {
   const actual = await importActual<typeof import("@/server/services/pricing")>();
   return { ...actual, quote: vi.fn() };
 });
+// confirmPayment delegates to the booking-confirmation service; the error
+// classes stay real (importActual) because the procedure maps them to TRPC
+// codes via instanceof.
+vi.mock("@/server/services/booking-confirmation", async (importActual) => {
+  const actual = await importActual<typeof import("@/server/services/booking-confirmation")>();
+  return { ...actual, confirmBookingPayment: vi.fn() };
+});
 
 import { bookingRouter } from "../../../../src/server/trpc/router/booking";
 import { buildOnboardingVersion } from "../../../../src/lib/onboarding-status";
@@ -26,6 +33,11 @@ import {
   MinimumRentalPeriodError,
   OneWayDisallowedError,
 } from "../../../../src/server/services/pricing";
+import {
+  confirmBookingPayment,
+  PaymentNotSucceededError,
+  BookingNotConfirmableError,
+} from "../../../../src/server/services/booking-confirmation";
 
 const ONBOARDED = { onboardedAt: new Date(), onboardingVersion: buildOnboardingVersion() };
 const BARE = { onboardedAt: null, onboardingVersion: null };
@@ -214,5 +226,67 @@ describe("booking.quote — validation errors map to BAD_REQUEST", () => {
     quoteMock.mockRejectedValueOnce(new Error("db exploded"));
     const c = bookingRouter.createCaller(quoteCtx() as never);
     await expect(c.quote(input)).rejects.toThrow("db exploded");
+  });
+});
+
+describe("booking.confirmPayment — delegation + error mapping", () => {
+  const confirmMock = confirmBookingPayment as unknown as ReturnType<typeof vi.fn>;
+
+  function makeConfirmCtx(ownerId = "cust1") {
+    const prisma = {
+      booking: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({ customerId: ownerId }),
+      },
+    };
+    return {
+      prisma,
+      session: { user: { id: "cust1", role: "CUSTOMER" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as never;
+  }
+
+  it("returns the confirmed booking (idempotent retry included)", async () => {
+    confirmMock.mockResolvedValueOnce({
+      booking: { id: "b1", status: "CONFIRMED" },
+      alreadyConfirmed: true,
+    });
+    const caller = bookingRouter.createCaller(makeConfirmCtx());
+    const res = await caller.confirmPayment({ bookingId: "b1", paymentIntentId: "pi_1" });
+    expect(res).toEqual({ id: "b1", status: "CONFIRMED" });
+    expect(confirmMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        bookingId: "b1",
+        paymentIntentId: "pi_1",
+        actorUserId: "cust1",
+        source: "checkout",
+      }),
+    );
+  });
+
+  it("rejects a non-owner with FORBIDDEN before touching the service", async () => {
+    confirmMock.mockClear();
+    const caller = bookingRouter.createCaller(makeConfirmCtx("someone-else"));
+    await expect(
+      caller.confirmPayment({ bookingId: "b1" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
+  it("maps PaymentNotSucceededError to BAD_REQUEST", async () => {
+    confirmMock.mockRejectedValueOnce(new PaymentNotSucceededError("processing"));
+    const caller = bookingRouter.createCaller(makeConfirmCtx());
+    await expect(
+      caller.confirmPayment({ bookingId: "b1", paymentIntentId: "pi_1" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("maps BookingNotConfirmableError to CONFLICT", async () => {
+    confirmMock.mockRejectedValueOnce(new BookingNotConfirmableError("CANCELLED"));
+    const caller = bookingRouter.createCaller(makeConfirmCtx());
+    await expect(
+      caller.confirmPayment({ bookingId: "b1" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

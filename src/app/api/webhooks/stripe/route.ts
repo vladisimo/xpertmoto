@@ -9,6 +9,7 @@ import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writeAudit } from "@/server/services/audit";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
+import { confirmBookingPayment } from "@/server/services/booking-confirmation";
 import { stripeWebhookOutcome } from "@/server/services/metrics";
 import { sendNotification } from "@/server/services/notification-sender";
 import { recordRefund, invalidateRevenueCaches } from "@/server/services/revenue-aggregator";
@@ -216,12 +217,13 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           where: { stripePaymentIntentId: id },
         });
         if (bondLedger) {
-          const newStatus =
-            captured === 0
-              ? "RELEASED"
-              : captured >= authorised - 0.01
-                ? "FULLY_CAPTURED"
-                : "PARTIALLY_CAPTURED";
+          // A manual hold is single-capture: any non-zero capture finalises
+          // it (Stripe auto-releases the remainder), so a partial capture is
+          // terminal too. Land FULLY_CAPTURED with the remainder released so
+          // this agrees with the in-procedure write and the terminal DB CHECK
+          // (captured + released == held). captured == 0 means the auth
+          // dropped/expired uncaptured → RELEASED.
+          const newStatus = captured === 0 ? "RELEASED" : "FULLY_CAPTURED";
           await prisma.bondLedger.update({
             where: { id: bondLedger.id },
             data: {
@@ -314,8 +316,11 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       // Issue a branded receipt PDF for the now-SUCCEEDED payment so the
       // attachment resolver can find a `receiptPdfKey` to email out.
       // Best-effort — the post-trip sweep retries any payments still
-      // missing a receipt.
-      if (payment?.id) {
+      // missing a receipt. Skip bond holds: BOND_CAPTURE rows now carry the
+      // bond PI id, so this branch matches them on capture — but the capture
+      // path already issues the GST adjustment note + emails it, so a second
+      // "Payment received" receipt would double up.
+      if (payment?.id && !isBondHold) {
         try {
           const { issueReceiptForPayment } = await import(
             "@/server/services/invoice-lifecycle"
@@ -328,7 +333,7 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           );
         }
       }
-      if (payment?.customerId) {
+      if (payment?.customerId && !isBondHold) {
         const { default: PaymentReceiptEmail } = await import(
           "../../../../../emails/payment-receipt"
         );
@@ -378,16 +383,73 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           dedupKey: `payment-received:${payment.id}`,
         });
       }
+
+      // C1 rescue: the checkout flow confirms the booking from the browser
+      // after `stripe.confirmPayment` — if the tab died or the mutation
+      // failed, the customer was charged but the booking is still
+      // PENDING_PAYMENT. The deposit PI carries the bookingId in metadata,
+      // so confirm it here (idempotent; concurrent client confirms
+      // serialise on the allocation lock). Failures are logged and left
+      // for the nightly pending-payment sweep, which retries the same
+      // service.
+      const rescueBookingId = parsed.metadata?.bookingId;
+      if (!isBondHold && rescueBookingId) {
+        const rescueBooking = await prisma.booking.findUnique({
+          where: { id: rescueBookingId },
+          select: { status: true, bookingReference: true },
+        });
+        if (rescueBooking?.status === "PENDING_PAYMENT") {
+          try {
+            const rescued = await confirmBookingPayment(prisma, {
+              bookingId: rescueBookingId,
+              paymentIntentId: id,
+              source: "stripe-webhook",
+            });
+            if (!rescued.alreadyConfirmed) {
+              logger.info(
+                { bookingId: rescueBookingId, reference: rescueBooking.bookingReference },
+                "stripe webhook: confirmed paid booking the client never confirmed",
+              );
+            }
+          } catch (err) {
+            logger.error(
+              {
+                err: err instanceof Error ? err.message : String(err),
+                bookingId: rescueBookingId,
+                reference: rescueBooking.bookingReference,
+              },
+              "stripe webhook: paid booking could not be confirmed — pending-payment sweep will retry",
+            );
+          }
+        } else if (rescueBooking?.status === "CANCELLED") {
+          logger.error(
+            { bookingId: rescueBookingId, reference: rescueBooking.bookingReference },
+            "stripe webhook: payment succeeded for a CANCELLED booking — refund/reconcile manually",
+          );
+        }
+      }
       return;
     }
     case "payment_intent.amount_capturable_updated": {
-      const parsed = parseEventObject(paymentIntentFailedSchema, obj, event.type);
+      const parsed = parseEventObject(paymentIntentSchema, obj, event.type);
       if (!parsed) return;
       const id = parsed.id;
-      await prisma.bondLedger.updateMany({
+      const linked = await prisma.bondLedger.updateMany({
         where: { stripePaymentIntentId: id },
         data: { status: "HELD" },
       });
+      // C1 rescue companion: when the booking was confirmed by the
+      // webhook (browser died mid-checkout) the BondLedger row exists but
+      // has no PI id — the client never reported it. The bond PI carries
+      // the bookingId in metadata, so attach it here; without this, the
+      // settlement flow can't capture the held bond.
+      const bondBookingId = parsed.metadata?.bookingId;
+      if (linked.count === 0 && bondBookingId && parsed.metadata?.type === "bond") {
+        await prisma.bondLedger.updateMany({
+          where: { bookingId: bondBookingId, stripePaymentIntentId: null },
+          data: { stripePaymentIntentId: id, status: "HELD" },
+        });
+      }
       const bond = await prisma.bondLedger.findFirst({
         where: { stripePaymentIntentId: id },
         select: {

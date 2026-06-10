@@ -32,6 +32,7 @@ All hooks are wired through [.claude/settings.json](../settings.json).
 | Script | Behaviour |
 |---|---|
 | [stop/definition-of-done.sh](stop/definition-of-done.sh) | Runs `npm run typecheck`, `npm run lint`, and `scripts/lint-status-badges.sh`. **Blocks Stop** with the failure summary if any are red, so Claude can't claim "done" on a broken state. Honours `stop_hook_active` to avoid loops. Skip with `CLAUDE_SKIP_DOD=1` or `CLAUDE_SKIP_HOOKS=definition-of-done`. |
+| [stop/git-sync-reminder.sh](stop/git-sync-reminder.sh) | Non-blocking. Warns (exit 1) if the current branch has tracked uncommitted changes or commits not on any remote, so local work doesn't silently pile up. Points at the `/ship` skill (commit → push → PR). Read-only, no fetch. Skip with `CLAUDE_SKIP_HOOKS=git-sync-reminder`. |
 
 ### PreCompact
 | Script | Behaviour |

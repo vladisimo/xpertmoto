@@ -15,6 +15,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
+import { TRPCClientError } from "@trpc/client";
 import { useSupportWidget } from "@/stores/support-widget";
 import { trpc } from "@/lib/trpc/client";
 
@@ -86,25 +87,25 @@ export function SupportStructuredForm({ hasCustomer }: SupportStructuredFormProp
     },
   });
 
-  async function onSubmit(values: FormValues) {
-    let cid = conversationId;
-    if (!cid) {
-      const res = await start.mutateAsync({
-        bookingReference: values.bookingReference || undefined,
-        // Guest payload is only relevant for unauthenticated users —
-        // logged-in customers are resolved from the session server-side.
-        guest:
-          !hasCustomer && values.contactEmail
-            ? {
-                name: values.contactName || "Guest",
-                email: values.contactEmail,
-                phone: values.contactPhone,
-              }
-            : undefined,
-      });
-      cid = res.conversationId;
-      setConversationId(cid);
-    }
+  async function startNewConversation(values: FormValues): Promise<string> {
+    const res = await start.mutateAsync({
+      bookingReference: values.bookingReference || undefined,
+      // Guest payload is only relevant for unauthenticated users —
+      // logged-in customers are resolved from the session server-side.
+      guest:
+        !hasCustomer && values.contactEmail
+          ? {
+              name: values.contactName || "Guest",
+              email: values.contactEmail,
+              phone: values.contactPhone,
+            }
+          : undefined,
+    });
+    setConversationId(res.conversationId);
+    return res.conversationId;
+  }
+
+  async function raise(cid: string, values: FormValues) {
     const created = await create.mutateAsync({
       conversationId: cid,
       category,
@@ -114,6 +115,37 @@ export function SupportStructuredForm({ hasCustomer }: SupportStructuredFormProp
     });
     setTicketNumber(created.ticketNumber);
     setStep("sent");
+  }
+
+  async function onSubmit(values: FormValues) {
+    form.clearErrors("root");
+    try {
+      const cid = conversationId ?? (await startNewConversation(values));
+      try {
+        await raise(cid, values);
+      } catch (err) {
+        // The conversationId is persisted in localStorage so a session can be
+        // reopened, but it can go stale: the conversation may have been pruned,
+        // the dev DB reseeded, or it belongs to a previously signed-in user on
+        // this browser. The server then replies NOT_FOUND / FORBIDDEN. When we
+        // reused a persisted id, discard it, open a fresh conversation, and
+        // retry once before surfacing anything to the user.
+        const code = err instanceof TRPCClientError ? err.data?.code : undefined;
+        if (conversationId && (code === "NOT_FOUND" || code === "FORBIDDEN")) {
+          setConversationId(null);
+          await raise(await startNewConversation(values), values);
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      form.setError("root", {
+        message:
+          err instanceof TRPCClientError && err.message
+            ? err.message
+            : "We couldn't raise your ticket. Please try again.",
+      });
+    }
   }
 
   return (
@@ -227,6 +259,12 @@ export function SupportStructuredForm({ hasCustomer }: SupportStructuredFormProp
               )}
             />
           </div>
+        )}
+
+        {form.formState.errors.root && (
+          <p className="text-sm text-destructive" role="alert">
+            {form.formState.errors.root.message}
+          </p>
         )}
 
         <div className="flex items-center justify-between gap-2 border-t pt-4">

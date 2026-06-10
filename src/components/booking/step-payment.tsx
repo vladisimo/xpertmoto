@@ -37,6 +37,15 @@ export function StepPayment() {
   const [created, setCreated] = useState<CreatedBooking | null>(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The card was charged but the confirm mutation failed (network drop,
+  // transient server error). confirmPayment is idempotent server-side, so
+  // retrying is safe and never double-charges — surface a dedicated
+  // recovery panel instead of the generic card-error box.
+  const [confirmFailed, setConfirmFailed] = useState(false);
+  const lastPaidArgsRef = useRef<{
+    paymentIntentId: string;
+    bondPaymentIntentId?: string;
+  } | null>(null);
   // Guards against re-firing handleStart() if React strict-mode or
   // re-renders cause the auto-start effect to run twice. Each step-6
   // mount creates at most one PaymentIntent.
@@ -105,6 +114,7 @@ export function StepPayment() {
     bondPaymentIntentId?: string;
   }) {
     if (!created) return;
+    lastPaidArgsRef.current = args;
     setProcessing(true);
     setError(null);
     try {
@@ -119,14 +129,14 @@ export function StepPayment() {
         `/booking/confirmation?ref=${created.booking.bookingReference}`,
       );
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Payment succeeded but confirmation failed. Contact support with booking reference " +
-            created.booking.bookingReference,
-      );
+      setConfirmFailed(true);
+      setError(e instanceof Error ? e.message : null);
       setProcessing(false);
     }
+  }
+
+  function retryConfirm() {
+    if (lastPaidArgsRef.current) void handlePaid(lastPaidArgsRef.current);
   }
 
   // Drive the wizard's bottom-bar CTA on step 6: "Preparing payment…"
@@ -139,10 +149,12 @@ export function StepPayment() {
     (created?.payOnlineAmount ?? 0) + (created?.bondAmount ?? 0);
   const continueLabel = missingImagesMessage
     ? "Back to your details"
-    : created
-      ? `Pay & confirm ${formatCurrency(totalToday)}`
-      : "Preparing payment…";
-  const continueDisabled = missingImagesMessage ? false : !created;
+    : confirmFailed
+      ? "Retry confirmation"
+      : created
+        ? `Pay & confirm ${formatCurrency(totalToday)}`
+        : "Preparing payment…";
+  const continueDisabled = missingImagesMessage || confirmFailed ? false : !created;
   const continuePending = missingImagesMessage
     ? false
     : processing || stripeProcessing;
@@ -151,8 +163,13 @@ export function StepPayment() {
       goBackToDetails();
       return;
     }
+    if (confirmFailed) {
+      retryConfirm();
+      return;
+    }
     await stripeFormRef.current?.submit();
-  }, [missingImagesMessage, goBackToDetails]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [missingImagesMessage, goBackToDetails, confirmFailed]);
   useStepContinueAction({
     label: continueLabel,
     disabled: continueDisabled,
@@ -219,6 +236,56 @@ export function StepPayment() {
     );
   }
 
+  // Card charged but confirmation failed — recovery panel. The card form
+  // is deliberately NOT re-rendered: re-submitting Stripe against an
+  // already-succeeded PaymentIntent would surface a bogus "payment
+  // failed". Retrying the (idempotent) confirm mutation is the fix; the
+  // Stripe webhook also confirms paid bookings server-side, so checking
+  // "My bookings" a little later works too.
+  if (created && confirmFailed) {
+    return (
+      <div className="space-y-4">
+        {layout === "desktop" && <h2 className="h2">Payment</h2>}
+        <div className="rounded-md border border-border bg-card p-4 text-sm">
+          <p className="font-medium">
+            Your payment was received — we just couldn&apos;t finish
+            confirming the booking.
+          </p>
+          <p className="mt-2 text-muted-foreground">
+            Booking reference{" "}
+            <span className="font-semibold text-foreground">
+              {created.booking.bookingReference}
+            </span>
+            . You have not been charged twice, and retrying is safe. If this
+            keeps failing, your booking will still be confirmed automatically
+            shortly — check My bookings, or contact us with the reference
+            above.
+          </p>
+          {error && (
+            <p className="mt-2 text-xs text-muted-foreground">{error}</p>
+          )}
+          <div className="mt-4 flex flex-wrap gap-2">
+            {layout === "desktop" && (
+              <Button variant="cta" onClick={retryConfirm} disabled={processing}>
+                {processing ? "Retrying…" : "Try again"}
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              disabled={processing}
+              onClick={() => {
+                flushBookingWizard();
+                router.push("/dashboard/bookings");
+              }}
+            >
+              Go to my bookings
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Phase 2 — card entry step, shown once the booking + PaymentIntents
   // are created. Going "Back" from here would require cancelling the
   // PaymentIntent; for now we just let the user retry the card form.
@@ -231,6 +298,11 @@ export function StepPayment() {
          *  from the mobile DOM tightens the gap above "Your quote". */}
         {layout === "desktop" && <h2 className="h2">Payment</h2>}
         {showInlineQuote && <CollapsedQuoteSummary />}
+        <p className="text-xs text-muted-foreground">
+          Your booking and price are held while you complete payment. If you
+          don&apos;t finish, nothing is charged and the booking is released
+          automatically.
+        </p>
         <StripePaymentForm
           ref={stripeFormRef}
           paymentClientSecret={created.paymentClientSecret!}

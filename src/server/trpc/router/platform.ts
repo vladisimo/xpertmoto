@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { createTRPCRouter, superAdminProcedure } from "../trpc";
 import {
-  OBSERVABILITY_METRICS,
   estimateCostAud,
   hasCustomPricing,
 } from "@/lib/observability-pricing";

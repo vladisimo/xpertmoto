@@ -93,6 +93,16 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   devIndicators: false,
+  // LOADTEST_BUILD=1 skips lint/type checking during `next build` for the
+  // perf-measurement build only (the repo's lint/tsc baseline is red — see
+  // project_lint_baseline_red memory). Never set in normal/CI builds; has no
+  // runtime effect. Used by docker-compose.loadtest.yml / .env.loadtest.
+  ...(process.env.LOADTEST_BUILD === "1"
+    ? {
+        eslint: { ignoreDuringBuilds: true },
+        typescript: { ignoreBuildErrors: true },
+      }
+    : {}),
   allowedDevOrigins: ["xpertmoto.dfortix.ai", "192.168.0.42"],
   turbopack: {
     root: import.meta.dirname,

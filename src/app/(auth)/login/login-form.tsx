@@ -153,10 +153,21 @@ export function LoginForm({
     }
     setSendingMagicLink(true);
     try {
+      // H4: carry the deep-link the user was bounced from (e.g. a booking
+      // page) into the emailed link, so clicking it lands them where they
+      // were headed instead of /portal-select. Only same-origin relative
+      // paths are honoured — anything else falls back to the default.
+      const requested = new URLSearchParams(window.location.search).get(
+        "callbackUrl",
+      );
+      const callbackUrl =
+        requested && requested.startsWith("/") && !requested.startsWith("//")
+          ? requested
+          : "/portal-select";
       const res = await signIn("nodemailer", {
         email,
         redirect: false,
-        callbackUrl: "/portal-select",
+        callbackUrl,
       });
       if (res?.error) {
         setError(errorMessage("EmailSignin"));

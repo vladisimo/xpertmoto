@@ -20,9 +20,11 @@ vi.mock("@/server/services/audit", () => ({
 // stays a pure unit test. `refundCharge` succeeds by default;
 // `tryIssueAdjustmentForBooking` is asserted on directly.
 const refundChargeMock = vi.fn();
+const capturePaymentIntentMock = vi.fn();
 vi.mock("@/lib/stripe", () => ({
   cancelPaymentIntent: vi.fn().mockResolvedValue(undefined),
   refundCharge: (...args: unknown[]) => refundChargeMock(...args),
+  capturePaymentIntent: (...args: unknown[]) => capturePaymentIntentMock(...args),
 }));
 const tryIssueAdjustmentForBookingMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("@/server/services/invoice-lifecycle", () => ({
@@ -54,6 +56,10 @@ type TestCtx = {
       findUniqueOrThrow: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
     };
+    bondLedger: {
+      findUniqueOrThrow: ReturnType<typeof vi.fn>;
+      update: ReturnType<typeof vi.fn>;
+    };
     $transaction: ReturnType<typeof vi.fn>;
   };
   session: { user: { id: string; role: "STAFF" } };
@@ -65,6 +71,7 @@ function makeCtx(overrides: {
   booking?: Record<string, unknown>;
   paymentCreated?: Record<string, unknown>;
   sourcePayment?: Record<string, unknown> | null;
+  bondLedger?: Record<string, unknown> | null;
 } = {}): TestCtx {
   const booking = {
     id: "b1",
@@ -85,18 +92,32 @@ function makeCtx(overrides: {
     update: vi.fn().mockResolvedValue({}),
   };
 
+  const bondLedger = {
+    findUniqueOrThrow:
+      overrides.bondLedger === undefined
+        ? vi.fn()
+        : vi.fn().mockResolvedValue(overrides.bondLedger),
+    update: vi.fn().mockResolvedValue({}),
+  };
+
+  const booking_ = {
+    findUniqueOrThrow: vi.fn().mockResolvedValue(booking),
+    // applyCaptureToBalanceDue (and captureBond's overflow path) read via
+    // findUnique, not findUniqueOrThrow.
+    findUnique: vi.fn().mockResolvedValue(booking),
+    update: vi.fn().mockResolvedValue({}),
+  };
+
   return {
     prisma: {
-      booking: {
-        findUniqueOrThrow: vi.fn().mockResolvedValue(booking),
-        // applyCaptureToBalanceDue reads via findUnique, not findUniqueOrThrow.
-        findUnique: vi.fn().mockResolvedValue(booking),
-        update: vi.fn().mockResolvedValue({}),
-      },
+      booking: booking_,
       payment,
-      // Run the callback against a tx proxy that reuses the same payment mock,
-      // so create/update calls inside the transaction are observable.
-      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn({ payment })),
+      bondLedger,
+      // Run the callback against a tx proxy that reuses the same mocks, so
+      // create/update calls inside the transaction are observable.
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) =>
+        fn({ payment, bondLedger, booking: booking_ }),
+      ),
     },
     // protectedProcedure reads role off session.user, so the role gate on
     // staffProcedure runs against this value.
@@ -284,5 +305,119 @@ describe("bookingSettlement.captureNow", () => {
     const c = bookingSettlementRouter.createCaller(ctx as never);
     await expect(c.captureNow({ paymentId: "pay1" })).rejects.toBeInstanceOf(TRPCError);
     expect(chargeOffSessionForUserMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("bookingSettlement.captureBond", () => {
+  const heldBond = {
+    id: "bl1",
+    bookingId: "b1",
+    customerId: "cust1",
+    status: "HELD",
+    heldAmount: 200,
+    capturedAmount: 0,
+    releasedAmount: 0,
+    deductions: [],
+    stripePaymentIntentId: "pi_bond_1",
+  };
+
+  it("captures the hold once and lands the ledger terminal (FULLY_CAPTURED + releasedAmount)", async () => {
+    capturePaymentIntentMock.mockResolvedValueOnce({
+      id: "pi_bond_1",
+      status: "succeeded",
+      amountReceivedCents: 8000,
+      latestChargeId: "ch_bond_1",
+      captured: true,
+    });
+    const ctx = makeCtx({ bondLedger: heldBond, paymentCreated: { id: "bondpay1" } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+
+    const res = await c.captureBond({ bookingId: "b1", amount: 80, deductionLabel: "Front fairing scratch" });
+
+    // Captured the requested amount from Stripe, keyed on the ledger id.
+    expect(capturePaymentIntentMock).toHaveBeenCalledWith("pi_bond_1", {
+      amountToCaptureCents: 8000,
+      idempotencyKey: "bond-capture-bl1",
+    });
+    // Ledger lands terminal: captured 80, released 120 (= held − captured).
+    expect(ctx.prisma.bondLedger.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          capturedAmount: 80,
+          releasedAmount: 120,
+          status: "FULLY_CAPTURED",
+        }),
+      }),
+    );
+    // BOND_CAPTURE row carries the Stripe ids so reconcile can match it.
+    const bondCreate = ctx.prisma.payment.create.mock.calls.find(
+      ([arg]) => (arg as { data: { type: string } }).data.type === "BOND_CAPTURE",
+    )?.[0] as { data: Record<string, unknown> };
+    expect(bondCreate.data).toMatchObject({
+      amount: 80,
+      status: "SUCCEEDED",
+      stripePaymentIntentId: "pi_bond_1",
+      stripeChargeId: "ch_bond_1",
+    });
+    // Adjustment note for the bond-funded amount.
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "INCREASE",
+        lineItems: [expect.objectContaining({ totalPrice: 80 })],
+      }),
+    );
+    expect(res).toEqual({ capturedAmount: 80, overflowToCard: 0, status: "FULLY_CAPTURED" });
+  });
+
+  it("rejects a second capture — a Stripe hold is single-capture", async () => {
+    const ctx = makeCtx({ bondLedger: { ...heldBond, capturedAmount: 50 } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.captureBond({ bookingId: "b1", amount: 30, deductionLabel: "More damage" }),
+    ).rejects.toBeInstanceOf(TRPCError);
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+  });
+
+  it("captures the full hold and bills the overflow to the card as PENDING", async () => {
+    capturePaymentIntentMock.mockResolvedValueOnce({
+      id: "pi_bond_1",
+      status: "succeeded",
+      amountReceivedCents: 20000,
+      latestChargeId: "ch_bond_2",
+      captured: true,
+    });
+    const ctx = makeCtx({
+      bondLedger: { ...heldBond, heldAmount: 100 },
+      booking: { id: "b1", balanceDue: 0 },
+      paymentCreated: { id: "bondpay2" },
+    });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+
+    const res = await c.captureBond({ bookingId: "b1", amount: 150, deductionLabel: "Total loss bar end" });
+
+    // Only the held amount is captured from the bond.
+    expect(capturePaymentIntentMock).toHaveBeenCalledWith(
+      "pi_bond_1",
+      expect.objectContaining({ amountToCaptureCents: 10000 }),
+    );
+    // Overflow becomes a PENDING DAMAGE_CHARGE on the card.
+    const overflow = ctx.prisma.payment.create.mock.calls.find(
+      ([arg]) => (arg as { data: { type: string } }).data.type === "DAMAGE_CHARGE",
+    )?.[0] as { data: Record<string, unknown> };
+    expect(overflow.data).toMatchObject({ amount: 50, status: "PENDING" });
+    // ...and is added to balanceDue (0 + 50).
+    expect(ctx.prisma.booking.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ balanceDue: 50 }) }),
+    );
+    expect(res).toEqual({ capturedAmount: 100, overflowToCard: 50, status: "FULLY_CAPTURED" });
+  });
+
+  it("rejects when the bond is already terminal", async () => {
+    const ctx = makeCtx({ bondLedger: { ...heldBond, status: "FULLY_CAPTURED" } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.captureBond({ bookingId: "b1", amount: 10, deductionLabel: "x" }),
+    ).rejects.toBeInstanceOf(TRPCError);
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
   });
 });

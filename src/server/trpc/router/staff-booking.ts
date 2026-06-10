@@ -18,7 +18,7 @@ import {
 } from "@/server/services/booking-times-guard";
 import { sendNotification } from "@/server/services/notification-sender";
 import { cancel as cancelBookingService } from "@/server/services/booking-cancellation";
-import { refundCharge } from "@/lib/stripe";
+import { capturePaymentIntent, refundCharge } from "@/lib/stripe";
 import {
   captureBookingId,
   captureCustomerId,
@@ -2170,7 +2170,58 @@ export const staffBookingRouter = createTRPCRouter({
         Math.round(missingL * (input.fuelChargePerLitre ?? fuelPerLitre) * 100) / 100;
 
       const damageChargeAmount = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
+
+      // Split damage funding between the bond hold and the card on file. A
+      // Stripe manual-capture hold is single-capture: capture up to the held
+      // amount from the bond now (Stripe releases the rest), and bill any
+      // excess to the card as a PENDING charge the capture-pending job
+      // collects off-session. Previously the full damage was BOTH queued as a
+      // card charge AND marked captured from the bond — a double-claim that
+      // would charge the customer twice once the bond capture actually fired.
+      const bondForBooking = await ctx.prisma.bondLedger.findUnique({
+        where: { bookingId: b.id },
+      });
+      const bondCapturable =
+        bondForBooking && bondForBooking.status === "HELD"
+          ? Math.max(
+              0,
+              Number(bondForBooking.heldAmount) -
+                Number(bondForBooking.capturedAmount) -
+                Number(bondForBooking.releasedAmount),
+            )
+          : 0;
+      const fromBond = Math.min(damageChargeAmount, bondCapturable);
+      const fromCard = Math.round((damageChargeAmount - fromBond) * 100) / 100;
+
+      // Capture the bond hold BEFORE opening the DB transaction — never hold a
+      // Postgres transaction open across a Stripe round-trip. On Stripe
+      // failure we abort the whole check-in rather than record a phantom.
+      let bondChargeId: string | null = null;
+      if (fromBond > 0 && bondForBooking) {
+        try {
+          const capture = await capturePaymentIntent(bondForBooking.stripePaymentIntentId, {
+            amountToCaptureCents: Math.round(fromBond * 100),
+            idempotencyKey: `bond-capture-${bondForBooking.id}`,
+          });
+          bondChargeId = capture.latestChargeId;
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Stripe could not capture the bond hold: ${
+              err instanceof Error ? err.message : "unknown error"
+            }. Check-in was not completed.`,
+          });
+        }
+      }
+
+      // Full settlement value (used for revenue recognition + adjustment
+      // notes — GST is owed on the whole damage regardless of how it's
+      // funded).
       const additionalCharges = Math.round((lateFee + fuelCharge + damageChargeAmount) * 100) / 100;
+      // What still needs collecting from the card: late + fuel (PENDING) plus
+      // the damage overflow beyond the bond. The fromBond slice is collected
+      // immediately via the capture above, so it never enters balanceDue.
+      const balanceCharges = Math.round((lateFee + fuelCharge + fromCard) * 100) / 100;
       // When there are pending mechanic quotes we park at RETURNED so a
       // background job can flip to COMPLETED once all work orders close.
       const finalStatus: "RETURNED" | "COMPLETED" = hasPendingQuotes ? "RETURNED" : "COMPLETED";
@@ -2184,7 +2235,7 @@ export const staffBookingRouter = createTRPCRouter({
             returnOdometerKm: input.odometerKm,
             checkedInById: ctx.user.id,
             staffNotes: input.notes,
-            balanceDue: additionalCharges,
+            balanceDue: balanceCharges,
             statusLog: {
               create: {
                 previousStatus: b.status,
@@ -2193,7 +2244,7 @@ export const staffBookingRouter = createTRPCRouter({
                 reason: hasPendingQuotes ? "Checked in (pending quote)" : "Checked in",
               },
             },
-            ...(additionalCharges > 0 && {
+            ...((lateFee > 0 || fuelCharge > 0 || fromCard > 0) && {
               payments: {
                 create: [
                   ...(lateFee > 0
@@ -2220,15 +2271,19 @@ export const staffBookingRouter = createTRPCRouter({
                         },
                       ]
                     : []),
-                  ...(damageChargeAmount > 0
+                  // Only the damage that exceeds the bond goes to the card as
+                  // a PENDING charge; the bond-funded slice is captured below.
+                  ...(fromCard > 0
                     ? [
                         {
                           reference: `DMG-${Date.now()}`,
                           type: "DAMAGE_CHARGE" as const,
                           method: "STRIPE" as const,
-                          amount: damageChargeAmount,
+                          amount: fromCard,
                           status: "PENDING" as const,
-                          notes: input.damageReason ?? (input.returnAssessmentId ? "Per signed return assessment" : undefined),
+                          notes:
+                            (input.damageReason ?? (input.returnAssessmentId ? "Per signed return assessment" : "Damage")) +
+                            " (amount beyond bond)",
                         },
                       ]
                     : []),
@@ -2265,37 +2320,63 @@ export const staffBookingRouter = createTRPCRouter({
             },
           });
         }
-        // Release or partial-capture bond
+        // Capture the bond hold for `fromBond` (already captured at Stripe
+        // above) or release it in full when there's no damage. A single
+        // capture finalises the hold — captured + released == held — so we
+        // always land a terminal state that satisfies the DB CHECK.
         const existingBond = await tx.bondLedger.findUnique({
           where: { bookingId: b.id },
         });
         if (existingBond) {
-          await tx.bondLedger.update({
-            where: { bookingId: b.id },
-            data:
-              damageChargeAmount > 0
-                ? {
-                    capturedAmount: damageChargeAmount,
-                    releasedAmount: Math.max(
-                      0,
-                      Number(b.bondAmount) - damageChargeAmount,
-                    ),
-                    status:
-                      damageChargeAmount >= Number(b.bondAmount)
-                        ? "FULLY_CAPTURED"
-                        : "PARTIALLY_CAPTURED",
-                    deductions: [
-                      {
-                        reason: input.damageReason ?? (input.returnAssessmentId ? "Signed return assessment" : "Damage"),
-                        amount: damageChargeAmount,
-                      },
-                    ],
-                  }
-                : {
-                    releasedAmount: Number(b.bondAmount),
-                    status: "RELEASED",
+          const held = Number(existingBond.heldAmount);
+          if (fromBond > 0) {
+            const priorDeductions = Array.isArray(existingBond.deductions)
+              ? (existingBond.deductions as Array<{ reason: string; amount: number }>)
+              : [];
+            await tx.bondLedger.update({
+              where: { bookingId: b.id },
+              data: {
+                capturedAmount: fromBond,
+                releasedAmount: Math.max(0, held - fromBond),
+                status: "FULLY_CAPTURED",
+                deductions: [
+                  ...priorDeductions,
+                  {
+                    reason: input.damageReason ?? (input.returnAssessmentId ? "Signed return assessment" : "Damage"),
+                    amount: fromBond,
                   },
-          });
+                ],
+              },
+            });
+            // Record the bond collection as a SUCCEEDED Payment carrying the
+            // Stripe ids so stripe-reconcile's SYSTEM_LEDGER cross-check
+            // matches it to the captured charge.
+            await tx.payment.create({
+              data: {
+                reference: `BOND-CAP-${Date.now()}`,
+                bookingId: b.id,
+                customerId: b.customerId,
+                type: "BOND_CAPTURE",
+                method: "STRIPE",
+                amount: fromBond,
+                gstAmount: 0,
+                status: "SUCCEEDED",
+                stripePaymentIntentId: existingBond.stripePaymentIntentId,
+                stripeChargeId: bondChargeId,
+                processedAt: now,
+                processedById: ctx.user.id,
+                notes: `Bond capture at check-in: ${input.damageReason ?? "damage"}`,
+              },
+            });
+          } else {
+            await tx.bondLedger.update({
+              where: { bookingId: b.id },
+              data: {
+                releasedAmount: held,
+                status: "RELEASED",
+              },
+            });
+          }
         }
         if (input.returnAssessmentId) {
           await tx.damageCharge.updateMany({

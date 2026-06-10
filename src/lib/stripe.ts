@@ -145,6 +145,13 @@ export async function retrievePaymentIntent(
   id: string;
   status: string;
   amountCents: number;
+  /**
+   * Amount actually captured, in cents. For a manual-capture bond hold this
+   * is 0 while the auth is live (`requires_capture`) or after it expires
+   * (`canceled`), and equals the captured amount once `succeeded`. The bond
+   * reconciliation uses this to tell a real capture from a phantom one.
+   */
+  amountReceivedCents: number;
   latestChargeId: string | null;
 } | null> {
   if (
@@ -161,6 +168,7 @@ export async function retrievePaymentIntent(
             id: string;
             status: string;
             amount: number;
+            amount_received?: number | null;
             latest_charge: string | null;
           }>;
         };
@@ -172,6 +180,7 @@ export async function retrievePaymentIntent(
     id: pi.id,
     status: pi.status,
     amountCents: pi.amount,
+    amountReceivedCents: pi.amount_received ?? 0,
     latestChargeId: pi.latest_charge,
   };
 }
@@ -342,6 +351,96 @@ export async function createBondHold(args: CreatePaymentIntentArgs): Promise<Pay
     id: pi.id,
     clientSecret: pi.client_secret ?? "",
     status: pi.status === "succeeded" ? "succeeded" : "requires_confirmation",
+  };
+}
+
+export type CapturePaymentIntentResult = {
+  id: string;
+  status: string;
+  /** Amount Stripe actually captured, in cents. */
+  amountReceivedCents: number;
+  /** The charge created by the capture — store on the Payment row. */
+  latestChargeId: string | null;
+  /**
+   * `false` in stub mode (Stripe unconfigured or a stub PI id) — the caller
+   * still updates the ledger, mirroring `cancelPaymentIntent`. `true` when
+   * Stripe acknowledged a real capture.
+   */
+  captured: boolean;
+};
+
+/**
+ * Capture a previously-authorised manual-capture PaymentIntent — used to
+ * collect against a bond hold (`createBondHold`). Pass `amountToCaptureCents`
+ * to capture a partial amount; Stripe then **auto-releases the remainder** and
+ * the hold is finalised — a manual-capture PI can only be captured once, so a
+ * partial capture is terminal. Omit it to capture the full authorised amount.
+ *
+ * Stub-safe like `cancelPaymentIntent`: a null / stub PI id (no Stripe account
+ * in dev) returns a success-shaped result with `captured: false` so the caller
+ * still updates the BondLedger. In production an unconfigured Stripe throws via
+ * `assertNotStubbedInProduction()` rather than silently no-op'ing a capture.
+ *
+ * Pass a stable `idempotencyKey` (e.g. the BondLedger id) so a transient
+ * network retry doesn't double-attempt the capture.
+ */
+export async function capturePaymentIntent(
+  paymentIntentId: string | null | undefined,
+  args: { amountToCaptureCents?: number; idempotencyKey?: string } = {},
+): Promise<CapturePaymentIntentResult> {
+  if (
+    !paymentIntentId ||
+    paymentIntentId.startsWith("pi_stub_") ||
+    paymentIntentId.startsWith("pi_bond_stub_")
+  ) {
+    assertNotStubbedInProduction();
+    return {
+      id: paymentIntentId ?? "pi_unknown",
+      status: "succeeded",
+      amountReceivedCents: args.amountToCaptureCents ?? 0,
+      latestChargeId: null,
+      captured: false,
+    };
+  }
+  const stripe = (await getStripeClient()) as
+    | {
+        paymentIntents: {
+          capture: (
+            id: string,
+            params: Record<string, unknown>,
+            opts?: { idempotencyKey?: string },
+          ) => Promise<{
+            id: string;
+            status: string;
+            amount_received?: number | null;
+            latest_charge: string | null;
+          }>;
+        };
+      }
+    | null;
+  if (!stripe) {
+    assertNotStubbedInProduction();
+    return {
+      id: paymentIntentId,
+      status: "succeeded",
+      amountReceivedCents: args.amountToCaptureCents ?? 0,
+      latestChargeId: null,
+      captured: false,
+    };
+  }
+  const pi = await stripe.paymentIntents.capture(
+    paymentIntentId,
+    args.amountToCaptureCents != null
+      ? { amount_to_capture: args.amountToCaptureCents }
+      : {},
+    args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : undefined,
+  );
+  return {
+    id: pi.id,
+    status: pi.status,
+    amountReceivedCents: pi.amount_received ?? args.amountToCaptureCents ?? 0,
+    latestChargeId: pi.latest_charge,
+    captured: true,
   };
 }
 

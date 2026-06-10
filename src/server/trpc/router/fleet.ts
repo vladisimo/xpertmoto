@@ -15,6 +15,7 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
+import { capturePaymentIntent } from "@/lib/stripe";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 
@@ -1419,13 +1420,35 @@ export const fleetRouter = createTRPCRouter({
         throw new TRPCError({ code: "CONFLICT", message: "Customer has already been charged for this incident." });
       }
 
-      const result = await ctx.prisma.$transaction(async (tx) => {
-        const bond = incident.booking!.bondLedger;
-        const bondHeld =
-          bond && bond.status === "HELD" ? Number(bond.heldAmount) - Number(bond.capturedAmount) : 0;
-        const fromBond = Math.min(bondHeld, amount);
-        const fromCard = amount - fromBond;
+      const bond = incident.booking!.bondLedger;
+      const bondHeld =
+        bond && bond.status === "HELD" ? Number(bond.heldAmount) - Number(bond.capturedAmount) : 0;
+      const fromBond = Math.min(bondHeld, amount);
+      const fromCard = Math.round((amount - fromBond) * 100) / 100;
 
+      // Capture the bond hold at Stripe BEFORE the DB transaction — never hold
+      // a Postgres transaction open across a Stripe round-trip. A manual hold
+      // is single-capture, so this consumes the hold (Stripe releases the
+      // rest); any excess is billed to the card as a PENDING follow-up below.
+      let bondChargeId: string | null = null;
+      if (fromBond > 0 && bond) {
+        try {
+          const capture = await capturePaymentIntent(bond.stripePaymentIntentId, {
+            amountToCaptureCents: Math.round(fromBond * 100),
+            idempotencyKey: `bond-capture-incident-${incident.id}`,
+          });
+          bondChargeId = capture.latestChargeId;
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Stripe could not capture the bond hold: ${
+              err instanceof Error ? err.message : "unknown error"
+            }. No charge was applied.`,
+          });
+        }
+      }
+
+      const result = await ctx.prisma.$transaction(async (tx) => {
         const payments: { id: string; amount: number; source: "BOND" | "CARD" }[] = [];
 
         if (fromBond > 0 && bond) {
@@ -1438,6 +1461,9 @@ export const fleetRouter = createTRPCRouter({
               method: "STRIPE",
               amount: fromBond,
               status: "SUCCEEDED",
+              // Link the Stripe ids so reconcile matches this to the charge.
+              stripePaymentIntentId: bond.stripePaymentIntentId,
+              stripeChargeId: bondChargeId,
               notes: input.notes ?? `Damage charge captured from bond for incident ${incident.incidentNumber}`,
               processedById: ctx.user.id,
               processedAt: new Date(),
@@ -1445,14 +1471,15 @@ export const fleetRouter = createTRPCRouter({
           });
           const newCaptured = Number(bond.capturedAmount) + fromBond;
           const newReleased = Math.max(0, Number(bond.heldAmount) - newCaptured);
-          const fullyCaptured = newCaptured >= Number(bond.heldAmount);
           const prior = Array.isArray(bond.deductions) ? (bond.deductions as unknown[]) : [];
           await tx.bondLedger.update({
             where: { bookingId },
             data: {
               capturedAmount: newCaptured,
               releasedAmount: newReleased,
-              status: fullyCaptured ? "FULLY_CAPTURED" : "PARTIALLY_CAPTURED",
+              // Single-capture: the hold is finalised once captured (Stripe
+              // released the remainder), so always land terminal.
+              status: "FULLY_CAPTURED",
               deductions: [
                 ...prior,
                 { reason: `Incident ${incident.incidentNumber}`, amount: fromBond },

@@ -44,6 +44,12 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/server/services/notification-sender", () => ({ sendNotification }));
 
+// The forfeiture path now captures the bond hold at Stripe before writing.
+const capturePaymentIntent = vi
+  .fn()
+  .mockResolvedValue({ id: "pi_bond_1", status: "succeeded", amountReceivedCents: 20000, latestChargeId: "ch_bond_1", captured: true });
+vi.mock("@/lib/stripe", () => ({ capturePaymentIntent }));
+
 vi.mock("@/server/jobs/queue", () => ({
   getQueue: vi.fn().mockReturnValue(null),
   registerWorker: vi.fn(),
@@ -61,6 +67,7 @@ beforeEach(() => {
   auditCreate.mockClear();
   billingPlanUpdateMany.mockClear();
   sendNotification.mockClear();
+  capturePaymentIntent.mockClear();
   getSettings.mockReset();
   getSettings.mockResolvedValue({
     "booking.noShowGraceHours": 2,
@@ -87,20 +94,31 @@ describe("no-show-detector", () => {
           capturedAmount: "0",
           releasedAmount: "0",
           deductions: [],
+          stripePaymentIntentId: "pi_bond_1",
         },
       },
     ]);
     const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
     const r = await runNoShowDetector();
     expect(r.markedNoShow).toBe(1);
+    // The bond hold is actually captured at Stripe (full forfeiture).
+    expect(capturePaymentIntent).toHaveBeenCalledWith("pi_bond_1", {
+      amountToCaptureCents: 20000,
+      idempotencyKey: "bond-capture-noshow-book_noshow",
+    });
     expect(bookingUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "NO_SHOW" }),
       }),
     );
+    // Lands terminal: captured 200, released 0 (= held − captured).
     expect(bondUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ status: "FULLY_CAPTURED", capturedAmount: 200 }),
+        data: expect.objectContaining({
+          status: "FULLY_CAPTURED",
+          capturedAmount: 200,
+          releasedAmount: 0,
+        }),
       }),
     );
     expect(paymentCreate).toHaveBeenCalledWith(
@@ -118,6 +136,36 @@ describe("no-show-detector", () => {
       data: { status: "AVAILABLE" },
     });
     expect(sendNotification).toHaveBeenCalled();
+  });
+
+  it("skips the booking (no phantom) when the Stripe bond capture fails", async () => {
+    capturePaymentIntent.mockRejectedValueOnce(new Error("payment_intent_unexpected_state"));
+    bookingFindMany.mockResolvedValue([
+      {
+        id: "book_fail",
+        bookingReference: "SCT-0009",
+        customerId: "cust_9",
+        vehicleId: "veh_9",
+        pickupDateTime: new Date(Date.now() - 3 * 3600 * 1000),
+        bondAmount: "200.00",
+        pickupDepot: { slug: "gold-coast" },
+        bondLedger: {
+          id: "bond_9",
+          status: "HELD",
+          heldAmount: "200.00",
+          capturedAmount: "0",
+          releasedAmount: "0",
+          deductions: [],
+          stripePaymentIntentId: "pi_bond_9",
+        },
+      },
+    ]);
+    const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
+    const r = await runNoShowDetector();
+    expect(r.markedNoShow).toBe(0);
+    expect(bookingUpdate).not.toHaveBeenCalled();
+    expect(bondUpdate).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
   });
 
   it("falls back to a MANUAL_CHARGE no-show fee when no bond is held", async () => {

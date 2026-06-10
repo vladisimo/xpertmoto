@@ -1,0 +1,4 @@
+ bookingId | count 
+-----------+-------
+(0 rows)
+

@@ -3474,6 +3474,8 @@ export const adminRouter = createTRPCRouter({
       telemetryDevices,
       etollAccountCount,
       etollLastSync,
+      linktAccountCount,
+      linktLastSync,
       notificationsSent,
       notificationsDelivered,
       notificationsFailed,
@@ -3490,6 +3492,8 @@ export const adminRouter = createTRPCRouter({
       }),
       ctx.prisma.etollAccount.count({ where: { isActive: true } }),
       ctx.prisma.etollSync.findFirst({ orderBy: { startedAt: "desc" } }),
+      ctx.prisma.linktAccount.count({ where: { isActive: true } }),
+      ctx.prisma.linktSync.findFirst({ orderBy: { startedAt: "desc" } }),
       ctx.prisma.notification.count({ where: { createdAt: { gte: weekAgo }, status: "SENT" } }),
       ctx.prisma.notification.count({ where: { createdAt: { gte: weekAgo }, status: "DELIVERED" } }),
       ctx.prisma.notification.count({ where: { createdAt: { gte: weekAgo }, status: "FAILED" } }),
@@ -3538,10 +3542,10 @@ export const adminRouter = createTRPCRouter({
         lastSyncStatus: etollLastSync?.status ?? null,
       },
       linkt: {
-        configured:
-          (await ctx.prisma.systemSetting.count({
-            where: { key: { startsWith: "linkt:account:" } },
-          })) > 0,
+        configured: linktAccountCount > 0,
+        accountCount: linktAccountCount,
+        lastSyncAt: linktLastSync?.startedAt ?? null,
+        lastSyncStatus: linktLastSync?.status ?? null,
       },
       weather: { configured: true, provider: "Open-Meteo" },
       calendar: { configured: true },

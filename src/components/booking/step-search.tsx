@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { trpc } from "@/lib/trpc/client";
 import { cn } from "@/lib/utils";
+import { BOOKING_RULES } from "@/lib/constants";
 import {
   STALE_RESET_FLAG,
   useBookingWizard,
@@ -301,6 +302,12 @@ export function StepSearch() {
                     {returnState.error && (
                       <FormMessage>{returnState.error.message}</FormMessage>
                     )}
+                    <p className="caption text-muted-foreground">
+                      Times shown account for a{" "}
+                      {BOOKING_RULES.bufferHoursBetweenBookings}-hour
+                      preparation window between hires, so every vehicle is
+                      cleaned and checked before your pickup.
+                    </p>
                   </FormItem>
                 )}
               />

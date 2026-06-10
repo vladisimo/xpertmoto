@@ -105,8 +105,17 @@ function InnerForm({
   // ref during render — keeps the React Compiler lint rule happy.
   const submitRef = useRef<() => Promise<void>>(async () => {});
 
+  // Synchronous double-submit guard. The `processing` state disables the
+  // button, but a fast second click (or bottom-bar CTA tap) can land in
+  // the ~100ms before React re-renders — a second confirmPayment against
+  // an already-succeeded PaymentIntent surfaces a bogus "Payment failed"
+  // even though the card was charged. A ref flips synchronously.
+  const inFlightRef = useRef(false);
+
   async function runSubmit() {
     if (!stripe || !elements) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setProcessing(true);
     setError(null);
     try {
@@ -171,6 +180,9 @@ function InnerForm({
         (err as StripeError)?.message ??
         (err instanceof Error ? err.message : "Payment failed");
       setError(message);
+      // Re-arm only on failure — after a successful charge the form must
+      // never submit again (the parent swaps to confirm/recovery UI).
+      inFlightRef.current = false;
       setProcessing(false);
     }
   }
@@ -255,7 +267,9 @@ function InnerForm({
             </span>
           </div>
           <div className="text-xs text-sky-700/80 dark:text-sky-300/80">
-            Held on your card — not charged. Released after the vehicle is returned.
+            Held on your card — not charged. Released after the vehicle is
+            returned. While held, this amount reduces your card&apos;s
+            available balance.
           </div>
         </div>
       )}

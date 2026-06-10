@@ -111,7 +111,10 @@ export function RegisterForm({ allProviders, enabledProviders }: RegisterFormPro
         acceptedPrivacy: true,
       });
       await signIn("credentials", { email: values.email, password: values.password, redirect: false });
-      window.location.href = "/dashboard";
+      // Straight to the onboarding wizard — the customer layout would
+      // redirect there anyway (profile gate); skipping the /dashboard hop
+      // avoids a jarring double redirect on first sign-in.
+      window.location.href = "/onboarding?next=/dashboard";
     } catch (e) {
       const message = e instanceof Error ? e.message : "Registration failed";
       // CONFLICT surfaces from tRPC with the message "Email already registered"

@@ -73,6 +73,12 @@ export async function rateLimit(
   limit: number,
   windowSec: number,
 ): Promise<RateLimitResult> {
+  // LOADTEST_RATELIMIT_OFF=1 disables the IP-keyed limiter so a synthetic
+  // load test from a single host isn't throttled. Build-flagged for the
+  // load-test stack only (.env.loadtest); never enable in production.
+  if (process.env.LOADTEST_RATELIMIT_OFF === "1") {
+    return { ok: true, remaining: limit, resetAt: Date.now() + windowSec * 1000 };
+  }
   const client = getRedis();
   if (!client) {
     logger.warn({ key, limit, windowSec }, "rate-limit: redis unavailable, failing open");

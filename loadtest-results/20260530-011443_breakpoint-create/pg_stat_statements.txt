@@ -1,0 +1,43 @@
+## top 25 by total_exec_time
+872.7|5682|0.15|77.3|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","method","path","status","durationMs","depotId"
+39.4|100|0.39|3.5|INSERT INTO "public"."Booking" ("id","bookingReference","customerId","categoryId","depotId","pickupDepotId","returnDepotId","status","source
+33.8|200|0.17|3.0|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","reqId","newData"
+21.1|100|0.21|1.9|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+20.7|110|0.19|1.8|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","depotId","
+15.5|100|0.15|1.4|SELECT "public"."Booking"."id", "public"."Booking"."vehicleId" FROM "public"."Booking" WHERE ("public"."Booking"."vehicleId" IN ($1,$2,$3,$4
+13.1|100|0.13|1.2|UPDATE "public"."User" SET "lastLoginAt" = $1, "failedLoginCount" = $2, "lockedUntil" = $3, "updatedAt" = $4 WHERE ("public"."User"."id" = $
+12.9|100|0.13|1.1|INSERT INTO "public"."BookingStatusLog" ("id","bookingId","newStatus","changedById","timestamp","createdAt") VALUES ($1,$2,CAST($3::text AS 
+7.7|100|0.08|0.7|SELECT "public"."VehicleModel"."id", "public"."VehicleModel"."slug", "public"."VehicleModel"."make", "public"."VehicleModel"."model", "publi
+6.9|506|0.01|0.6|SELECT $2 FROM ONLY "public"."User" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+5.8|1|5.79|0.5|SELECT "public"."Booking"."id", "public"."Booking"."bookingReference", "public"."Booking"."customerId", "public"."Booking"."vehicleId", "pub
+5.7|100|0.06|0.5|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."slug", "public"."Depot"."addressLine1", "public"."Depot"."addressLi
+5.6|100|0.06|0.5|SELECT "public"."Booking"."id", "public"."Booking"."bookingReference", "public"."Booking"."customerId", "public"."Booking"."vehicleId", "pub
+5.5|400|0.01|0.5|SELECT "public"."User"."id" FROM "public"."User" WHERE ("public"."User"."id" = $1 AND $4=$5) LIMIT $2 OFFSET $3
+4.9|100|0.05|0.4|SELECT "public"."User"."id", "public"."User"."email", "public"."User"."emailVerified", "public"."User"."phone", "public"."User"."phoneVerifi
+4.7|10|0.47|0.4|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","durationMs
+4.6|100|0.05|0.4|SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."categoryId" = $1 AND "public"."Vehicle"."depotId" = $2 AND
+4.1|100|0.04|0.4|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."depotId", "public"."DepotOperatingHours"."dayOfWeek", "public"."
+3.6|100|0.04|0.3|SELECT "public"."Vehicle"."id", "public"."Vehicle"."status"::text, "public"."Vehicle"."modelId" FROM "public"."Vehicle" WHERE ("public"."Veh
+3.2|6|0.53|0.3|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","newData","timest
+3.1|200|0.02|0.3|SELECT "public"."CustomerProfile"."id", "public"."CustomerProfile"."stripeCustomerId", "public"."CustomerProfile"."userId" FROM "public"."Cu
+2.9|100|0.03|0.3|SELECT "public"."SystemSetting"."id", "public"."SystemSetting"."key", "public"."SystemSetting"."value", "public"."SystemSetting"."group", "p
+2.6|200|0.01|0.2|SELECT "public"."User"."id", "public"."User"."email", "public"."User"."firstName", "public"."User"."lastName", "public"."User"."phone" FROM 
+2.3|100|0.02|0.2|SELECT COUNT(*) FROM (SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."depotId" = $1 AND "public"."Vehicle"
+2.2|100|0.02|0.2|SELECT "public"."Season"."id", "public"."Season"."name", "public"."Season"."startDate", "public"."Season"."endDate", "public"."Season"."mult
+
+## top 15 by mean_exec_time (calls>5)
+0.53|6|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","newData","timest
+0.47|10|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","durationMs
+0.39|100|INSERT INTO "public"."Booking" ("id","bookingReference","customerId","categoryId","depotId","pickupDepotId","returnDepotId","status","source
+0.21|100|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+0.19|110|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","depotId","
+0.17|200|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","reqId","newData"
+0.15|100|SELECT "public"."Booking"."id", "public"."Booking"."vehicleId" FROM "public"."Booking" WHERE ("public"."Booking"."vehicleId" IN ($1,$2,$3,$4
+0.15|5682|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","method","path","status","durationMs","depotId"
+0.13|100|UPDATE "public"."User" SET "lastLoginAt" = $1, "failedLoginCount" = $2, "lockedUntil" = $3, "updatedAt" = $4 WHERE ("public"."User"."id" = $
+0.13|100|INSERT INTO "public"."BookingStatusLog" ("id","bookingId","newStatus","changedById","timestamp","createdAt") VALUES ($1,$2,CAST($3::text AS 
+0.12|6|INSERT INTO "public"."ServerRequestLog" ("id","method","path","status","durationMs","ipAddress","userAgent","sampleWeight","createdAt") VALU
+0.08|100|SELECT "public"."VehicleModel"."id", "public"."VehicleModel"."slug", "public"."VehicleModel"."make", "public"."VehicleModel"."model", "publi
+0.07|6|UPDATE "public"."Payment" SET "notes" = $1, "updatedAt" = $2 WHERE ("public"."Payment"."id" = $3 AND $4=$5) RETURNING "public"."Payment"."id
+0.06|100|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."slug", "public"."Depot"."addressLine1", "public"."Depot"."addressLi
+0.06|100|SELECT "public"."Booking"."id", "public"."Booking"."bookingReference", "public"."Booking"."customerId", "public"."Booking"."vehicleId", "pub

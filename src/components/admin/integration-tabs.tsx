@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDateTime } from "@/lib/utils";
 import { IntegrationTabEtoll } from "@/components/staff/integration-tab-etoll";
+import { IntegrationTabLinkt } from "@/components/staff/integration-tab-linkt";
 import {
   CreditCard,
   MessageSquare,
@@ -138,8 +139,8 @@ export function IntegrationsTabOverview({ overview }: { overview: Overview }) {
     { label: "Resend email", level: resendLevel(overview), detail: overview.resend.webhookConfigured ? "Bounce/complaint webhook active" : overview.resend.configured ? "Webhook secret missing" : "Not configured" },
     { label: "Xero accounting", level: xeroLevel(overview), detail: overview.xero.connected ? `Tenant ${overview.xero.tenantId?.slice(0, 8)}…` : overview.xero.configured ? "Not connected" : "Not configured" },
     { label: "NSW rego check", level: "ok", detail: "Weekly scraper active" },
-    { label: "NSW E-Toll", level: overview.etoll.configured ? "ok" : "off", detail: `${overview.etoll.accountCount} account${overview.etoll.accountCount === 1 ? "" : "s"}` },
-    { label: "Linkt tolls", level: overview.linkt.configured ? "ok" : "off", detail: overview.linkt.configured ? "Accounts configured" : "No accounts connected" },
+    { label: "NSW E-Toll (legacy)", level: overview.etoll.configured ? "ok" : "off", detail: `${overview.etoll.accountCount} account${overview.etoll.accountCount === 1 ? "" : "s"}` },
+    { label: "Linkt tolls", level: overview.linkt.configured ? "ok" : "off", detail: `${overview.linkt.accountCount} account${overview.linkt.accountCount === 1 ? "" : "s"}` },
     { label: "Calendar (.ics)", level: "ok", detail: "Active on all bookings" },
     { label: "Weather (Open-Meteo)", level: "ok", detail: "3-day forecasts on depot cards" },
     { label: "Web push", level: pushLevel(overview), detail: `${overview.push.subscriptionCount} subscriber${overview.push.subscriptionCount === 1 ? "" : "s"}` },
@@ -287,14 +288,17 @@ export function IntegrationsTabTolls({ overview }: { overview: Overview }) {
           <KV label="Last sync" value={overview.etoll.lastSyncAt ? formatDateTime(overview.etoll.lastSyncAt) : "never"} />
           <KV label="Last status" value={overview.etoll.lastSyncStatus ?? "—"} muted={!overview.etoll.lastSyncStatus} />
         </IntegrationCard>
-        <IntegrationCard icon={Receipt} title="Linkt (VIC/QLD)" subtitle="Daily Playwright sync for CityLink / LinktGO" level={overview.linkt.configured ? "ok" : "off"}>
-          <p className="text-xs text-muted-foreground">
-            {overview.linkt.configured
-              ? "Accounts configured. Sync runs daily at 03:00 Brisbane."
-              : "No Linkt accounts connected yet. Selectors require live-portal tuning on first run."}
-          </p>
+        <IntegrationCard
+          icon={Receipt}
+          title="Linkt (Transurban)"
+          subtitle={`${overview.linkt.accountCount} connected account${overview.linkt.accountCount === 1 ? "" : "s"} · daily sync 03:00 Brisbane`}
+          level={overview.linkt.configured ? "ok" : "off"}
+        >
+          <KV label="Last sync" value={overview.linkt.lastSyncAt ? formatDateTime(overview.linkt.lastSyncAt) : "never"} />
+          <KV label="Last status" value={overview.linkt.lastSyncStatus ?? "—"} muted={!overview.linkt.lastSyncStatus} />
         </IntegrationCard>
       </div>
+      <IntegrationTabLinkt canManage />
       <IntegrationTabEtoll canManage />
     </div>
   );

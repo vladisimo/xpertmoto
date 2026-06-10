@@ -1,0 +1,43 @@
+## top 25 by total_exec_time
+60.5|188|0.32|38.0|SELECT "public"."Booking"."id", "public"."Booking"."vehicleId" FROM "public"."Booking" WHERE ("public"."Booking"."vehicleId" IN ($1,$2,$3,$4
+19.9|59|0.34|12.5|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+17.0|188|0.09|10.7|SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."categoryId" = $1 AND "public"."Vehicle"."depotId" = $2 AND
+10.1|96|0.11|6.4|SELECT "public"."VehicleModel"."id", "public"."VehicleModel"."slug", "public"."VehicleModel"."make", "public"."VehicleModel"."model", "publi
+5.6|96|0.06|3.5|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."slug", "public"."Depot"."addressLine1", "public"."Depot"."addressLi
+4.5|188|0.02|2.8|SELECT "public"."MaintenanceWorkOrder"."id", "public"."MaintenanceWorkOrder"."vehicleId" FROM "public"."MaintenanceWorkOrder" WHERE ("public
+4.3|96|0.04|2.7|SELECT "public"."Vehicle"."id", "public"."Vehicle"."status"::text, "public"."Vehicle"."modelId" FROM "public"."Vehicle" WHERE ("public"."Veh
+3.6|8|0.45|2.3|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","reqId","newData"
+3.1|59|0.05|2.0|SELECT "public"."VehicleCategory"."id", "public"."VehicleCategory"."name", "public"."VehicleCategory"."slug", "public"."VehicleCategory"."de
+3.0|59|0.05|1.9|SELECT "public"."SystemSetting"."id", "public"."SystemSetting"."key", "public"."SystemSetting"."value", "public"."SystemSetting"."group", "p
+3.0|59|0.05|1.9|SELECT "public"."Season"."id", "public"."Season"."name", "public"."Season"."startDate", "public"."Season"."endDate", "public"."Season"."mult
+2.6|4|0.66|1.7|INSERT INTO "public"."Booking" ("id","bookingReference","customerId","categoryId","depotId","pickupDepotId","returnDepotId","status","source
+2.6|96|0.03|1.6|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."depotId", "public"."DepotOperatingHours"."dayOfWeek", "public"."
+2.6|59|0.04|1.6|SELECT COUNT(*) FROM (SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."depotId" = $1 AND "public"."Vehicle"
+2.5|59|0.04|1.6|SELECT "public"."PricingTier"."id", "public"."PricingTier"."categoryId", "public"."PricingTier"."modelId", "public"."PricingTier"."vehicleId
+1.6|59|0.03|1.0|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."timezone" FROM "public"."Depot" WHERE ("public"."Depot"."id" IN ($1
+1.4|96|0.01|0.9|SELECT "public"."VehicleCategory"."id", "public"."VehicleCategory"."licenceRequired", "public"."VehicleCategory"."baseDailyRate" FROM "publi
+1.4|96|0.01|0.9|SELECT "public"."VehicleImage"."id", "public"."VehicleImage"."url", "public"."VehicleImage"."vehicleId" FROM "public"."VehicleImage" WHERE (
+1.3|11|0.12|0.8|INSERT INTO "public"."ServerRequestLog" ("id","method","path","status","durationMs","ipAddress","userAgent","sampleWeight","createdAt") VALU
+1.2|59|0.02|0.8|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."dayOfWeek", "public"."DepotOperatingHours"."openTime", "public".
+1.0|4|0.25|0.6|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","depotId","
+1.0|5|0.20|0.6|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","newData","timest
+0.8|1|0.78|0.5|SELECT count(*) FROM "Booking"
+0.7|4|0.19|0.5|UPDATE "public"."User" SET "lastLoginAt" = $1, "failedLoginCount" = $2, "lockedUntil" = $3, "updatedAt" = $4 WHERE ("public"."User"."id" = $
+0.6|4|0.15|0.4|INSERT INTO "public"."BookingStatusLog" ("id","bookingId","newStatus","changedById","timestamp","createdAt") VALUES ($1,$2,CAST($3::text AS 
+
+## top 15 by mean_exec_time (calls>5)
+0.45|8|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","reqId","newData"
+0.34|59|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+0.32|188|SELECT "public"."Booking"."id", "public"."Booking"."vehicleId" FROM "public"."Booking" WHERE ("public"."Booking"."vehicleId" IN ($1,$2,$3,$4
+0.12|11|INSERT INTO "public"."ServerRequestLog" ("id","method","path","status","durationMs","ipAddress","userAgent","sampleWeight","createdAt") VALU
+0.11|96|SELECT "public"."VehicleModel"."id", "public"."VehicleModel"."slug", "public"."VehicleModel"."make", "public"."VehicleModel"."model", "publi
+0.09|188|SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."categoryId" = $1 AND "public"."Vehicle"."depotId" = $2 AND
+0.06|96|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."slug", "public"."Depot"."addressLine1", "public"."Depot"."addressLi
+0.05|59|SELECT "public"."VehicleCategory"."id", "public"."VehicleCategory"."name", "public"."VehicleCategory"."slug", "public"."VehicleCategory"."de
+0.05|59|SELECT "public"."SystemSetting"."id", "public"."SystemSetting"."key", "public"."SystemSetting"."value", "public"."SystemSetting"."group", "p
+0.05|59|SELECT "public"."Season"."id", "public"."Season"."name", "public"."Season"."startDate", "public"."Season"."endDate", "public"."Season"."mult
+0.04|96|SELECT "public"."Vehicle"."id", "public"."Vehicle"."status"::text, "public"."Vehicle"."modelId" FROM "public"."Vehicle" WHERE ("public"."Veh
+0.04|59|SELECT COUNT(*) FROM (SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."depotId" = $1 AND "public"."Vehicle"
+0.04|59|SELECT "public"."PricingTier"."id", "public"."PricingTier"."categoryId", "public"."PricingTier"."modelId", "public"."PricingTier"."vehicleId
+0.03|96|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."depotId", "public"."DepotOperatingHours"."dayOfWeek", "public"."
+0.03|59|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."timezone" FROM "public"."Depot" WHERE ("public"."Depot"."id" IN ($1

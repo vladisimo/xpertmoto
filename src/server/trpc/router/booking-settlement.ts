@@ -2,7 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Prisma } from "@prisma/client";
 import { createTRPCRouter, staffProcedure } from "../trpc";
-import { cancelPaymentIntent, refundCharge } from "@/lib/stripe";
+import { cancelPaymentIntent, capturePaymentIntent, refundCharge } from "@/lib/stripe";
 import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
 import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { writePaymentAudit } from "@/server/services/audit-payment";
@@ -381,93 +381,162 @@ export const bookingSettlementRouter = createTRPCRouter({
           message: `Bond is already ${ledger.status}; nothing to capture.`,
         });
       }
-      const held = Number(ledger.heldAmount);
-      const captured = Number(ledger.capturedAmount);
-      const alreadyReleased = Number(ledger.releasedAmount);
-      const remaining = held - captured - alreadyReleased;
-      if (input.amount > remaining + 0.01) {
+      // A Stripe manual-capture hold can only be captured ONCE — the first
+      // (even partial) capture finalises the auth and releases the remainder.
+      // So a bond can be captured exactly once; any further recovery goes to
+      // the card on file as a separate charge.
+      if (Number(ledger.capturedAmount) > 0) {
         throw new TRPCError({
           code: "BAD_REQUEST",
-          message: `Bond only has A$${remaining.toFixed(2)} available to capture.`,
+          message:
+            "This bond has already been captured once — Stripe holds are single-capture. Charge the card on file for any further amount.",
         });
       }
-      const newCaptured = captured + input.amount;
-      const newStatus =
-        Math.abs(newCaptured + alreadyReleased - held) < 0.01
-          ? "FULLY_CAPTURED"
-          : "PARTIALLY_CAPTURED";
+      const held = Number(ledger.heldAmount);
+      const alreadyReleased = Number(ledger.releasedAmount);
+      // How much of the hold is still capturable per our ledger. Capturing
+      // this much releases the rest at Stripe automatically.
+      const capturable = Math.max(0, held - alreadyReleased);
+      const fromBond = Math.min(input.amount, capturable);
+      const fromCard = roundCents(aud(input.amount).minus(fromBond)).toNumber();
+
+      // Capture the held PaymentIntent BEFORE any DB write — never hold a
+      // Postgres transaction open across a Stripe round-trip. On a Stripe
+      // failure this throws and we write nothing.
+      let chargeId: string | null = null;
+      if (fromBond > 0) {
+        try {
+          const capture = await capturePaymentIntent(ledger.stripePaymentIntentId, {
+            amountToCaptureCents: Math.round(fromBond * 100),
+            idempotencyKey: `bond-capture-${ledger.id}`,
+          });
+          chargeId = capture.latestChargeId;
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Stripe could not capture the bond hold: ${
+              err instanceof Error ? err.message : "unknown error"
+            }. The bond was not captured.`,
+          });
+        }
+      }
+
+      // After a single capture the hold is finalised: captured = fromBond,
+      // everything else is released by Stripe. Land terminal so the DB CHECK
+      // (captured + released == held) holds and no second capture is invited.
+      const newReleased = roundCents(aud(held).minus(fromBond)).toNumber();
       const deductions = Array.isArray(ledger.deductions)
         ? [...(ledger.deductions as Array<{ reason: string; amount: number }>)]
         : [];
-      deductions.push({ reason: input.deductionLabel, amount: input.amount });
+      if (fromBond > 0) deductions.push({ reason: input.deductionLabel, amount: fromBond });
 
       const captureResult = await ctx.prisma.$transaction(async (tx) => {
-        await tx.bondLedger.update({
-          where: { bookingId: input.bookingId },
-          data: {
-            capturedAmount: newCaptured,
-            status: newStatus,
-            deductions: deductions as unknown as Prisma.InputJsonValue,
-          },
-        });
-        const payment = await tx.payment.create({
-          data: {
-            reference: `BOND-CAP-${Date.now()}`,
-            bookingId: input.bookingId,
-            customerId: ledger.customerId,
-            type: "BOND_CAPTURE",
-            method: "STRIPE",
-            amount: input.amount,
-            gstAmount: 0,
-            status: "SUCCEEDED",
-            processedAt: new Date(),
-            processedById: ctx.user.id,
-            notes: `Bond capture: ${input.deductionLabel}`,
-          },
-          select: { id: true },
-        });
-        return { paymentId: payment.id };
-      });
-      // Issue an adjustment note for the captured amount so the customer
-      // gets the GST-compliant document via the auto-email pipeline. Best
-      // effort — sweep job retries any captures that miss the note.
-      try {
-        const { tryIssueAdjustmentForBooking } = await import(
-          "@/server/services/invoice-lifecycle"
-        );
-        await tryIssueAdjustmentForBooking({
-          bookingId: input.bookingId,
-          type: "INCREASE",
-          reason: "OTHER",
-          description: `Bond capture — ${input.deductionLabel}`,
-          lineItems: [
-            {
-              description: `Bond capture — ${input.deductionLabel}`,
-              quantity: 1,
-              unitPrice: input.amount,
-              totalPrice: input.amount,
-              gstIncluded: true,
+        let bondPaymentId: string | null = null;
+        if (fromBond > 0) {
+          await tx.bondLedger.update({
+            where: { bookingId: input.bookingId },
+            data: {
+              capturedAmount: fromBond,
+              releasedAmount: newReleased,
+              status: "FULLY_CAPTURED",
+              deductions: deductions as unknown as Prisma.InputJsonValue,
             },
-          ],
-          paymentId: captureResult.paymentId,
-          issuedById: ctx.user.id,
-        });
-      } catch {
-        // tryIssueAdjustmentForBooking already logs internal failures.
+          });
+          const payment = await tx.payment.create({
+            data: {
+              reference: `BOND-CAP-${Date.now()}`,
+              bookingId: input.bookingId,
+              customerId: ledger.customerId,
+              type: "BOND_CAPTURE",
+              method: "STRIPE",
+              amount: fromBond,
+              gstAmount: 0,
+              status: "SUCCEEDED",
+              // Link the Stripe ids so stripe-reconcile's SYSTEM_LEDGER
+              // cross-check matches this row to the captured charge.
+              stripePaymentIntentId: ledger.stripePaymentIntentId,
+              stripeChargeId: chargeId,
+              processedAt: new Date(),
+              processedById: ctx.user.id,
+              notes: `Bond capture: ${input.deductionLabel}`,
+            },
+            select: { id: true },
+          });
+          bondPaymentId = payment.id;
+        }
+        // Overflow beyond the hold → PENDING card charge for the capture-
+        // pending job to collect off-session (mirrors fleet.ts). Added to
+        // balanceDue so applyCaptureToBalanceDue nets it out on capture.
+        if (fromCard > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `BOND-CAP-OVF-${Date.now()}`,
+              bookingId: input.bookingId,
+              customerId: ledger.customerId,
+              type: "DAMAGE_CHARGE",
+              method: "STRIPE",
+              amount: fromCard,
+              gstAmount: gstFromInclusive(fromCard),
+              status: "PENDING",
+              notes: `Bond capture overflow (exceeds hold): ${input.deductionLabel}`,
+            },
+          });
+          const b = await tx.booking.findUnique({
+            where: { id: input.bookingId },
+            select: { balanceDue: true },
+          });
+          if (b) {
+            await tx.booking.update({
+              where: { id: input.bookingId },
+              data: { balanceDue: Number(b.balanceDue) + fromCard },
+            });
+          }
+        }
+        return { paymentId: bondPaymentId };
+      });
+      // Issue an adjustment note for the amount captured from the bond so the
+      // customer gets the GST-compliant document via the auto-email pipeline.
+      // Best effort — sweep job retries any captures that miss the note.
+      if (fromBond > 0) {
+        try {
+          const { tryIssueAdjustmentForBooking } = await import(
+            "@/server/services/invoice-lifecycle"
+          );
+          await tryIssueAdjustmentForBooking({
+            bookingId: input.bookingId,
+            type: "INCREASE",
+            reason: "OTHER",
+            description: `Bond capture — ${input.deductionLabel}`,
+            lineItems: [
+              {
+                description: `Bond capture — ${input.deductionLabel}`,
+                quantity: 1,
+                unitPrice: fromBond,
+                totalPrice: fromBond,
+                gstIncluded: true,
+              },
+            ],
+            paymentId: captureResult.paymentId,
+            issuedById: ctx.user.id,
+          });
+        } catch {
+          // tryIssueAdjustmentForBooking already logs internal failures.
+        }
       }
       await trackServer({
         event: "bond.captured",
         distinctId: ledger.customerId,
         properties: {
           bookingId: input.bookingId,
-          capturedAud: input.amount,
-          totalCapturedAud: newCaptured,
-          status: newStatus,
+          capturedAud: fromBond,
+          overflowToCardAud: fromCard,
+          totalCapturedAud: fromBond,
+          status: "FULLY_CAPTURED",
           deductionLabel: input.deductionLabel,
           actorUserId: ctx.user.id,
         },
       });
-      return { capturedAmount: newCaptured, status: newStatus };
+      return { capturedAmount: fromBond, overflowToCard: fromCard, status: "FULLY_CAPTURED" as const };
     }),
 
   // ---------------------------------------------------------------------

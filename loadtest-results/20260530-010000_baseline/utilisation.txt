@@ -1,0 +1,5 @@
+# peak/avg CPU% and peak MEM per container (from docker-stats.csv)
+xpltest-app-1          cpu_avg=14.4% cpu_peak=42.1% mem_peak=28.1%
+xpltest-postgres-1     cpu_avg=1.3% cpu_peak=5.8% mem_peak=7.6%
+xpltest-redis-1        cpu_avg=1.5% cpu_peak=3.9% mem_peak=2.0%
+xpltest-worker-1       cpu_avg=0.6% cpu_peak=2.5% mem_peak=54.9%

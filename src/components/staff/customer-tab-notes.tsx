@@ -60,7 +60,7 @@ export function CustomerTabNotes({
       {lines.length === 0 ? (
         <div className="py-8 text-center text-muted-foreground">No notes yet.</div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2 overflow-y-auto lg:max-h-[calc(100vh-20rem)]">
           {lines.map((line, i) => {
             const match = line.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]\s*(.+?):\s*(.+)$/);
             if (match) {

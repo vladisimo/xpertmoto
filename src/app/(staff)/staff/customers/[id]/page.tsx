@@ -15,7 +15,6 @@ import {
   CalendarDays,
   CreditCard,
   Car,
-  StickyNote,
   MessageCircle,
   AlertTriangle,
   ClipboardList,
@@ -43,7 +42,6 @@ const TABS = [
   { value: "documents", label: "Documents", icon: FileText },
   { value: "billing", label: "Billing", icon: CreditCard },
   { value: "tolls", label: "Tolls", icon: Car },
-  { value: "notes", label: "Notes", icon: StickyNote },
   { value: "sms", label: "SMS", icon: MessageCircle },
   { value: "infringements", label: "Infringements", icon: AlertTriangle },
   { value: "logbook", label: "Logbook", icon: ClipboardList },
@@ -61,7 +59,8 @@ export default function CustomerDetailPage(props: { params: Promise<{ id: string
   const { id } = params;
   const router = useRouter();
   const searchParams = useSearchParams();
-  const activeTab = searchParams.get("tab") ?? "personal";
+  const requestedTab = searchParams.get("tab") ?? "personal";
+  const activeTab = TABS.some((t) => t.value === requestedTab) ? requestedTab : "personal";
 
   const { data: user, isLoading } = trpc.staffCustomer.detail.useQuery({ id });
 
@@ -137,32 +136,43 @@ export default function CustomerDetailPage(props: { params: Promise<{ id: string
         }
       />
 
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <MobileScrollTabs className="w-full justify-start sm:w-full">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5">
-                <Icon className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">{tab.label}</span>
-              </TabsTrigger>
-            );
-          })}
-        </MobileScrollTabs>
-      </Tabs>
+      <div className="flex flex-col gap-6 lg:flex-row">
+        <div className="min-w-0 flex-1 space-y-5 sm:space-y-6 lg:basis-3/4">
+          <div className="min-w-0 lg:overflow-x-auto">
+            <Tabs value={activeTab} onValueChange={handleTabChange}>
+              <MobileScrollTabs className="w-full justify-start sm:w-full">
+                {TABS.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <TabsTrigger key={tab.value} value={tab.value} className="gap-1.5">
+                      <Icon className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">{tab.label}</span>
+                    </TabsTrigger>
+                  );
+                })}
+              </MobileScrollTabs>
+            </Tabs>
+          </div>
 
-      {activeTab === "personal" && <CustomerTabPersonal customer={user} customerId={id} />}
-      {activeTab === "rentals" && <CustomerTabRentals customerId={id} />}
-      {activeTab === "documents" && <CustomerTabDocuments customerId={id} />}
-      {activeTab === "billing" && <CustomerTabBilling customerId={id} />}
-      {activeTab === "tolls" && <CustomerTabTolls customerId={id} />}
-      {activeTab === "notes" && <CustomerTabNotes customerId={id} notes={cp?.notes ?? null} />}
-      {activeTab === "sms" && <CustomerTabSMS customerId={id} />}
-      {activeTab === "infringements" && <CustomerTabInfringements customerId={id} />}
-      {activeTab === "logbook" && <CustomerTabLogbook customerId={id} />}
-      {activeTab === "accident" && <CustomerTabAccidents customerId={id} />}
-      {activeTab === "support" && <CustomerTabSupport customerId={id} />}
-      {activeTab === "activity" && <CustomerTabActivity customerId={id} />}
+          {activeTab === "personal" && <CustomerTabPersonal customer={user} customerId={id} />}
+          {activeTab === "rentals" && <CustomerTabRentals customerId={id} />}
+          {activeTab === "documents" && <CustomerTabDocuments customerId={id} />}
+          {activeTab === "billing" && <CustomerTabBilling customerId={id} />}
+          {activeTab === "tolls" && <CustomerTabTolls customerId={id} />}
+          {activeTab === "sms" && <CustomerTabSMS customerId={id} />}
+          {activeTab === "infringements" && <CustomerTabInfringements customerId={id} />}
+          {activeTab === "logbook" && <CustomerTabLogbook customerId={id} />}
+          {activeTab === "accident" && <CustomerTabAccidents customerId={id} />}
+          {activeTab === "support" && <CustomerTabSupport customerId={id} />}
+          {activeTab === "activity" && <CustomerTabActivity customerId={id} />}
+        </div>
+
+        <aside className="lg:basis-1/4 lg:shrink-0">
+          <div className="lg:sticky lg:top-6">
+            <CustomerTabNotes customerId={id} notes={cp?.notes ?? null} />
+          </div>
+        </aside>
+      </div>
     </PageShell>
   );
 }

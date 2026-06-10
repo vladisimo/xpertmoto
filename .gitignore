@@ -35,6 +35,11 @@ dist
 
 # Build artefacts
 /tsconfig.tsbuildinfo
+/.next-loadtest
+
+# Load-test stack env (throwaway secrets, but env files stay untracked —
+# see docker-compose.loadtest.yml for how it's consumed)
+/.env.loadtest
 
 # Claude Code hook runtime artefacts
 /.claude/hooks/.typecheck.stamp

@@ -1,0 +1,511 @@
+import type { Booking, PrismaClient } from "@prisma/client";
+import { createElement } from "react";
+import { render as renderEmail } from "@react-email/render";
+import {
+  acquireAllocationLock,
+  allocateVehicle,
+  isVehicleFree,
+} from "@/server/services/availability";
+import { retrievePaymentIntent } from "@/lib/stripe";
+import { sendNotification } from "@/server/services/notification-sender";
+import { writeAudit, writeCustomerAuditAsync } from "@/server/services/audit";
+import { trackServer } from "@/lib/analytics";
+import { gstFromInclusive } from "@/lib/money";
+import { formatCurrency, formatDateTime } from "@/lib/utils";
+import { getBranding } from "@/lib/branding";
+import { logger } from "@/lib/logger";
+
+/**
+ * Confirm-payment outcomes that callers translate into their own error
+ * surface (TRPCError for the router, log-and-skip for the webhook / TTL
+ * sweep).
+ */
+export class PaymentNotSucceededError extends Error {
+  constructor(public readonly piStatus: string) {
+    super(`Payment has not completed (status: ${piStatus}). Please retry the payment.`);
+    this.name = "PaymentNotSucceededError";
+  }
+}
+
+export class BondNotHeldError extends Error {
+  constructor(public readonly piStatus: string) {
+    super(`Bond authorisation not held (status: ${piStatus}). Please retry the payment.`);
+    this.name = "BondNotHeldError";
+  }
+}
+
+/** Booking is in a state that can never be confirmed (e.g. CANCELLED). */
+export class BookingNotConfirmableError extends Error {
+  constructor(public readonly bookingStatus: string) {
+    super(`Booking cannot be confirmed from status ${bookingStatus}.`);
+    this.name = "BookingNotConfirmableError";
+  }
+}
+
+/** Statuses at or past CONFIRMED — a confirm call on these is a no-op. */
+const CONFIRMED_OR_BEYOND = new Set([
+  "CONFIRMED",
+  "CHECKED_OUT",
+  "ACTIVE",
+  "OVERDUE",
+  "RETURNED",
+  "COMPLETED",
+]);
+
+export type ConfirmBookingPaymentArgs = {
+  bookingId: string;
+  paymentIntentId?: string | null;
+  bondPaymentIntentId?: string | null;
+  preferredVehicleId?: string | null;
+  /** Who triggered the confirmation. Falls back to the booking's customer
+   *  for system paths (Stripe webhook, TTL sweep). */
+  actorUserId?: string | null;
+  /** Recorded on the audit trail so finance can tell a checkout confirm
+   *  from a webhook/sweep rescue. */
+  source: "checkout" | "stripe-webhook" | "ttl-sweep";
+  reqId?: string;
+};
+
+export type ConfirmBookingPaymentResult = {
+  booking: Booking;
+  /** True when the booking was already CONFIRMED (or beyond) — the call
+   *  was an idempotent retry and no side effects were re-run. */
+  alreadyConfirmed: boolean;
+};
+
+/**
+ * C1: the single confirm-and-allocate path for a paid booking. Callable
+ * from the checkout mutation (`booking.confirmPayment`), the Stripe
+ * `payment_intent.succeeded` webhook (rescues bookings whose browser died
+ * after the charge), and the pending-payment TTL sweep (nightly heal).
+ *
+ * Idempotent: a booking already at CONFIRMED-or-beyond returns
+ * `alreadyConfirmed: true` without re-running allocation, payments, or
+ * notifications. Concurrent calls serialise on the per-(depot, category)
+ * allocation advisory lock and the second caller sees the flipped status
+ * inside its own transaction.
+ */
+export async function confirmBookingPayment(
+  prisma: PrismaClient,
+  args: ConfirmBookingPaymentArgs,
+): Promise<ConfirmBookingPaymentResult> {
+  const booking = await prisma.booking.findUniqueOrThrow({
+    where: { id: args.bookingId },
+    include: {
+      category: true,
+      pickupDepot: true,
+      customer: { select: { firstName: true } },
+    },
+  });
+  const actorId = args.actorUserId ?? booking.customerId;
+
+  // Fast idempotency path — retries (client "Try again", webhook
+  // redelivery, TTL sweep after the webhook already healed) land here.
+  if (CONFIRMED_OR_BEYOND.has(booking.status)) {
+    return { booking, alreadyConfirmed: true };
+  }
+  if (booking.status !== "PENDING_PAYMENT") {
+    throw new BookingNotConfirmableError(booking.status);
+  }
+
+  // Server-side verification. We never trust the caller — fetch the
+  // PaymentIntent from Stripe and assert it actually succeeded before
+  // flipping the booking to CONFIRMED. For stub-mode PIs (no real Stripe)
+  // retrievePaymentIntent returns null and we skip this check so local
+  // dev still works.
+  if (args.paymentIntentId) {
+    const pi = await retrievePaymentIntent(args.paymentIntentId);
+    if (pi && pi.status !== "succeeded") {
+      throw new PaymentNotSucceededError(pi.status);
+    }
+  }
+  if (args.bondPaymentIntentId) {
+    const bondPi = await retrievePaymentIntent(args.bondPaymentIntentId);
+    if (bondPi && bondPi.status !== "requires_capture") {
+      throw new BondNotHeldError(bondPi.status);
+    }
+  }
+
+  // A1-a: allocate + confirm inside a single transaction under an
+  // advisory lock so concurrent confirmPayment calls for the same
+  // depot+category can't both grab the same vehicle. A1-b: exclusion
+  // constraint catches the truly pathological case where the lock
+  // isn't effective (separate processes on a replica).
+  let assignedVehicleId: string | null = null;
+  const txResult = await prisma.$transaction(async (tx) => {
+    await acquireAllocationLock(tx, booking.pickupDepotId, booking.categoryId);
+
+    // Re-read under the lock: a concurrent confirm (checkout mutation vs
+    // webhook racing each other) may have flipped the status while we
+    // waited. Treat that as the idempotent no-op path.
+    const current = await tx.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+      select: { status: true },
+    });
+    if (CONFIRMED_OR_BEYOND.has(current.status)) {
+      return { alreadyConfirmed: true as const, row: null };
+    }
+    if (current.status !== "PENDING_PAYMENT") {
+      throw new BookingNotConfirmableError(current.status);
+    }
+
+    if (args.preferredVehicleId) {
+      const v = await tx.vehicle.findUnique({
+        where: { id: args.preferredVehicleId },
+      });
+      if (
+        v &&
+        v.categoryId === booking.categoryId &&
+        v.depotId === booking.pickupDepotId &&
+        (await isVehicleFree(tx, {
+          vehicleId: v.id,
+          pickup: booking.pickupDateTime,
+          ret: booking.returnDateTime,
+        }))
+      ) {
+        assignedVehicleId = v.id;
+      }
+    }
+    if (!assignedVehicleId) {
+      assignedVehicleId = await allocateVehicle(tx, {
+        categoryId: booking.categoryId,
+        depotId: booking.pickupDepotId,
+        pickup: booking.pickupDateTime,
+        ret: booking.returnDateTime,
+      });
+    }
+
+    // Phase A1 — only the online portion is captured up front. The
+    // remainder stays on balanceDue and is collected at pickup via
+    // the staff console. When payOnlineAmount is zero (ZERO strategy)
+    // we skip creating the Payment row entirely.
+    const payOnline = Number(booking.payOnlineAmount);
+    const totalAmount = Number(booking.totalAmount);
+    const remainder = Math.max(0, totalAmount - payOnline);
+
+    // Rescue paths (webhook / TTL sweep) can run after a deposit Payment
+    // row already exists — e.g. staff recorded a manual payment against
+    // the still-pending booking. In that case the money fields were
+    // already maintained by whatever created the row: don't create a
+    // duplicate Payment and don't clobber amountPaid/balanceDue.
+    const existingDeposit =
+      payOnline > 0
+        ? await tx.payment.findFirst({
+            where: {
+              bookingId: booking.id,
+              type: "BOOKING_PAYMENT",
+              status: "SUCCEEDED",
+            },
+            select: { id: true },
+          })
+        : null;
+
+    const row = await tx.booking.update({
+      where: { id: booking.id },
+      data: {
+        status: "CONFIRMED",
+        vehicleId: assignedVehicleId,
+        ...(existingDeposit
+          ? {}
+          : { amountPaid: payOnline, balanceDue: remainder }),
+        confirmedById: actorId,
+        statusLog: {
+          create: {
+            previousStatus: "PENDING_PAYMENT",
+            newStatus: "CONFIRMED",
+            changedById: actorId,
+          },
+        },
+        payments:
+          payOnline > 0 && !existingDeposit
+            ? {
+                create: {
+                  reference: `PAY-${Date.now()}`,
+                  customerId: booking.customerId,
+                  type: "BOOKING_PAYMENT",
+                  method: "STRIPE",
+                  amount: payOnline,
+                  // GST portion on the online charge, pro-rata of total.
+                  gstAmount:
+                    Number(booking.gstAmount) *
+                    (totalAmount > 0 ? payOnline / totalAmount : 0),
+                  status: "SUCCEEDED",
+                  stripePaymentIntentId: args.paymentIntentId ?? undefined,
+                  processedAt: new Date(),
+                },
+              }
+            : undefined,
+      },
+    });
+
+    if (booking.bondAmount && Number(booking.bondAmount) > 0) {
+      await tx.bondLedger.upsert({
+        where: { bookingId: booking.id },
+        update: args.bondPaymentIntentId
+          ? { stripePaymentIntentId: args.bondPaymentIntentId }
+          : {},
+        create: {
+          bookingId: booking.id,
+          customerId: booking.customerId,
+          heldAmount: booking.bondAmount,
+          status: "HELD",
+          stripePaymentIntentId: args.bondPaymentIntentId ?? undefined,
+        },
+      });
+    }
+
+    // Phase A2 — if the pricing quote flagged this booking as
+    // long-term, create the BookingBillingPlan so the hourly
+    // booking-billing job can charge the recurring periods. The
+    // first period was either fully covered by payOnlineAmount (for
+    // FULL/FLAT/PERCENT strategies that meet or exceed it) or still
+    // sits on balanceDue (for ZERO). Either way the plan's
+    // nextChargeAt fires one period after pickup.
+    const snapshot = booking.pricingSnapshot as {
+      isLongTerm?: boolean;
+      recurringFrequency?: "WEEKLY" | "FORTNIGHTLY" | "MONTHLY";
+      recurringAmount?: number;
+      recurringPeriodsTotal?: number;
+      gstAmount?: number;
+    };
+    if (
+      snapshot.isLongTerm &&
+      snapshot.recurringFrequency &&
+      snapshot.recurringPeriodsTotal &&
+      snapshot.recurringPeriodsTotal > 0 &&
+      snapshot.recurringAmount &&
+      snapshot.recurringAmount > 0
+    ) {
+      const periodDays =
+        snapshot.recurringFrequency === "WEEKLY"
+          ? 7
+          : snapshot.recurringFrequency === "FORTNIGHTLY"
+            ? 14
+            : 30;
+      const nextChargeAt = new Date(
+        booking.pickupDateTime.getTime() + periodDays * 24 * 60 * 60 * 1000,
+      );
+      // Per-period GST is recurringAmount / 11 (GST-inclusive) — via the
+      // shared money utility, never an inline divide-by-11.
+      const perPeriodGst = gstFromInclusive(snapshot.recurringAmount).toNumber();
+      await tx.bookingBillingPlan.upsert({
+        where: { bookingId: booking.id },
+        update: {},
+        create: {
+          bookingId: booking.id,
+          frequency: snapshot.recurringFrequency,
+          amountPerPeriod: snapshot.recurringAmount,
+          gstPerPeriod: perPeriodGst,
+          periodsTotal: snapshot.recurringPeriodsTotal,
+          nextChargeAt,
+          status: "ACTIVE",
+        },
+      });
+    }
+
+    return { alreadyConfirmed: false as const, row };
+  });
+
+  if (txResult.alreadyConfirmed || !txResult.row) {
+    const fresh = await prisma.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+    });
+    return { booking: fresh, alreadyConfirmed: true };
+  }
+  const updated = txResult.row;
+
+  // Issue the canonical Tax Invoice for the booking. Best-effort —
+  // failures here don't roll back the confirmation; the retroactive
+  // sweep job picks up bookings without invoices on its next run.
+  try {
+    const { issueInvoiceForBooking } = await import(
+      "@/server/services/invoice-lifecycle"
+    );
+    await issueInvoiceForBooking({ bookingId: booking.id });
+  } catch (err) {
+    logger.warn(
+      { err, bookingId: booking.id },
+      "booking.confirm: tax invoice issuance failed; retry sweep will retry",
+    );
+  }
+
+  // If the booking generated a SUCCEEDED Payment row up-front (online
+  // capture), issue a branded receipt PDF for it now.
+  let onlinePaymentId: string | null = null;
+  if (Number(booking.payOnlineAmount) > 0) {
+    try {
+      const { issueReceiptForPayment } = await import(
+        "@/server/services/invoice-lifecycle"
+      );
+      const onlinePayment = await prisma.payment.findFirst({
+        where: { bookingId: booking.id, type: "BOOKING_PAYMENT", status: "SUCCEEDED" },
+        select: { id: true },
+        orderBy: { createdAt: "desc" },
+      });
+      if (onlinePayment) {
+        onlinePaymentId = onlinePayment.id;
+        await issueReceiptForPayment({ paymentId: onlinePayment.id });
+      }
+    } catch (err) {
+      logger.warn(
+        { err, bookingId: booking.id },
+        "booking.confirm: receipt issuance failed; non-blocking",
+      );
+    }
+  }
+
+  const payOnline = Number(booking.payOnlineAmount);
+  const totalAud = Number(booking.totalAmount);
+  const remainder = Math.max(0, totalAud - payOnline);
+  const bondAud = Number(booking.bondAmount);
+  const snap = booking.pricingSnapshot as {
+    isLongTerm?: boolean;
+    recurringFrequency?: "WEEKLY" | "FORTNIGHTLY" | "MONTHLY";
+    recurringAmount?: number;
+    recurringPeriodsTotal?: number;
+  };
+  const recurringSummary =
+    snap.isLongTerm &&
+    snap.recurringFrequency &&
+    snap.recurringAmount &&
+    snap.recurringPeriodsTotal
+      ? (() => {
+          const freqLower = snap.recurringFrequency!.toLowerCase();
+          const periodWord = freqLower.replace(/ly$/, "");
+          return `Long-term hire: today's payment covers your first ${periodWord}. Then ${formatCurrency(
+            snap.recurringAmount!,
+          )} ${freqLower} × ${snap.recurringPeriodsTotal} period(s) is charged automatically to your card on file.`;
+        })()
+      : null;
+
+  const branding = await getBranding();
+  const portalUrl = `${
+    process.env.AUTH_URL ??
+    process.env.APP_URL ??
+    process.env.NEXTAUTH_URL ??
+    "http://localhost:3000"
+  }/dashboard/bookings/${booking.id}`;
+  const depotAddress = [
+    booking.pickupDepot.addressLine1,
+    booking.pickupDepot.addressLine2,
+    `${booking.pickupDepot.suburb} ${booking.pickupDepot.state} ${booking.pickupDepot.postcode}`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const { default: BookingConfirmationEmail } = await import(
+    "../../../emails/booking-confirmation"
+  );
+  const html = await renderEmail(
+    createElement(BookingConfirmationEmail, {
+      customerName: booking.customer?.firstName ?? "there",
+      bookingReference: booking.bookingReference,
+      categoryName: booking.category.name,
+      pickupDepotName: booking.pickupDepot.name,
+      pickupDepotAddress: depotAddress,
+      pickupDateTime: formatDateTime(booking.pickupDateTime),
+      returnDateTime: formatDateTime(booking.returnDateTime),
+      durationDays: booking.durationDays,
+      totalAmount: formatCurrency(totalAud),
+      paidOnline: formatCurrency(payOnline),
+      dueAtPickup: remainder > 0 ? formatCurrency(remainder) : null,
+      bondAmount: bondAud > 0 ? formatCurrency(bondAud) : null,
+      recurringSummary,
+      portalUrl,
+      siteName: branding.siteName,
+    }),
+  );
+
+  // Find the just-issued tax invoice for the booking so it rides out
+  // with the confirmation email. Best-effort — if invoice issuance
+  // failed earlier (caught above), there's no row to attach and the
+  // resolver drops the entry.
+  const issuedInvoice = await prisma.invoice.findFirst({
+    where: { bookingId: booking.id, deletedAt: null, status: { not: "VOID" } },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+
+  const attachments: import("@/server/services/notification-sender").AttachmentRef[] = [];
+  if (issuedInvoice) attachments.push({ kind: "invoice", invoiceId: issuedInvoice.id });
+  if (onlinePaymentId) attachments.push({ kind: "receipt", paymentId: onlinePaymentId });
+
+  await sendNotification({
+    userId: booking.customerId,
+    type: "BOOKING_CONFIRMATION",
+    channels: ["EMAIL", "SMS"],
+    subject: `Booking confirmed — ${booking.bookingReference}`,
+    title: `Booking confirmed — ${booking.bookingReference}`,
+    body:
+      `Your ${branding.siteName} booking ${booking.bookingReference} is confirmed. ` +
+      `Pickup ${formatDateTime(booking.pickupDateTime)} at ${booking.pickupDepot.name}. ` +
+      `Total ${formatCurrency(totalAud)}` +
+      (remainder > 0 ? `, ${formatCurrency(remainder)} due at pickup.` : ".") +
+      (bondAud > 0 ? ` Bond hold ${formatCurrency(bondAud)}.` : ""),
+    html,
+    templateKey: "booking-confirmation",
+    bookingId: booking.id,
+    attachments,
+    data: {
+      bookingReference: booking.bookingReference,
+      pickupAt: booking.pickupDateTime.toISOString(),
+      depotName: booking.pickupDepot.name,
+      totalAud,
+      payOnlineAud: payOnline,
+      remainderAud: remainder,
+      bondAud,
+    },
+  });
+
+  await writeAudit(prisma, {
+    userId: actorId,
+    action: "BOOKING_CONFIRMED",
+    entity: "Booking",
+    entityId: booking.id,
+    newData: {
+      reference: booking.bookingReference,
+      total: Number(booking.totalAmount),
+      vehicleId: assignedVehicleId,
+      source: args.source,
+    },
+  });
+  writeCustomerAuditAsync(prisma, booking.customerId, {
+    userId: actorId,
+    action: "BOOKING_CONFIRMED",
+    reqId: args.reqId,
+    newData: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      total: Number(booking.totalAmount),
+      vehicleId: assignedVehicleId,
+      source: args.source,
+    },
+  });
+
+  // Lifetime confirmed-or-beyond bookings for this customer, used to
+  // refresh the PostHog person profile. Best-effort alongside the event.
+  const lifetimeBookings = await prisma.booking.count({
+    where: {
+      customerId: booking.customerId,
+      status: { in: ["CONFIRMED", "CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED", "COMPLETED"] },
+    },
+  });
+  await trackServer({
+    event: "booking.confirmed",
+    distinctId: booking.customerId,
+    properties: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      category: booking.category.slug,
+      depotSlug: booking.pickupDepot.slug,
+      totalAud: Number(booking.totalAmount),
+      durationDays: booking.durationDays,
+      hasBond: Number(booking.bondAmount) > 0,
+      source: booking.source,
+    },
+    groups: { depot: booking.pickupDepot.slug },
+    set: { lifetimeBookings, depotAffinity: booking.pickupDepot.slug },
+  });
+
+  return { booking: updated, alreadyConfirmed: false };
+}

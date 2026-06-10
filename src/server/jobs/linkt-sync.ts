@@ -5,14 +5,14 @@ import { getQueue, registerWorker } from "./queue";
 const QUEUE = "linkt-sync" as const;
 
 export async function runAllLinktSyncs() {
-  const accounts = await prisma.systemSetting.findMany({
-    where: { key: { startsWith: "linkt:account:" } },
-    select: { key: true },
+  const accounts = await prisma.linktAccount.findMany({
+    where: { isActive: true },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
   });
   const results = [];
   for (const a of accounts) {
-    const id = a.key.replace("linkt:account:", "");
-    results.push(await runLinktSync(id));
+    results.push(await runLinktSync(prisma, a.id));
   }
   return results;
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
 import { AlertCircle, Loader2, ShieldCheck } from "lucide-react";
 import type { UserRole } from "@prisma/client";
@@ -95,7 +96,20 @@ export function StepUpForm({
           className="flex items-start gap-3 rounded-md border border-destructive/20 bg-destructive/10 p-3 text-destructive"
         >
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          <p className="caption">{error}</p>
+          <div className="caption space-y-1">
+            <p>{error}</p>
+            {error.toLowerCase().includes("locked") && (
+              <p className="text-destructive/80">
+                The lock lifts automatically after 30 minutes. If you can&apos;t
+                wait — or you&apos;ve lost both your device and recovery codes —
+                ask an administrator to reset your two-factor enrolment, or{" "}
+                <Link href="/contact" className="font-medium underline">
+                  contact support
+                </Link>
+                .
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -117,7 +131,13 @@ export function StepUpForm({
           />
           <p className="caption text-muted-foreground">
             Lost your device? Use one of the recovery codes you saved when
-            setting up 2FA.
+            setting up 2FA. If you&apos;ve lost those too, ask an
+            administrator to reset your two-factor enrolment or{" "}
+            <Link href="/contact" className="underline">
+              contact support
+            </Link>{" "}
+            — don&apos;t keep guessing, five failed attempts locks your
+            account for 30 minutes.
           </p>
         </div>
 

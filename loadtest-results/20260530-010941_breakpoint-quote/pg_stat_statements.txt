@@ -1,0 +1,43 @@
+## top 25 by total_exec_time
+4653.1|32307|0.14|63.1|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+627.7|32307|0.02|8.5|SELECT "public"."SystemSetting"."id", "public"."SystemSetting"."key", "public"."SystemSetting"."value", "public"."SystemSetting"."group", "p
+576.2|32307|0.02|7.8|SELECT COUNT(*) FROM (SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."depotId" = $1 AND "public"."Vehicle"
+482.6|32307|0.01|6.5|SELECT "public"."Season"."id", "public"."Season"."name", "public"."Season"."startDate", "public"."Season"."endDate", "public"."Season"."mult
+261.2|32307|0.01|3.5|SELECT "public"."VehicleCategory"."id", "public"."VehicleCategory"."name", "public"."VehicleCategory"."slug", "public"."VehicleCategory"."de
+244.3|32307|0.01|3.3|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."timezone" FROM "public"."Depot" WHERE ("public"."Depot"."id" IN ($1
+227.2|32307|0.01|3.1|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."dayOfWeek", "public"."DepotOperatingHours"."openTime", "public".
+160.7|32307|0.00|2.2|SELECT "public"."PricingTier"."id", "public"."PricingTier"."categoryId", "public"."PricingTier"."modelId", "public"."PricingTier"."vehicleId
+73.5|32307|0.00|1.0|SELECT "public"."DemandEvent"."id", "public"."DemandEvent"."name", "public"."DemandEvent"."description", "public"."DemandEvent"."startDate",
+60.0|32307|0.00|0.8|SELECT "public"."PriceRecommendation"."id", "public"."PriceRecommendation"."date", "public"."PriceRecommendation"."depotId", "public"."Price
+4.7|7|0.67|0.1|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","depotId","
+2.2|6|0.36|0.0|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","newData","timest
+1.1|7|0.16|0.0|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","durationMs
+0.6|173|0.00|0.0|SELECT $1
+0.6|1|0.57|0.0|SELECT count(*) FROM "Booking"
+0.6|6|0.09|0.0|UPDATE "public"."Payment" SET "notes" = $1, "updatedAt" = $2 WHERE ("public"."Payment"."id" = $3 AND $4=$5) RETURNING "public"."Payment"."id
+0.1|6|0.02|0.0|SELECT "public"."CustomerProfile"."id", "public"."CustomerProfile"."stripeCustomerId", "public"."CustomerProfile"."defaultStripePaymentMetho
+0.1|6|0.02|0.0|SELECT $2 FROM ONLY "public"."User" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+0.1|1|0.12|0.0|SELECT pg_stat_statements_reset()
+0.1|1|0.08|0.0|SELECT "public"."Payment"."id", "public"."Payment"."reference", "public"."Payment"."customerId", "public"."Payment"."bookingId", "public"."P
+0.0|1|0.04|0.0|SELECT "public"."Booking"."id", "public"."Booking"."bookingReference", "public"."Booking"."pickupDepotId" FROM "public"."Booking" WHERE "pub
+0.0|1|0.02|0.0|SELECT "public"."Campaign"."id", "public"."Campaign"."name", "public"."Campaign"."templateId", "public"."Campaign"."segmentId", "public"."Ca
+0.0|1|0.01|0.0|SELECT "public"."Depot"."id", "public"."Depot"."slug" FROM "public"."Depot" WHERE "public"."Depot"."id" IN ($1) OFFSET $2
+0.0|1|0.01|0.0|SELECT "public"."Booking"."id", "public"."Booking"."bookingReference", "public"."Booking"."customerId", "public"."Booking"."vehicleId", "pub
+0.0|1|0.00|0.0|SELECT "public"."StripeWebhookEvent"."id", "public"."StripeWebhookEvent"."type", "public"."StripeWebhookEvent"."attempts" FROM "public"."Str
+
+## top 15 by mean_exec_time (calls>5)
+0.67|7|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","depotId","
+0.36|6|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","status","depotId","newData","timest
+0.16|7|INSERT INTO "public"."AuditLog" ("id","userId","impersonatorId","category","action","entity","entityId","method","path","status","durationMs
+0.14|32307|SELECT COUNT(*) FROM (SELECT "public"."Booking"."id" FROM "public"."Booking" WHERE ("public"."Booking"."depotId" = $1 AND "public"."Booking"
+0.09|6|UPDATE "public"."Payment" SET "notes" = $1, "updatedAt" = $2 WHERE ("public"."Payment"."id" = $3 AND $4=$5) RETURNING "public"."Payment"."id
+0.02|6|SELECT "public"."CustomerProfile"."id", "public"."CustomerProfile"."stripeCustomerId", "public"."CustomerProfile"."defaultStripePaymentMetho
+0.02|6|SELECT $2 FROM ONLY "public"."User" x WHERE "id" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x
+0.02|32307|SELECT "public"."SystemSetting"."id", "public"."SystemSetting"."key", "public"."SystemSetting"."value", "public"."SystemSetting"."group", "p
+0.02|32307|SELECT COUNT(*) FROM (SELECT "public"."Vehicle"."id" FROM "public"."Vehicle" WHERE ("public"."Vehicle"."depotId" = $1 AND "public"."Vehicle"
+0.01|32307|SELECT "public"."Season"."id", "public"."Season"."name", "public"."Season"."startDate", "public"."Season"."endDate", "public"."Season"."mult
+0.01|32307|SELECT "public"."VehicleCategory"."id", "public"."VehicleCategory"."name", "public"."VehicleCategory"."slug", "public"."VehicleCategory"."de
+0.01|32307|SELECT "public"."Depot"."id", "public"."Depot"."name", "public"."Depot"."timezone" FROM "public"."Depot" WHERE ("public"."Depot"."id" IN ($1
+0.01|32307|SELECT "public"."DepotOperatingHours"."id", "public"."DepotOperatingHours"."dayOfWeek", "public"."DepotOperatingHours"."openTime", "public".
+0.00|32307|SELECT "public"."PricingTier"."id", "public"."PricingTier"."categoryId", "public"."PricingTier"."modelId", "public"."PricingTier"."vehicleId
+0.00|173|SELECT $1

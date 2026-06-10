@@ -1,0 +1,5 @@
+connected_clients:96
+used_memory_human:4.87M
+used_memory_peak_human:6.17M
+total_commands_processed:486023
+instantaneous_ops_per_sec:219

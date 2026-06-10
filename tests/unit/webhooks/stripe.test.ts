@@ -61,6 +61,11 @@ vi.mock("@/lib/stripe", () => ({
   constructWebhookEvent: (...args: unknown[]) => constructMock(...args),
 }));
 
+const confirmBookingPaymentMock = vi.fn();
+vi.mock("@/server/services/booking-confirmation", () => ({
+  confirmBookingPayment: (...a: unknown[]) => confirmBookingPaymentMock(...a),
+}));
+
 async function post(body: unknown) {
   const { POST } = await import("@/app/api/webhooks/stripe/route");
   return POST(
@@ -99,6 +104,11 @@ beforeEach(() => {
   bondFindFirst.mockClear();
   bondFindFirst.mockResolvedValue(null);
   trackServerMock.mockClear();
+  confirmBookingPaymentMock.mockClear();
+  confirmBookingPaymentMock.mockResolvedValue({
+    booking: { id: "b1" },
+    alreadyConfirmed: false,
+  });
   constructMock = vi.fn();
 });
 
@@ -379,6 +389,98 @@ describe("Stripe webhook", () => {
         event: "payment.refunded",
         distinctId: "cust_1",
         groups: { depot: "brisbane-cbd" },
+      }),
+    );
+  });
+});
+
+describe("Stripe webhook — C1 paid-booking rescue", () => {
+  function succeededEvent(metadata: Record<string, string>, extra: Record<string, unknown> = {}) {
+    return {
+      id: "evt_rescue",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_123", latest_charge: "ch_123", metadata, ...extra } },
+    };
+  }
+
+  it("confirms a PENDING_PAYMENT booking whose client never confirmed", async () => {
+    bookingFindUnique.mockResolvedValueOnce({
+      status: "PENDING_PAYMENT",
+      bookingReference: "XPM-1",
+    });
+    constructMock.mockResolvedValue(succeededEvent({ bookingId: "b1" }));
+
+    const res = await post({});
+
+    expect(res.status).toBe(200);
+    expect(confirmBookingPaymentMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        bookingId: "b1",
+        paymentIntentId: "pi_123",
+        source: "stripe-webhook",
+      }),
+    );
+  });
+
+  it("does not attempt the rescue for bond holds", async () => {
+    constructMock.mockResolvedValue(
+      succeededEvent(
+        { bookingId: "b1", type: "bond" },
+        { capture_method: "manual", amount: 5000, amount_received: 0 },
+      ),
+    );
+
+    await post({});
+
+    expect(confirmBookingPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("does not touch an already-CONFIRMED booking", async () => {
+    bookingFindUnique.mockResolvedValueOnce({
+      status: "CONFIRMED",
+      bookingReference: "XPM-1",
+    });
+    constructMock.mockResolvedValue(succeededEvent({ bookingId: "b1" }));
+
+    await post({});
+
+    expect(confirmBookingPaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("still acknowledges the event (200) when the rescue confirm fails", async () => {
+    bookingFindUnique.mockResolvedValueOnce({
+      status: "PENDING_PAYMENT",
+      bookingReference: "XPM-1",
+    });
+    confirmBookingPaymentMock.mockRejectedValueOnce(new Error("lock timeout"));
+    constructMock.mockResolvedValue(succeededEvent({ bookingId: "b1" }));
+
+    const res = await post({});
+
+    expect(res.status).toBe(200);
+  });
+
+  it("links the bond PI to the booking's ledger when no row matches by PI id", async () => {
+    bondUpdateMany.mockResolvedValueOnce({ count: 0 });
+    constructMock.mockResolvedValue({
+      id: "evt_bond_link",
+      type: "payment_intent.amount_capturable_updated",
+      data: {
+        object: {
+          id: "pi_bond_9",
+          metadata: { bookingId: "b1", type: "bond" },
+        },
+      },
+    });
+
+    await post({});
+
+    expect(bondUpdateMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: { bookingId: "b1", stripePaymentIntentId: null },
+        data: { stripePaymentIntentId: "pi_bond_9", status: "HELD" },
       }),
     );
   });

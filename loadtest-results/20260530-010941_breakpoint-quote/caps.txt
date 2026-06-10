@@ -1,0 +1,5 @@
+# container resource limits (the sizing knobs under test)
+/xpltest-app-1 NanoCpus=1000000000 Mem=1073741824
+/xpltest-postgres-1 NanoCpus=2000000000 Mem=2147483648
+/xpltest-redis-1 NanoCpus=500000000 Mem=536870912
+/xpltest-worker-1 NanoCpus=500000000 Mem=536870912

@@ -34,6 +34,33 @@ export function StepReview() {
   // pattern as the previous step-payment implementation.
   const lastAttemptedCode = useRef<string>("");
 
+  // C2: availability was last checked on step 2, possibly many minutes
+  // ago — another customer can take the last vehicle while this one fills
+  // in details. Re-check on entry to review so a sold-out selection is
+  // caught BEFORE card entry, with a path back to the date picker, instead
+  // of a hard CONFLICT after the customer types their card in.
+  const availabilityQuery = trpc.booking.availability.useQuery(
+    {
+      categoryId: w.categoryId ?? "",
+      depotId: w.pickupDepotId ?? "",
+      pickupDateTime: new Date(w.pickupDateTime ?? new Date()),
+      returnDateTime: new Date(w.returnDateTime ?? new Date()),
+    },
+    {
+      enabled: !!(
+        w.categoryId &&
+        w.pickupDepotId &&
+        w.pickupDateTime &&
+        w.returnDateTime
+      ),
+      refetchOnMount: "always",
+      staleTime: 0,
+    },
+  );
+  const soldOut =
+    !!availabilityQuery.data && availabilityQuery.data.available <= 0;
+  const lastOne = availabilityQuery.data?.available === 1;
+
   // True once we know the customer is missing platform-level consent (T&Cs
   // and/or Privacy). Customers who already accepted the current versions
   // (e.g. fresh registrations from Step 4) skip the block entirely. While
@@ -49,6 +76,7 @@ export function StepReview() {
       goBackToDetails();
       return;
     }
+    if (soldOut) return;
     if (!w.agreedToTerms) {
       setAttempted(true);
       return;
@@ -77,8 +105,8 @@ export function StepReview() {
   }
 
   useStepContinueAction({
-    label: "Continue to payment",
-    disabled: false,
+    label: soldOut ? "Dates unavailable" : "Continue to payment",
+    disabled: soldOut,
     pending: acceptPlatformConsent.isPending,
     onClick: handleContinue,
   });
@@ -94,6 +122,28 @@ export function StepReview() {
           <Button type="button" size="sm" variant="secondary" onClick={goBackToDetails}>
             Back to your details
           </Button>
+        </div>
+      )}
+      {soldOut && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <Info className="h-4 w-4 shrink-0" aria-hidden />
+          <span className="flex-1">
+            Your selected dates are no longer available — another customer
+            booked the last vehicle while you were filling in your details.
+            Everything you&apos;ve entered is saved; just pick new dates.
+          </span>
+          <Button type="button" size="sm" variant="secondary" onClick={() => w.setStep(1)}>
+            Change dates
+          </Button>
+        </div>
+      )}
+      {!soldOut && lastOne && (
+        <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>
+            Only one vehicle is left for your dates. It isn&apos;t reserved
+            until payment, so it&apos;s best to complete your booking soon.
+          </span>
         </div>
       )}
       <div className="border rounded-lg p-4 space-y-2">
@@ -198,7 +248,11 @@ export function StepReview() {
           <Button variant="outline" onClick={() => w.back()} disabled={acceptPlatformConsent.isPending}>
             Back
           </Button>
-          <Button variant="cta" onClick={handleContinue} disabled={acceptPlatformConsent.isPending}>
+          <Button
+            variant="cta"
+            onClick={handleContinue}
+            disabled={acceptPlatformConsent.isPending || soldOut}
+          >
             Continue to payment
           </Button>
         </div>
