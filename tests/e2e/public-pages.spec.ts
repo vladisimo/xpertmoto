@@ -59,7 +59,8 @@ test("pricing page renders", async ({ page }) => {
 
 test("locations page renders depot info", async ({ page }) => {
   await page.goto("/locations");
-  await expect(page.locator("body")).toContainText(/gold coast|byron|noosa/i);
+  // Seeded depot (post single-depot consolidation): XPERT Moto Lewisham.
+  await expect(page.locator("body")).toContainText(/lewisham/i);
 });
 
 test("booking wizard loads step 1", async ({ page }) => {

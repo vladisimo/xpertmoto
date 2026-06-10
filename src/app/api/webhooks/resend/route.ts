@@ -48,7 +48,16 @@ async function handlePost(req: Request) {
   const raw = await req.text();
   const secret = await getSecret("integration:resend:webhookSecret", "RESEND_WEBHOOK_SECRET");
 
-  if (secret) {
+  // Fail closed: without a configured secret, anyone can POST fabricated
+  // delivery/bounce events and corrupt notification + email analytics state.
+  // Unsigned payloads are accepted only in local dev.
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") {
+      logger.error("resend webhook: RESEND_WEBHOOK_SECRET not configured — rejecting");
+      return new NextResponse("Webhook not configured", { status: 503 });
+    }
+    logger.warn("resend webhook: no secret configured, accepting unsigned (dev only)");
+  } else {
     const msgId = req.headers.get("svix-id");
     const ts = req.headers.get("svix-timestamp");
     const sig = req.headers.get("svix-signature");

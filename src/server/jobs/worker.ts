@@ -18,6 +18,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "@/lib/redis";
+import { prisma } from "@/lib/prisma";
 import { scrubSentryEvent } from "@/lib/observability/sentry-scrub";
 import { logger } from "@/lib/logger";
 import { shutdownQueues } from "./queue";
@@ -155,14 +156,38 @@ async function main() {
 
   log.info("all schedulers registered, waiting for jobs…");
 
+  // Bounded drain: if Redis is gone or a job hangs, shutdownQueues() can
+  // block past the orchestrator's grace period and earn a SIGKILL with
+  // transactions still open. Race it against a timeout, then release the
+  // Prisma pool so the next instance doesn't inherit stale connections.
+  const SHUTDOWN_TIMEOUT_MS = 15_000;
   const shutdown = async (signal: string) => {
     log.info({ signal }, "shutting down…");
-    await shutdownQueues();
+    await Promise.race([
+      shutdownQueues(),
+      new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
+    ]);
+    await prisma.$disconnect().catch((err: unknown) => {
+      log.warn({ err }, "prisma disconnect failed during shutdown");
+    });
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
+
+// Job processors run through the queue wrapper's try/catch, but anything that
+// escapes it (fire-and-forget promise inside a processor, listener bug) lands
+// here. Capture to Sentry so payment-critical jobs never fail silently.
+process.on("unhandledRejection", (reason) => {
+  log.error({ err: reason }, "unhandled promise rejection in worker");
+  Sentry.captureException(reason, { tags: { worker: "unhandledRejection" } });
+});
+process.on("uncaughtException", (err) => {
+  log.fatal({ err }, "uncaught exception in worker");
+  Sentry.captureException(err, { tags: { worker: "uncaughtException" } });
+  Sentry.flush(2000).finally(() => process.exit(1));
+});
 
 main().catch((err) => {
   log.fatal({ err }, "fatal worker error");

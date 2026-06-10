@@ -57,7 +57,12 @@ COPY --from=geolite /data ./data
 ENV MAXMIND_DB_PATH=/app/data/GeoLite2-City.mmdb
 USER nextjs
 EXPOSE 3000
-CMD ["npm", "run", "start"]
+# Apply pending migrations before serving traffic — fail-fast on schema
+# drift instead of P20xx errors on the first request. The worker image
+# deliberately does NOT migrate (single writer: the app container); start
+# the worker after the app is healthy. `exec` replaces sh so SIGTERM
+# reaches the node process and graceful shutdown still runs.
+CMD ["sh", "-c", "npx prisma migrate deploy && exec npm run start"]
 
 # -------- worker: BullMQ background process --------
 FROM base AS worker

@@ -28,7 +28,7 @@ function makeCtx(
     vehicleId: "v-old",
     categoryId: "cat-A",
     customerId: "cust1",
-    returnDateTime: new Date("2026-06-10T10:00:00+10:00"),
+    returnDateTime: new Date(Date.now() + 30 * 86_400_000), // 30 days out — must stay after swapAt (now)
   };
   const prisma = {
     booking: {
@@ -321,7 +321,7 @@ describe("bookingSwap.listCandidates", () => {
         vehicleId: "v-old",
         categoryId: "cat-A",
         customerId: "cust1",
-        returnDateTime: new Date("2026-06-10T10:00:00+10:00"),
+        returnDateTime: new Date(Date.now() + 30 * 86_400_000), // 30 days out — must stay after swapAt (now)
       },
     });
     const caller = bookingSwapRouter.createCaller(ctx as never);
@@ -485,5 +485,30 @@ describe("bookingSwap.saveDraftProgress", () => {
     await expect(
       caller.saveDraftProgress({ swapId: "draft-1", draftState }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+});
+
+describe("bookingSwap depot scoping (B1 follow-up)", () => {
+  it("FORBIDDEN: depot-assigned STAFF cannot list candidates for another depot's booking", async () => {
+    const prisma = {
+      booking: {
+        // _depot-scope's cheap depot lookup
+        findUnique: vi.fn(async () => ({ depotId: "depot-b" })),
+        findUniqueOrThrow: vi.fn(),
+      },
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.listCandidates({ bookingId: "b-other", includeCrossCategory: false }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prisma.booking.findUniqueOrThrow).not.toHaveBeenCalled();
   });
 });

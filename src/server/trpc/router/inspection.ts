@@ -2,6 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import type { Prisma } from "@prisma/client";
 import { createTRPCRouter, staffProcedure } from "../trpc";
+import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import {
   captureBookingId,
@@ -90,6 +91,8 @@ export const inspectionRouter = createTRPCRouter({
     )
     .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
+      // Depot trust boundary: STAFF record inspections at their own depot.
+      assertDepotAccess(ctx.user, input.depotId);
       if (input.bookingId) {
         const booking = await ctx.prisma.booking.findUnique({
           where: { id: input.bookingId },
@@ -170,6 +173,7 @@ export const inspectionRouter = createTRPCRouter({
         where: { id: input.id },
         include: { booking: { select: { customerId: true } } },
       });
+      assertDepotAccess(ctx.user, inspection.depotId);
       captureCustomerId(ctx, inspection.booking?.customerId);
       captureBookingId(ctx, inspection.bookingId);
       if (inspection.status !== "DRAFT") {
@@ -193,6 +197,7 @@ export const inspectionRouter = createTRPCRouter({
     .meta({ audit: { bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
       const inspection = await ctx.prisma.inspection.findUniqueOrThrow({ where: { id: input.id } });
+      assertDepotAccess(ctx.user, inspection.depotId);
       captureBookingId(ctx, inspection.bookingId);
       if (inspection.status === "COMPLETED") return inspection;
       if (inspection.status !== "DRAFT") {
@@ -216,6 +221,7 @@ export const inspectionRouter = createTRPCRouter({
   diffAgainstPreHire: staffProcedure
     .input(z.object({ bookingId: z.string() }))
     .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const [pre, post] = await Promise.all([
         ctx.prisma.inspection.findFirst({
           where: { bookingId: input.bookingId, type: "PRE_HIRE" },
@@ -251,20 +257,23 @@ export const inspectionRouter = createTRPCRouter({
       return { preHire: pre, postHire: post, preMarkers, postMarkers, newMarkers };
     }),
 
-  byBooking: staffProcedure.input(z.object({ bookingId: z.string() })).query(({ ctx, input }) =>
-    ctx.prisma.inspection.findMany({
+  byBooking: staffProcedure.input(z.object({ bookingId: z.string() })).query(async ({ ctx, input }) => {
+    await assertBookingDepotAccess(ctx, input.bookingId);
+    return ctx.prisma.inspection.findMany({
       where: { bookingId: input.bookingId },
       orderBy: { dateTime: "desc" },
       include: { photos: true },
-    }),
-  ),
+    });
+  }),
 
-  byId: staffProcedure.input(z.object({ id: z.string() })).query(({ ctx, input }) =>
-    ctx.prisma.inspection.findUniqueOrThrow({
+  byId: staffProcedure.input(z.object({ id: z.string() })).query(async ({ ctx, input }) => {
+    const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
       where: { id: input.id },
       include: { photos: true },
-    }),
-  ),
+    });
+    assertDepotAccess(ctx.user, inspection.depotId);
+    return inspection;
+  }),
 
   addPhoto: staffProcedure
     .input(z.object({ inspectionId: z.string(), url: z.string().url(), caption: z.string().optional(), damageZone: z.string().optional() }))
@@ -272,8 +281,9 @@ export const inspectionRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
         where: { id: input.inspectionId },
-        select: { bookingId: true },
+        select: { bookingId: true, depotId: true },
       });
+      assertDepotAccess(ctx.user, inspection.depotId);
       captureBookingId(ctx, inspection.bookingId);
       return ctx.prisma.inspectionPhoto.create({
         data: {
@@ -291,8 +301,9 @@ export const inspectionRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const photo = await ctx.prisma.inspectionPhoto.findUniqueOrThrow({
         where: { id: input.id },
-        select: { inspection: { select: { bookingId: true } } },
+        select: { inspection: { select: { bookingId: true, depotId: true } } },
       });
+      if (photo.inspection) assertDepotAccess(ctx.user, photo.inspection.depotId);
       captureBookingId(ctx, photo.inspection?.bookingId);
       return ctx.prisma.inspectionPhoto.delete({ where: { id: input.id } });
     }),

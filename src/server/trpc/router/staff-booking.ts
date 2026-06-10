@@ -3,6 +3,11 @@ import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, staffProcedure } from "../trpc";
 import {
+  assertBookingDepotAccess,
+  assertDepotAccess,
+  scopedDepotFilter,
+} from "./_depot-scope";
+import {
   allocateVehicle,
   acquireAllocationLock,
   countAvailable,
@@ -76,11 +81,12 @@ export const staffBookingRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const start = new Date(input.start);
       const end = new Date(input.end);
+      const depotId = scopedDepotFilter(ctx.user, input.depotId);
       return ctx.prisma.booking.findMany({
         where: {
           pickupDateTime: { lt: end },
           returnDateTime: { gt: start },
-          ...(input.depotId ? { depotId: input.depotId } : {}),
+          ...(depotId ? { depotId } : {}),
         },
         select: {
           id: true,
@@ -108,10 +114,11 @@ export const staffBookingRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
+      const depotId = scopedDepotFilter(ctx.user, input.depotId);
       const items = await ctx.prisma.booking.findMany({
         where: {
           ...(input.status ? { status: input.status as never } : {}),
-          ...(input.depotId ? { depotId: input.depotId } : {}),
+          ...(depotId ? { depotId } : {}),
           ...(input.search
             ? {
                 OR: [
@@ -197,6 +204,7 @@ export const staffBookingRouter = createTRPCRouter({
         },
       });
       if (!b) throw new TRPCError({ code: "NOT_FOUND" });
+      assertDepotAccess(ctx.user, b.depotId);
       return b;
     }),
 
@@ -222,6 +230,7 @@ export const staffBookingRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const where: Prisma.AuditLogWhereInput = {
         AND: [buildAuditWhere(input), { entity: "Booking", entityId: input.bookingId }],
       };
@@ -254,8 +263,9 @@ export const staffBookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUnique({
         where: { id: input.bookingId },
-        select: { customerId: true },
+        select: { customerId: true, depotId: true },
       });
+      if (b) assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b?.customerId);
       return ctx.prisma.bookingNote.create({
         data: {
@@ -277,6 +287,7 @@ export const staffBookingRouter = createTRPCRouter({
     .input(z.object({ bookingId: z.string() }))
     .meta({ audit: { customerIdPath: readCapturedCustomerId, bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const now = Date.now();
       const last = resendConfirmationLastSent.get(input.bookingId);
       if (last && now - last < RESEND_MIN_INTERVAL_MS) {
@@ -449,9 +460,12 @@ export const staffBookingRouter = createTRPCRouter({
       const inv = await ctx.prisma.invoice.findUniqueOrThrow({
         where: { id: input.invoiceId },
         include: {
-          booking: { select: { id: true, bookingReference: true, customerId: true } },
+          booking: {
+            select: { id: true, bookingReference: true, customerId: true, depotId: true },
+          },
         },
       });
+      if (inv.booking) assertDepotAccess(ctx.user, inv.booking.depotId);
       captureBookingId(ctx, inv.bookingId ?? inv.booking?.id);
       const recipientId = inv.customerId ?? inv.booking?.customerId ?? null;
       if (!recipientId) {
@@ -520,6 +534,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (b.status !== "QUOTE") {
         throw new TRPCError({
@@ -558,6 +573,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (!["QUOTE", "PENDING_PAYMENT", "CONFIRMED"].includes(b.status)) {
         throw new TRPCError({
@@ -632,9 +648,12 @@ export const staffBookingRouter = createTRPCRouter({
       const source = await ctx.prisma.payment.findUniqueOrThrow({
         where: { id: input.paymentId },
         include: {
-          booking: { select: { id: true, bookingReference: true, customerId: true } },
+          booking: {
+            select: { id: true, bookingReference: true, customerId: true, depotId: true },
+          },
         },
       });
+      if (source.booking) assertDepotAccess(ctx.user, source.booking.depotId);
       captureCustomerId(ctx, source.customerId ?? source.booking?.customerId);
       captureBookingId(ctx, source.bookingId ?? source.booking?.id);
       if (source.status !== "SUCCEEDED") {
@@ -772,6 +791,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (!["CONFIRMED", "PENDING_PAYMENT", "QUOTE"].includes(b.status)) {
         throw new TRPCError({
@@ -821,6 +841,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (!["ACTIVE", "CHECKED_OUT"].includes(b.status)) {
         throw new TRPCError({
@@ -857,6 +878,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (!["ACTIVE", "OVERDUE", "CHECKED_OUT"].includes(b.status)) {
         throw new TRPCError({
@@ -928,6 +950,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       return ctx.prisma.booking.update({
         where: { id: b.id },
@@ -965,6 +988,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (b.status !== "DISPUTED") {
         throw new TRPCError({
@@ -1010,11 +1034,13 @@ export const staffBookingRouter = createTRPCRouter({
           status: true,
           vehicleId: true,
           categoryId: true,
+          depotId: true,
           pickupDepotId: true,
           pickupDateTime: true,
           returnDateTime: true,
         },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       if (b.vehicleId || !["ACTIVE", "CHECKED_OUT"].includes(b.status)) {
         return { eligible: false as const, vehicles: [] };
       }
@@ -1090,6 +1116,7 @@ export const staffBookingRouter = createTRPCRouter({
           category: { select: { id: true } },
         },
       });
+      assertDepotAccess(ctx.user, booking.depotId);
       const actualReturn = input.actualReturnDateTime ?? new Date();
       const perDayAddonsTotal = booking.addons
         .filter((a) => a.addon.isPerDay)
@@ -1149,6 +1176,7 @@ export const staffBookingRouter = createTRPCRouter({
           category: { select: { id: true, name: true } },
         },
       });
+      assertDepotAccess(ctx.user, booking.depotId);
       if (!["CONFIRMED", "CHECKED_OUT", "ACTIVE"].includes(booking.status)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -1243,6 +1271,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       if (!["ACTIVE", "CHECKED_OUT"].includes(b.status)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -1399,6 +1428,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (b.status !== "RETURNED") {
         throw new TRPCError({
@@ -1482,6 +1512,7 @@ export const staffBookingRouter = createTRPCRouter({
         where: { id: input.bookingId },
         include: { returnAssessments: { select: { status: true } } },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       if (!["ACTIVE", "OVERDUE", "CHECKED_OUT", "RETURNED"].includes(b.status)) {
         throw new TRPCError({
@@ -1602,8 +1633,9 @@ export const staffBookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUnique({
         where: { id: input.bookingId },
-        select: { customerId: true },
+        select: { customerId: true, depotId: true },
       });
+      if (b) assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b?.customerId);
       return ctx.prisma.booking.update({
         where: { id: input.bookingId },
@@ -1632,6 +1664,7 @@ export const staffBookingRouter = createTRPCRouter({
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       if (!["CONFIRMED", "PENDING_PAYMENT"].includes(b.status)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -2034,6 +2067,7 @@ export const staffBookingRouter = createTRPCRouter({
         where: { id: input.bookingId },
         include: { category: true, vehicle: true },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       if (!["ACTIVE", "OVERDUE", "CHECKED_OUT"].includes(b.status)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -2658,8 +2692,9 @@ export const staffBookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
-        select: { customerId: true },
+        select: { customerId: true, depotId: true },
       });
+      assertDepotAccess(ctx.user, b.depotId);
       captureCustomerId(ctx, b.customerId);
       skipAutoAudit(ctx);
       const result = await cancelBookingService(
@@ -2702,6 +2737,9 @@ export const staffBookingRouter = createTRPCRouter({
     )
     .meta({ audit: { customerIdPath: "customerId", bookingIdPath: readCapturedBookingId } })
     .mutation(async ({ ctx, input }) => {
+      // Walk-ins are created at the counter — STAFF can only raise them for
+      // their own depot. MANAGER+ may create cross-depot.
+      assertDepotAccess(ctx.user, input.pickupDepotId);
       // The booking's customer must own a CustomerProfile. Booking.customer
       // is an unconstrained FK to User, so guard the selected target here —
       // otherwise a walk-in could be pinned to a user the back-office
@@ -2792,7 +2830,7 @@ export const staffBookingRouter = createTRPCRouter({
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
       const now = new Date();
-      const depotId = input?.depotId ?? ctx.user.depotId ?? undefined;
+      const depotId = scopedDepotFilter(ctx.user, input?.depotId) ?? ctx.user.depotId ?? undefined;
 
       const bookingWhere = (extra: Record<string, unknown>) => ({
         ...(depotId ? { depotId } : {}),
@@ -2864,7 +2902,7 @@ export const staffBookingRouter = createTRPCRouter({
       today.setHours(0, 0, 0, 0);
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
-      const depotId = input?.depotId ?? ctx.user.depotId ?? undefined;
+      const depotId = scopedDepotFilter(ctx.user, input?.depotId) ?? ctx.user.depotId ?? undefined;
 
       const [pickups, returns, overdue, active, attention] = await Promise.all([
         ctx.prisma.booking.findMany({

@@ -26,6 +26,7 @@ class FakeP2002 extends Error {
 }
 const webhookEventCreate = vi.fn();
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
+const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 
 vi.mock("@prisma/client", async (importActual) => {
   const actual = await importActual<typeof import("@prisma/client")>();
@@ -51,7 +52,11 @@ vi.mock("@/lib/prisma", () => ({
     incident: { findFirst: vi.fn(), create: vi.fn() },
     user: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: { create: auditCreate },
-    stripeWebhookEvent: { create: webhookEventCreate, update: webhookEventUpdate },
+    stripeWebhookEvent: {
+      create: webhookEventCreate,
+      update: webhookEventUpdate,
+      updateMany: webhookEventUpdateMany,
+    },
     $transaction: vi.fn(async (cb: (tx: unknown) => unknown) =>
       cb({
         payment: { updateMany: paymentUpdateMany },
@@ -97,6 +102,8 @@ beforeEach(() => {
   bondUpdateMany.mockClear();
   webhookEventCreate.mockReset();
   webhookEventUpdate.mockClear();
+  webhookEventUpdateMany.mockClear();
+  webhookEventUpdateMany.mockResolvedValue({ count: 1 });
 });
 
 describe("Stripe webhook replay", () => {
@@ -105,18 +112,21 @@ describe("Stripe webhook replay", () => {
     const res = await post();
     expect(res.status).toBe(200);
     expect(paymentUpdateMany).toHaveBeenCalledTimes(1);
-    expect(webhookEventUpdate).toHaveBeenCalledWith(
+    expect(webhookEventUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "evt_replay_1" },
+        where: { id: "evt_replay_1", status: { in: ["RECEIVED", "FAILED"] } },
         data: expect.objectContaining({ status: "PROCESSING" }),
       }),
     );
   });
 
-  it("is a no-op on duplicate delivery, returns 200 with duplicate flag", async () => {
+  it("is a no-op on duplicate delivery of a processed event, returns 200 with duplicate flag", async () => {
     webhookEventCreate.mockImplementationOnce(() => {
       throw new FakeP2002();
     });
+    // The row exists in PROCESSED (or a concurrent PROCESSING) state, so the
+    // status-guarded claim matches nothing.
+    webhookEventUpdateMany.mockResolvedValueOnce({ count: 0 });
     const res = await post();
     expect(res.status).toBe(200);
     const body = (await res.json()) as { received: boolean; duplicate?: boolean };
@@ -124,5 +134,27 @@ describe("Stripe webhook replay", () => {
     // Core side-effects must NOT fire on the duplicate
     expect(paymentUpdateMany).not.toHaveBeenCalled();
     expect(webhookEventUpdate).not.toHaveBeenCalled();
+  });
+
+  it("reprocesses a redelivery of a FAILED event (B2 — failed events must be replayable)", async () => {
+    // Row already exists (first attempt failed), so the insert collides…
+    webhookEventCreate.mockImplementationOnce(() => {
+      throw new FakeP2002();
+    });
+    // …but the claim succeeds because status is FAILED.
+    webhookEventUpdateMany.mockResolvedValueOnce({ count: 1 });
+    const res = await post();
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { received: boolean; duplicate?: boolean };
+    expect(body.duplicate).toBeUndefined();
+    // Side-effects run again on the replay.
+    expect(paymentUpdateMany).toHaveBeenCalledTimes(1);
+    // And the row is marked PROCESSED with the stale error cleared.
+    expect(webhookEventUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "evt_replay_1" },
+        data: expect.objectContaining({ status: "PROCESSED", errorReason: null }),
+      }),
+    );
   });
 });

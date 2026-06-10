@@ -17,7 +17,7 @@
     "test:integration": "tsx --test tests/integration/*.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:local": "npm run db:reset:e2e && E2E_DB=1 PORT=3137 E2E_NO_RESEED=1 playwright test",
-    "test:e2e:smoke": "playwright test tests/e2e/smoke",
+    "test:e2e:smoke": "playwright test tests/e2e/public-pages.spec.ts --project=public",
     "test:e2e:critical": "playwright test tests/e2e/auth tests/e2e/booking tests/e2e/payments tests/e2e/customer tests/e2e/staff tests/e2e/admin tests/e2e/api tests/e2e/security",
     "test:e2e:concurrency": "playwright test tests/e2e/concurrency",
     "test:e2e:headed": "playwright test --headed",

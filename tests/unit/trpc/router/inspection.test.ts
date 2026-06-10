@@ -57,3 +57,56 @@ describe("toStoredMarkers", () => {
     expect(toStoredMarkers([], FIXED_NOW)).toEqual([]);
   });
 });
+
+describe("inspection depot scoping (B1 follow-up)", () => {
+  test("FORBIDDEN: depot-assigned STAFF cannot create an inspection at another depot", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const prisma = {
+      booking: { findUnique: vi.fn() },
+      inspection: { findFirst: vi.fn(), create: vi.fn() },
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await expect(
+      caller.create({
+        vehicleId: "v1",
+        type: "ROUTINE",
+        depotId: "depot-b",
+        odometerKm: 100,
+        fuelLevel: 50,
+        overallCondition: "GOOD",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(prisma.inspection.create).not.toHaveBeenCalled();
+  });
+
+  test("FORBIDDEN: depot-assigned STAFF cannot read inspections for another depot's booking", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const prisma = {
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot-b" })) },
+      inspection: { findMany: vi.fn() },
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: "depot-a" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await expect(caller.byBooking({ bookingId: "b-other" })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(prisma.inspection.findMany).not.toHaveBeenCalled();
+  });
+});

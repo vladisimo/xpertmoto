@@ -18,6 +18,7 @@ const paymentFindFirst = vi.fn();
 const bondUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const webhookEventCreate = vi.fn().mockResolvedValue({});
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
+const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const sendNotification = vi.fn();
 const auditCreate = vi.fn().mockResolvedValue({});
 
@@ -34,7 +35,11 @@ vi.mock("@/lib/prisma", () => ({
     incident: { findFirst: vi.fn(), create: vi.fn() },
     user: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: { create: auditCreate },
-    stripeWebhookEvent: { create: webhookEventCreate, update: webhookEventUpdate },
+    stripeWebhookEvent: {
+      create: webhookEventCreate,
+      update: webhookEventUpdate,
+      updateMany: webhookEventUpdateMany,
+    },
     $transaction: vi.fn(),
   },
 }));

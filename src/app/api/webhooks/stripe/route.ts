@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
@@ -44,10 +45,15 @@ async function handlePost(req: Request) {
     return new NextResponse("Stripe webhook not configured", { status: 503 });
   }
 
-  // G1 — insert-then-process dedup. A duplicate event id hits the PK and
-  // raises P2002; we treat that as "already seen, acknowledge and move on".
-  // This is the only guard that makes replays from `stripe events resend`
-  // and Stripe's built-in retry idempotent.
+  // G1 — insert-then-claim dedup. The PK insert makes the event row exist
+  // exactly once; the status-guarded claim below decides whether THIS
+  // delivery processes it. Stripe redelivers with the same event id after a
+  // 500 (and `stripe events resend` / dashboard Resend reuse the id too), so
+  // the claim must distinguish a true duplicate (PROCESSED, or PROCESSING on
+  // a concurrent delivery) from a replay of a RECEIVED/FAILED event that
+  // must re-enter the handler — otherwise failed events could never be
+  // retried and the stuck-webhook-recovery job's reset-to-RECEIVED would be
+  // a no-op.
   try {
     await prisma.stripeWebhookEvent.create({
       data: {
@@ -59,29 +65,34 @@ async function handlePost(req: Request) {
       },
     });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      logger.info({ eventId: event.id, type: event.type }, "stripe webhook duplicate event — skipping");
-      stripeWebhookOutcome(event.type, "duplicate");
-      return NextResponse.json({ received: true, duplicate: true });
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) {
+      // Insert failure is unexpected — surface as 500 so Stripe retries.
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err), eventId: event.id },
+        "stripe webhook event log insert failed",
+      );
+      return new NextResponse("Event log write failed", { status: 500 });
     }
-    // Insert failure is unexpected — surface as 500 so Stripe retries.
-    logger.error(
-      { err: err instanceof Error ? err.message : String(err), eventId: event.id },
-      "stripe webhook event log insert failed",
-    );
-    return new NextResponse("Event log write failed", { status: 500 });
+    // P2002 → the row already exists (redelivery). Fall through to the
+    // claim, which acks PROCESSED/PROCESSING rows and reprocesses the rest.
   }
 
-  await prisma.stripeWebhookEvent.update({
-    where: { id: event.id },
+  // Atomic claim: only one delivery can move RECEIVED/FAILED → PROCESSING.
+  const claimed = await prisma.stripeWebhookEvent.updateMany({
+    where: { id: event.id, status: { in: ["RECEIVED", "FAILED"] } },
     data: { status: "PROCESSING", attempts: { increment: 1 } },
   });
+  if (claimed.count === 0) {
+    logger.info({ eventId: event.id, type: event.type }, "stripe webhook duplicate event — skipping");
+    stripeWebhookOutcome(event.type, "duplicate");
+    return NextResponse.json({ received: true, duplicate: true });
+  }
 
   try {
     await handleEvent(event);
     await prisma.stripeWebhookEvent.update({
       where: { id: event.id },
-      data: { status: "PROCESSED", processedAt: new Date() },
+      data: { status: "PROCESSED", processedAt: new Date(), errorReason: null },
     });
     stripeWebhookOutcome(event.type, "processed");
     await writePaymentAudit(prisma, {
@@ -97,6 +108,12 @@ async function handlePost(req: Request) {
       { err: message, eventType: event.type, eventId: event.id },
       "stripe webhook handler error",
     );
+    // Failed money events must reach Sentry — the audit row and pino line
+    // alone are silent in production alerting.
+    Sentry.captureException(err, {
+      tags: { webhook: "stripe", eventType: event.type },
+      extra: { eventId: event.id },
+    });
     await prisma.stripeWebhookEvent.update({
       where: { id: event.id },
       data: { status: "FAILED", errorReason: message.slice(0, 1024) },
@@ -235,26 +252,32 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         }
       }
 
-      // Capture the prior status BEFORE the flip so the balanceDue decrement
-      // below stays idempotent: a redelivered webhook (or the deposit's own
-      // payment_intent.succeeded, which is already SUCCEEDED) must not
-      // double-decrement. Bond holds are handled in the branch above.
+      // Read the charge details, then flip status via a compare-and-swap so
+      // the balanceDue decrement below applies exactly once: a redelivered
+      // webhook, the deposit's own payment_intent.succeeded (already
+      // SUCCEEDED), or a concurrent staff captureNow must not double-apply.
+      // Refund-terminal rows are excluded — a late succeeded redelivery must
+      // not resurrect a refunded payment. Bond holds are handled above.
       const priorCharge = await prisma.payment.findFirst({
         where: { stripePaymentIntentId: id },
         select: { bookingId: true, type: true, amount: true, status: true },
       });
 
-      await prisma.payment.updateMany({
-        where: { stripePaymentIntentId: id },
+      const flipped = await prisma.payment.updateMany({
+        where: {
+          stripePaymentIntentId: id,
+          status: { notIn: ["SUCCEEDED", "REFUNDED", "PARTIALLY_REFUNDED"] },
+        },
         data: {
           status: "SUCCEEDED",
           stripeChargeId: chargeId,
           processedAt: new Date(),
         },
       });
-      // Remove a now-collected ancillary charge from Booking.balanceDue
-      // (no-op for the deposit / bonds / already-SUCCEEDED redeliveries).
-      if (priorCharge) {
+      // Remove a now-collected ancillary charge from Booking.balanceDue —
+      // only when THIS delivery performed the flip (no-op for the deposit /
+      // bonds / redeliveries / races lost to another capture path).
+      if (priorCharge && flipped.count > 0) {
         await applyCaptureToBalanceDue(prisma, {
           bookingId: priorCharge.bookingId,
           type: priorCharge.type,

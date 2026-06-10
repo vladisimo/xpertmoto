@@ -294,3 +294,62 @@ describe("runLinktSync", () => {
     expect(prisma.linktUnmatchedRow.create).not.toHaveBeenCalled(); // refresh, not re-create
   });
 });
+
+describe("XLSX decompression-bomb guard", () => {
+  // Build a real, minimal XLSX with the same shape as the CSV fixture so the
+  // happy path proves a legitimate Linkt export still parses.
+  function makeXlsxBuffer(): Buffer {
+    const XLSX = require("xlsx") as typeof import("xlsx");
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["Date and time", "LPN", "Toll point", "Trip cost", "Transaction type"],
+      ["05/04/2026 08:14", "ABC123", "M2 Pennant Hills", "4.27", "Trip"],
+    ]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Trips");
+    return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  }
+
+  test("a legitimate XLSX export parses", () => {
+    const rows = parseLinktExport(makeXlsxBuffer(), ACCOUNT);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.plate).toBe("ABC123");
+  });
+
+  test("rejects a PK-prefixed buffer with no readable central directory", () => {
+    const junk = Buffer.concat([Buffer.from("PK\x03\x04"), Buffer.alloc(64, 0x41)]);
+    expect(() => parseLinktExport(junk, ACCOUNT)).toThrow(/XLSX rejected/);
+  });
+
+  test("rejects an archive whose central directory declares ZIP64 sizes", () => {
+    const buf = makeXlsxBuffer();
+    // Locate the EOCD, walk to the first central-directory entry, and patch
+    // its uncompressed-size field to the ZIP64 marker (0xFFFFFFFF).
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= 0; i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    expect(eocd).toBeGreaterThan(0);
+    const cdirOffset = buf.readUInt32LE(eocd + 16);
+    expect(buf.readUInt32LE(cdirOffset)).toBe(0x02014b50);
+    buf.writeUInt32LE(0xffffffff, cdirOffset + 24);
+    expect(() => parseLinktExport(buf, ACCOUNT)).toThrow(/XLSX rejected/);
+  });
+
+  test("rejects an archive declaring an implausibly large uncompressed size", () => {
+    const buf = makeXlsxBuffer();
+    let eocd = -1;
+    for (let i = buf.length - 22; i >= 0; i--) {
+      if (buf.readUInt32LE(i) === 0x06054b50) {
+        eocd = i;
+        break;
+      }
+    }
+    const cdirOffset = buf.readUInt32LE(eocd + 16);
+    // 512 MB declared on the first entry — over the 100 MB cap.
+    buf.writeUInt32LE(512 * 1024 * 1024, cdirOffset + 24);
+    expect(() => parseLinktExport(buf, ACCOUNT)).toThrow(/XLSX rejected/);
+  });
+});

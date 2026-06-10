@@ -26,6 +26,7 @@ const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], no
 const auditCreate = vi.fn().mockResolvedValue({});
 const webhookEventCreate = vi.fn().mockResolvedValue({ id: "evt_dispute_1" });
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
+const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -40,7 +41,11 @@ vi.mock("@/lib/prisma", () => ({
     incident: { findFirst: incidentFindFirst, create: incidentCreate },
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
-    stripeWebhookEvent: { create: webhookEventCreate, update: webhookEventUpdate },
+    stripeWebhookEvent: {
+      create: webhookEventCreate,
+      update: webhookEventUpdate,
+      updateMany: webhookEventUpdateMany,
+    },
     $transaction: vi.fn(),
   },
 }));

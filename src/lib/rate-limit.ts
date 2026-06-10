@@ -74,10 +74,21 @@ export async function rateLimit(
   windowSec: number,
 ): Promise<RateLimitResult> {
   // LOADTEST_RATELIMIT_OFF=1 disables the IP-keyed limiter so a synthetic
-  // load test from a single host isn't throttled. Build-flagged for the
-  // load-test stack only (.env.loadtest); never enable in production.
+  // load test from a single host isn't throttled. The load-test stack runs a
+  // production build (NODE_ENV=production), so the kill-switch is instead
+  // bound to a localhost APP_URL — on a real deployment (public APP_URL) the
+  // flag is ignored and logged, so a leaked .env can't silently disable
+  // rate limiting in production.
   if (process.env.LOADTEST_RATELIMIT_OFF === "1") {
-    return { ok: true, remaining: limit, resetAt: Date.now() + windowSec * 1000 };
+    const appUrl = process.env.APP_URL ?? "";
+    const isLocalStack = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(appUrl);
+    if (isLocalStack) {
+      return { ok: true, remaining: limit, resetAt: Date.now() + windowSec * 1000 };
+    }
+    logger.error(
+      { appUrl },
+      "rate-limit: LOADTEST_RATELIMIT_OFF is set on a non-localhost deployment — ignoring",
+    );
   }
   const client = getRedis();
   if (!client) {

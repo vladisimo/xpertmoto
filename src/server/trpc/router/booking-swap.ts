@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
+import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
 import { isVehicleFree } from "@/server/services/availability";
 import { quoteSwapDelta } from "@/server/services/pricing";
 import { refundCharge } from "@/lib/stripe";
@@ -168,6 +169,7 @@ export const bookingSwapRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
         select: {
@@ -274,6 +276,7 @@ export const bookingSwapRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
         select: { categoryId: true, returnDateTime: true, status: true },
@@ -329,6 +332,7 @@ export const bookingSwapRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
         select: { id: true, status: true, vehicleId: true, customerId: true },
@@ -409,8 +413,9 @@ export const bookingSwapRouter = createTRPCRouter({
    */
   activeDraft: staffProcedure
     .input(z.object({ bookingId: z.string() }))
-    .query(({ ctx, input }) =>
-      ctx.prisma.bookingSwap.findFirst({
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return ctx.prisma.bookingSwap.findFirst({
         where: { bookingId: input.bookingId, status: "DRAFT" },
         orderBy: { createdAt: "desc" },
         select: {
@@ -422,8 +427,8 @@ export const bookingSwapRouter = createTRPCRouter({
           draftState: true,
           swappedById: true,
         },
-      }),
-    ),
+      });
+    }),
 
   /**
    * Persist the wizard's in-progress state onto an open DRAFT so it survives
@@ -536,6 +541,7 @@ export const bookingSwapRouter = createTRPCRouter({
           message: "Swap draft not found or already committed.",
         });
       }
+      await assertBookingDepotAccess(ctx, draft.bookingId);
       const booking = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: draft.bookingId },
         include: {
@@ -1363,6 +1369,7 @@ export const bookingSwapRouter = createTRPCRouter({
       const draft = await ctx.prisma.bookingSwap.findUniqueOrThrow({
         where: { id: input.swapId },
       });
+      await assertBookingDepotAccess(ctx, draft.bookingId);
       if (draft.status !== "DRAFT") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -1438,8 +1445,9 @@ export const bookingSwapRouter = createTRPCRouter({
   /** Swap history for a booking, for the booking-detail Activity tab. */
   listForBooking: staffProcedure
     .input(z.object({ bookingId: z.string() }))
-    .query(({ ctx, input }) =>
-      ctx.prisma.bookingSwap.findMany({
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return ctx.prisma.bookingSwap.findMany({
         where: { bookingId: input.bookingId, status: { not: "VOIDED" } },
         orderBy: { swappedAt: "desc" },
         include: {
@@ -1452,14 +1460,14 @@ export const bookingSwapRouter = createTRPCRouter({
           payment: { select: { id: true, reference: true, status: true, amount: true, type: true } },
           swappedBy: { select: { id: true, firstName: true, lastName: true } },
         },
-      }),
-    ),
+      });
+    }),
 
   /** Fetch a single swap for review / PDF rendering. */
   byId: staffProcedure
     .input(z.object({ swapId: z.string() }))
-    .query(({ ctx, input }) =>
-      ctx.prisma.bookingSwap.findUnique({
+    .query(async ({ ctx, input }) => {
+      const swap = await ctx.prisma.bookingSwap.findUnique({
         where: { id: input.swapId },
         include: {
           booking: {
@@ -1477,6 +1485,8 @@ export const bookingSwapRouter = createTRPCRouter({
           payment: true,
           swappedBy: { select: { id: true, firstName: true, lastName: true } },
         },
-      }),
-    ),
+      });
+      if (swap?.booking) assertDepotAccess(ctx.user, swap.booking.depotId);
+      return swap;
+    }),
 });

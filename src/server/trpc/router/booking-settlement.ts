@@ -67,22 +67,30 @@ export const bookingSettlementRouter = createTRPCRouter({
       });
       // GST = total / 11 when inclusive; zero when caller opted out.
       const gst = input.gstInclusive ? gstFromInclusive(input.amount) : 0;
-      const payment = await ctx.prisma.payment.create({
-        data: {
-          reference: `MAN-${Date.now()}`,
-          bookingId: b.id,
-          customerId: b.customerId,
-          type: input.type,
-          method: "STRIPE",
-          amount: input.amount,
-          gstAmount: gst,
-          status: "PENDING",
-          notes: input.description,
-        },
-      });
-      await ctx.prisma.booking.update({
-        where: { id: b.id },
-        data: { balanceDue: Number(b.balanceDue) + input.amount },
+      // Charge row + balanceDue increment are one atomic unit (the balanceDue
+      // invariant: every raise increments it) — a Payment without its
+      // increment is money settlement will never collect. The increment is
+      // atomic rather than read-modify-write so concurrent charges can't
+      // lose updates.
+      const payment = await ctx.prisma.$transaction(async (tx) => {
+        const created = await tx.payment.create({
+          data: {
+            reference: `MAN-${Date.now()}`,
+            bookingId: b.id,
+            customerId: b.customerId,
+            type: input.type,
+            method: "STRIPE",
+            amount: input.amount,
+            gstAmount: gst,
+            status: "PENDING",
+            notes: input.description,
+          },
+        });
+        await tx.booking.update({
+          where: { id: b.id },
+          data: { balanceDue: { increment: input.amount } },
+        });
+        return created;
       });
       await writePaymentAudit(ctx.prisma, {
         action: "payment.manual_charge_created",
@@ -116,8 +124,11 @@ export const bookingSettlementRouter = createTRPCRouter({
         });
       }
       await ctx.prisma.$transaction(async (tx) => {
-        await tx.payment.update({
-          where: { id: p.id },
+        // CAS on PENDING: two concurrent voids (or a void racing a capture)
+        // must decrement balanceDue at most once. The pre-check above is
+        // advisory only — this is the authoritative gate.
+        const voided = await tx.payment.updateMany({
+          where: { id: p.id, status: "PENDING" },
           data: {
             status: "FAILED",
             notes: `VOIDED by staff: ${input.reason}`,
@@ -125,19 +136,23 @@ export const bookingSettlementRouter = createTRPCRouter({
             processedAt: new Date(),
           },
         });
-        if (p.bookingId) {
-          const current = await tx.booking.findUnique({
-            where: { id: p.bookingId },
-            select: { balanceDue: true },
+        if (voided.count === 0) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Payment is no longer PENDING — it was captured or voided concurrently.",
           });
-          if (current) {
-            await tx.booking.update({
-              where: { id: p.bookingId },
-              data: {
-                balanceDue: Math.max(0, Number(current.balanceDue) - Number(p.amount)),
-              },
-            });
-          }
+        }
+        if (p.bookingId) {
+          // Atomic decrement (no stale read), clamped back to zero after —
+          // a balance can never go negative.
+          await tx.booking.update({
+            where: { id: p.bookingId },
+            data: { balanceDue: { decrement: Number(p.amount) } },
+          });
+          await tx.booking.updateMany({
+            where: { id: p.bookingId, balanceDue: { lt: 0 } },
+            data: { balanceDue: 0 },
+          });
         }
         // Revert the Infringement back to NOMINATED (or RECEIVED) when
         // an INFRINGEMENT_RECOVERY payment is voided so the Tolls tab
@@ -213,8 +228,11 @@ export const bookingSettlementRouter = createTRPCRouter({
         });
       }
       if (charge.status === "succeeded") {
-        await ctx.prisma.payment.update({
-          where: { id: p.id },
+        // CAS on the PENDING status: the Stripe webhook for this same
+        // payment intent races this mutation, and both decrement balanceDue
+        // when they win the flip — so only the winner may apply it.
+        const flipped = await ctx.prisma.payment.updateMany({
+          where: { id: p.id, status: "PENDING" },
           data: {
             status: "SUCCEEDED",
             stripePaymentIntentId: charge.id,
@@ -226,12 +244,14 @@ export const bookingSettlementRouter = createTRPCRouter({
         // Remove the charge's increment from balanceDue now it's collected
         // (it was added when the PENDING charge was raised). Shared with the
         // capture-pending job and the Stripe webhook so they can't drift.
-        await applyCaptureToBalanceDue(ctx.prisma, {
-          bookingId: p.bookingId,
-          type: p.type,
-          amount: p.amount,
-          previousStatus: "PENDING",
-        });
+        if (flipped.count > 0) {
+          await applyCaptureToBalanceDue(ctx.prisma, {
+            bookingId: p.bookingId,
+            type: p.type,
+            amount: p.amount,
+            previousStatus: "PENDING",
+          });
+        }
         // Keep the Infringement row in sync when staff capture an
         // INFRINGEMENT_RECOVERY payment manually — the Tolls tab and
         // customer surfaces both derive their paid/unpaid status from

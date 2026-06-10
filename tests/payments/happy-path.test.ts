@@ -23,6 +23,7 @@ const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], no
 const auditCreate = vi.fn().mockResolvedValue({});
 const webhookEventCreate = vi.fn().mockResolvedValue({});
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
+const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -37,7 +38,11 @@ vi.mock("@/lib/prisma", () => ({
     incident: { findFirst: vi.fn(), create: vi.fn() },
     user: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: { create: auditCreate },
-    stripeWebhookEvent: { create: webhookEventCreate, update: webhookEventUpdate },
+    stripeWebhookEvent: {
+      create: webhookEventCreate,
+      update: webhookEventUpdate,
+      updateMany: webhookEventUpdateMany,
+    },
     $transaction: vi.fn(async (cb: (tx: unknown) => unknown) =>
       cb({
         payment: { updateMany: paymentUpdateMany },
@@ -95,7 +100,10 @@ describe("happy path — Stripe event sequence", () => {
     expect(res.status).toBe(200);
     expect(paymentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { stripePaymentIntentId: "pi_hp_1" },
+        where: {
+          stripePaymentIntentId: "pi_hp_1",
+          status: { notIn: ["SUCCEEDED", "REFUNDED", "PARTIALLY_REFUNDED"] },
+        },
         data: expect.objectContaining({ status: "SUCCEEDED", stripeChargeId: "ch_hp_1" }),
       }),
     );

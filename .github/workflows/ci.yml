@@ -58,3 +58,76 @@ jobs:
       # vulnerability. Dev deps are excluded to avoid noise from build-time
       # tooling.
       - run: npm audit --production --audit-level=high
+
+  # Browser smoke against the real app: seeded e2e DB + Redis + dev server,
+  # public pages and the login/portal flow. Keeps the booking funnel's front
+  # door from silently breaking on main; the heavier role-scoped e2e suites
+  # still run locally via `npm run test:e2e:local`.
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: xpertmoto_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # All values below are throwaway CI-only placeholders (same set as the
+    # test job above) — ephemeral service containers, never real deployments.
+    # Real deploys set their own secrets; env.ts rejects these in production.
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e
+      REDIS_URL: redis://localhost:6379/3
+      AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
+      AUTH_URL: http://localhost:3137
+      AUTH_TRUST_HOST: "true"
+      SECRET_ENC_KEY: zlGuVHEjGOaCSjqLhgmHsf5r97YF9EdQHHdoibKNUug=
+      ALLOW_STUB_STRIPE: "1"
+      APP_URL: http://localhost:3137
+      IP_HASH_SALT: ci-ip-hash-salt-placeholder
+      SMTP_HOST: localhost
+      E2E_DB: "1"
+      PORT: "3137"
+      E2E_NO_RESEED: "1"
+      NEXT_DIST_DIR: .next-e2e
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # db:reset:e2e and dev:e2e load .env.e2e (gitignored locally) — provide
+      # the CI equivalent pointing at the service containers.
+      - name: Write .env.e2e
+        run: |
+          cat > .env.e2e <<'ENV'
+          DATABASE_URL=postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e
+          REDIS_URL=redis://localhost:6379/3
+          NEXT_DIST_DIR=.next-e2e
+          ENV
+      - run: npm run db:reset:e2e
+      - run: npm run test:e2e:smoke
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7

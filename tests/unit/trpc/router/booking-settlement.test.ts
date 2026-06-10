@@ -55,6 +55,7 @@ type TestCtx = {
       create: ReturnType<typeof vi.fn>;
       findUniqueOrThrow: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
+      updateMany: ReturnType<typeof vi.fn>;
     };
     bondLedger: {
       findUniqueOrThrow: ReturnType<typeof vi.fn>;
@@ -90,6 +91,8 @@ function makeCtx(overrides: {
         ? vi.fn()
         : vi.fn().mockResolvedValue(overrides.sourcePayment),
     update: vi.fn().mockResolvedValue({}),
+    // CAS status flips (captureNow / voidPayment) go through updateMany.
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   };
 
   const bondLedger = {
@@ -106,6 +109,7 @@ function makeCtx(overrides: {
     // findUnique, not findUniqueOrThrow.
     findUnique: vi.fn().mockResolvedValue(booking),
     update: vi.fn().mockResolvedValue({}),
+    updateMany: vi.fn().mockResolvedValue({ count: 0 }),
   };
 
   return {
@@ -147,7 +151,7 @@ describe("bookingSettlement.addManualCharge", () => {
     expect(createCall.data.status).toBe("PENDING");
     expect(ctx.prisma.booking.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ balanceDue: 110 }),
+        data: expect.objectContaining({ balanceDue: { increment: 110 } }),
       }),
     );
   });

@@ -345,6 +345,13 @@ export function StepSearch() {
             Please fix the highlighted fields above before continuing.
           </div>
         )}
+        {/* ACL: cancellation/no-show terms surfaced at date selection, not
+         * only at review — fees must be disclosed before the customer
+         * commits. Mirrors the full policy block on the review step. */}
+        <p className="text-xs text-muted-foreground">
+          Cancellation: more than 72&nbsp;hours before pickup — full refund less a $25 admin fee
+          · 24–72&nbsp;hours — 50% refund · under 24&nbsp;hours or no-show — no refund.
+        </p>
         {layout === "desktop" && (
           <div className="flex justify-end">
             <Button type="submit" variant="cta">Continue</Button>

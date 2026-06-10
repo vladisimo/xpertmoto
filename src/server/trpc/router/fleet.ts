@@ -2,6 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Prisma } from "@prisma/client";
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
+import { scopedDepotFilter } from "./_depot-scope";
 import { calcDepreciation } from "@/server/services/depreciation";
 import {
   AUDIT_CHECKS,
@@ -266,10 +267,12 @@ export const fleetRouter = createTRPCRouter({
       const now = new Date();
       const in30 = new Date(now.getTime() + 30 * 86400000);
       const in14 = new Date(now.getTime() + 14 * 86400000);
+      const depotId = scopedDepotFilter(ctx.user);
 
       const vehicles = await ctx.prisma.vehicle.findMany({
         where: {
           isActive: true,
+          ...(depotId ? { depotId } : {}),
           OR: [
             { regoExpiry: { lt: in30 } },
             { ctpExpiry: { lt: in30 } },
@@ -415,11 +418,12 @@ export const fleetRouter = createTRPCRouter({
         .optional(),
     )
     .query(async ({ ctx, input }) => {
+      const depotId = scopedDepotFilter(ctx.user, input?.depotId);
       const vehicles = await ctx.prisma.vehicle.findMany({
         where: {
           isActive: true,
           status: { notIn: [...AUDIT_EXCLUDED_STATUSES] },
-          ...(input?.depotId ? { depotId: input.depotId } : {}),
+          ...(depotId ? { depotId } : {}),
           ...(input?.search
             ? {
                 OR: [

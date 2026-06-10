@@ -93,7 +93,19 @@ export function getQueue(name: QueueName): Queue | null {
   if (queues.has(name)) return queues.get(name)!;
   const redis = getRedis();
   if (!redis) return null;
-  const q = new Queue(name, { connection: redis });
+  const q = new Queue(name, {
+    connection: redis,
+    // Bounded job-record retention. Without this every completed/failed run
+    // of the ~40 repeatable schedules accumulates in Redis forever and the
+    // instance eventually OOMs. History beyond these windows already lives
+    // in the audit log (writeAudit on start/complete/failed) and Sentry, so
+    // Redis only needs a short debugging tail. Callers can still override
+    // per-add.
+    defaultJobOptions: {
+      removeOnComplete: { age: 7 * 24 * 3600, count: 1000 },
+      removeOnFail: { age: 30 * 24 * 3600, count: 5000 },
+    },
+  });
   queues.set(name, q);
   return q;
 }

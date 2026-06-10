@@ -48,6 +48,16 @@ export interface TaxInvoicePdfInput {
 
 export async function renderTaxInvoicePdf(input: TaxInvoicePdfInput): Promise<Buffer> {
   const branding = await getBranding();
+  // A tax invoice without the supplier's legal name + ABN is not a valid
+  // GST invoice (ATO requirement). Fail fast instead of silently issuing
+  // non-compliant documents — invoice-lifecycle retry sweeps regenerate
+  // once branding is configured.
+  if (!branding.abn || !branding.legalName) {
+    throw new Error(
+      "Cannot render a tax invoice: org.legalName and org.abn are not configured. " +
+        "Set them in Admin → Settings → Organisation before issuing invoices.",
+    );
+  }
   const config = await getInvoicingConfig();
   const theme = makePdfTheme(branding);
   const logoUrl = resolvePdfLogoSrc(branding);

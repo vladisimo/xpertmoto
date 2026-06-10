@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { refundCharge } from "../../../src/lib/stripe";
+
+// These tests exercise the UNCONFIGURED path — a developer's local .env with
+// a real STRIPE_SECRET_KEY must not turn them into live network calls.
+beforeEach(() => {
+  vi.stubEnv("STRIPE_SECRET_KEY", "");
+});
 
 /**
  * Phase C — refundCharge stub-mode behaviour. The real Stripe client is

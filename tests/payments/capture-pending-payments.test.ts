@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const findMany = vi.fn();
 const update = vi.fn().mockResolvedValue({});
+const updateMany = vi.fn().mockResolvedValue({ count: 1 });
 const auditCreate = vi.fn().mockResolvedValue({});
 const userFindMany = vi.fn().mockResolvedValue([{ id: "mgr_1" }]);
 const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], notificationIds: [] });
@@ -26,7 +27,7 @@ const bookingUpdate = vi.fn().mockResolvedValue({});
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    payment: { findMany, update },
+    payment: { findMany, update, updateMany },
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
     booking: { findUnique: bookingFindUnique, update: bookingUpdate },
@@ -82,9 +83,10 @@ describe("capture-pending-payments", () => {
     const r = await runCapturePendingPayments();
     expect(r.succeeded).toBe(1);
     expect(r.failed).toBe(0);
-    expect(update).toHaveBeenCalledWith(
+    expect(updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "pay_1" },
+        // CAS: only a still-PENDING row may flip (webhook races the job)
+        where: { id: "pay_1", status: "PENDING" },
         data: expect.objectContaining({
           status: "SUCCEEDED",
           stripePaymentIntentId: "pi_new_1",

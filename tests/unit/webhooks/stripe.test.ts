@@ -17,6 +17,7 @@ const userFindMany = vi.fn().mockResolvedValue([]);
 const auditCreate = vi.fn().mockResolvedValue({});
 const webhookEventCreate = vi.fn().mockResolvedValue({});
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
+const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
   cb({
     payment: { updateMany: paymentUpdateMany },
@@ -38,7 +39,11 @@ vi.mock("@/lib/prisma", () => ({
     incident: { findFirst: incidentFindFirst, create: incidentCreate },
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
-    stripeWebhookEvent: { create: webhookEventCreate, update: webhookEventUpdate },
+    stripeWebhookEvent: {
+      create: webhookEventCreate,
+      update: webhookEventUpdate,
+      updateMany: webhookEventUpdateMany,
+    },
     $transaction: txFn,
   },
 }));
@@ -135,7 +140,10 @@ describe("Stripe webhook", () => {
     expect(res.status).toBe(200);
     expect(paymentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { stripePaymentIntentId: "pi_123" },
+        where: {
+          stripePaymentIntentId: "pi_123",
+          status: { notIn: ["SUCCEEDED", "REFUNDED", "PARTIALLY_REFUNDED"] },
+        },
         data: expect.objectContaining({ status: "SUCCEEDED", stripeChargeId: "ch_123" }),
       }),
     );

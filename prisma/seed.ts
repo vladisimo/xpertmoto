@@ -73,6 +73,26 @@ async function main() {
     },
   });
 
+  // Branding reads org.* from SystemSetting (not the Organisation row).
+  // Tax-document rendering hard-fails without legalName + ABN, so seed them
+  // here in lock-step with the Organisation row. `update: {}` preserves any
+  // values already configured through Admin → Settings.
+  // NOTE: verify the invoicing entity before launch — Organisation data says
+  // "XPERT Moto Group Pty Ltd / 72 629 456 408" while the platform contract
+  // names Mercury Road Equipment Pty Ltd / 36 614 422 187.
+  const orgSettings: Array<{ key: string; value: string }> = [
+    { key: "org.tradingName", value: "XPERT Moto" },
+    { key: "org.legalName", value: "XPERT Moto Group Pty Ltd" },
+    { key: "org.abn", value: "72 629 456 408" },
+  ];
+  for (const s of orgSettings) {
+    await prisma.systemSetting.upsert({
+      where: { key: s.key },
+      create: { key: s.key, group: "org", value: s.value },
+      update: {},
+    });
+  }
+
   // Depots
   const lewisham = await prisma.depot.create({
     data: {

@@ -97,3 +97,44 @@ describe("rateLimit", () => {
     expect(fake.defineCommand).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("LOADTEST_RATELIMIT_OFF kill-switch guard", () => {
+  beforeEach(() => {
+    vi.mocked(getRedis).mockReset();
+    vi.unstubAllEnvs();
+  });
+
+  test("honours the bypass on a localhost stack (load-test profile)", async () => {
+    vi.stubEnv("LOADTEST_RATELIMIT_OFF", "1");
+    vi.stubEnv("APP_URL", "http://localhost:3009");
+    // A denying limiter proves the bypass short-circuits before Redis.
+    const fake = makeFake(() => [0, 0, Date.now() + 60_000]);
+    vi.mocked(getRedis).mockReturnValue(fake as never);
+
+    const r = await rateLimit("bypass", 1, 60);
+    expect(r.ok).toBe(true);
+    expect(fake.defineCommand).not.toHaveBeenCalled();
+  });
+
+  test("ignores the bypass on a non-localhost deployment and enforces the limit", async () => {
+    vi.stubEnv("LOADTEST_RATELIMIT_OFF", "1");
+    vi.stubEnv("APP_URL", "https://xpertmoto.com.au");
+    const fake = makeFake(() => [0, 0, Date.now() + 60_000]);
+    vi.mocked(getRedis).mockReturnValue(fake as never);
+
+    const r = await rateLimit("bypass", 1, 60);
+    expect(r.ok).toBe(false);
+  });
+
+  test("ignores the bypass when APP_URL is unset or malformed", async () => {
+    vi.stubEnv("LOADTEST_RATELIMIT_OFF", "1");
+    vi.stubEnv("APP_URL", "");
+    const fake = makeFake(() => [0, 0, Date.now() + 60_000]);
+    vi.mocked(getRedis).mockReturnValue(fake as never);
+    expect((await rateLimit("bypass", 1, 60)).ok).toBe(false);
+
+    // userinfo trick must not pass the anchored host check
+    vi.stubEnv("APP_URL", "http://localhost@evil.com");
+    expect((await rateLimit("bypass2", 1, 60)).ok).toBe(false);
+  });
+});

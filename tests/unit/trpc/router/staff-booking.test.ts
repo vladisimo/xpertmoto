@@ -205,3 +205,69 @@ describe("staffBooking.closeOut", () => {
     expect(recordBookingCompletionMock).not.toHaveBeenCalled();
   });
 });
+
+describe("staffBooking depot scoping (B1 IDOR fix)", () => {
+  function makeDepotCtx(userDepotId: string | null) {
+    const booking = makeBooking({ status: "RETURNED" });
+    const prisma = {
+      booking: {
+        findUnique: vi.fn(async () => ({
+          customerId: booking.customerId,
+          depotId: booking.depotId,
+        })),
+        findUniqueOrThrow: vi.fn(async () => booking),
+        update: vi.fn(async () => ({ id: booking.id })),
+      },
+      bookingNote: { create: vi.fn(async () => ({ id: "n1" })) },
+    };
+    return {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: userDepotId },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: userDepotId } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+  }
+
+  it("FORBIDDEN: depot-assigned STAFF cannot read a booking from another depot", async () => {
+    const ctx = makeDepotCtx("depot-other");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.markOverdue({ bookingId: "b1" })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+  });
+
+  it("FORBIDDEN: depot-assigned STAFF cannot add a note to another depot's booking", async () => {
+    const ctx = makeDepotCtx("depot-other");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.addNote({ bookingId: "b1", note: "x", isInternal: true }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(ctx.prisma.bookingNote.create).not.toHaveBeenCalled();
+  });
+
+  it("allows STAFF assigned to the booking's own depot", async () => {
+    const ctx = makeDepotCtx("depot1");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.addNote({ bookingId: "b1", note: "x", isInternal: true }),
+    ).resolves.toMatchObject({ id: "n1" });
+  });
+
+  it("pins the list query to the STAFF user's depot even when another depot is requested", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const ctx = {
+      prisma: { booking: { findMany } },
+      user: { id: "staff1", role: "STAFF" as const, depotId: "depot1" },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: "depot1" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.list({ depotId: "depot-other", take: 10 });
+    const args = findMany.mock.calls[0]?.[0] as { where?: { depotId?: string } } | undefined;
+    expect(args?.where?.depotId).toBe("depot1");
+  });
+});

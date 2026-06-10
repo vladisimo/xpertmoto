@@ -43,6 +43,15 @@ export async function renderAdjustmentNotePdf(
   input: AdjustmentNotePdfInput,
 ): Promise<Buffer> {
   const branding = await getBranding();
+  // Adjustment notes are tax documents like invoices — legal name + ABN are
+  // mandatory (ATO requirement). Fail fast rather than issue a non-compliant
+  // document; see the matching guard in renderTaxInvoicePdf.
+  if (!branding.abn || !branding.legalName) {
+    throw new Error(
+      "Cannot render an adjustment note: org.legalName and org.abn are not configured. " +
+        "Set them in Admin → Settings → Organisation before issuing adjustments.",
+    );
+  }
   const config = await getInvoicingConfig();
   const theme = makePdfTheme(branding);
   const logoUrl = resolvePdfLogoSrc(branding);

@@ -48,6 +48,7 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { trackServer } from "@/lib/analytics";
+import { gstFromInclusive } from "@/lib/money";
 import { generateBookingReference, withUniqueRetry } from "@/lib/id-gen";
 import { applyReferral } from "@/server/services/referral";
 import { attachByTrackingCode } from "@/server/services/partner";
@@ -1218,7 +1219,7 @@ export const bookingRouter = createTRPCRouter({
       const remainingDays = Math.max(1, Math.ceil(remainingMs / (1000 * 60 * 60 * 24)));
       const dailyRate = Number(option.dailyRate);
       const total = Math.round(dailyRate * remainingDays * 100) / 100;
-      const gstAmount = Math.round((total / 11) * 100) / 100;
+      const gstAmount = gstFromInclusive(total).toNumber();
 
       await ctx.prisma.$transaction(async (tx) => {
         await tx.bookingInsurance.create({

@@ -63,12 +63,62 @@ function splitCsvLine(line: string): string[] {
   return out.map((c) => c.trim());
 }
 
+// Decompression-bomb guard for XLSX uploads. The route caps the *compressed*
+// upload at 8 MB, but a zip bomb expands far beyond that in memory. Before
+// handing the buffer to XLSX.read we sum the uncompressed sizes declared in
+// the ZIP central directory and reject anything implausibly large for a toll
+// export (a year of trips is well under 10 MB uncompressed). A crafted
+// archive can still under-declare, so XLSX.read is additionally bounded with
+// `sheetRows`; uploads are staff-only, so this targets accidents and casual
+// abuse rather than a determined insider.
+const MAX_DECLARED_UNCOMPRESSED_BYTES = 100 * 1024 * 1024;
+const MAX_SHEET_ROWS = 100_000;
+
+function declaredZipUncompressedBytes(buf: Buffer): number | null {
+  const EOCD_SIG = 0x06054b50;
+  const CDIR_SIG = 0x02014b50;
+  const minEocd = 22;
+  if (buf.length < minEocd) return null;
+  // EOCD sits at the end of the file, possibly behind a comment (≤ 64 KiB).
+  const scanFrom = Math.max(0, buf.length - 65536 - minEocd);
+  let eocd = -1;
+  for (let i = buf.length - minEocd; i >= scanFrom; i--) {
+    if (buf.readUInt32LE(i) === EOCD_SIG) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  const count = buf.readUInt16LE(eocd + 10);
+  let offset = buf.readUInt32LE(eocd + 16);
+  let total = 0;
+  for (let n = 0; n < count; n++) {
+    if (offset + 46 > buf.length || buf.readUInt32LE(offset) !== CDIR_SIG) return null;
+    const uncompressed = buf.readUInt32LE(offset + 24);
+    // 0xFFFFFFFF marks ZIP64 — far beyond any legitimate Linkt export.
+    if (uncompressed === 0xffffffff) return null;
+    total += uncompressed;
+    const nameLen = buf.readUInt16LE(offset + 28);
+    const extraLen = buf.readUInt16LE(offset + 30);
+    const commentLen = buf.readUInt16LE(offset + 32);
+    offset += 46 + nameLen + extraLen + commentLen;
+  }
+  return total;
+}
+
 function toRowMatrix(input: Buffer | string): string[][] {
   // XLSX (a zip) starts with the bytes "PK". Anything else is treated as CSV.
   const isXlsx =
     Buffer.isBuffer(input) && input.length > 1 && input[0] === 0x50 && input[1] === 0x4b;
   if (isXlsx) {
-    const wb = XLSX.read(input, { type: "buffer" });
+    const declared = declaredZipUncompressedBytes(input);
+    if (declared === null || declared > MAX_DECLARED_UNCOMPRESSED_BYTES) {
+      throw new Error(
+        "XLSX rejected: the archive is malformed or declares an implausibly large " +
+          "uncompressed size. Export the trips as CSV and retry.",
+      );
+    }
+    const wb = XLSX.read(input, { type: "buffer", sheetRows: MAX_SHEET_ROWS });
     const name = wb.SheetNames[0];
     const sheet = name ? wb.Sheets[name] : undefined;
     if (!sheet) return [];

@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 
 import { auth } from "@/lib/auth";
 import { downloadFile } from "@/lib/storage";
+import { logger } from "@/lib/logger";
 
 // Same-origin proxy for identity-document images (driver's licence, passport).
 // Avoids three separate dev/prod headaches with direct S3/MinIO URLs:
@@ -45,7 +47,11 @@ export async function GET(req: NextRequest) {
   let bytes: Buffer;
   try {
     bytes = await downloadFile(key);
-  } catch {
+  } catch (err) {
+    // A missing object is a data bug; an S3/MinIO outage makes EVERY image
+    // "missing". Both must be visible in Sentry, not silently 404'd.
+    logger.error({ err, route: "identity-image" }, "identity image download failed");
+    Sentry.captureException(err, { tags: { route: "identity-image" } });
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 

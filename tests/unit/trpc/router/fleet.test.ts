@@ -78,3 +78,42 @@ describe("fleet.addVehicleImage", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("fleet depot scoping (B1 IDOR fix)", () => {
+  function makeScopedCtx(role: "STAFF" | "MANAGER", depotId: string | null) {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const prisma = { vehicle: { findMany } };
+    const ctx = {
+      prisma,
+      user: { id: "u1", role, depotId },
+      session: { user: { id: "u1", role, depotId } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["auditVehicles"]>[0];
+    return { ctx, findMany };
+  }
+
+  it("auditVehicles pins depot-assigned STAFF to their own depot", async () => {
+    const { ctx, findMany } = makeScopedCtx("STAFF", "depot-a");
+    const caller = fleetRouter.createCaller(ctx as never);
+    await caller.auditVehicles({ depotId: "depot-b" });
+    const args = findMany.mock.calls[0]?.[0] as { where?: { depotId?: string } };
+    expect(args?.where?.depotId).toBe("depot-a");
+  });
+
+  it("auditVehicles lets MANAGER+ filter any depot", async () => {
+    const { ctx, findMany } = makeScopedCtx("MANAGER", "depot-a");
+    const caller = fleetRouter.createCaller(ctx as never);
+    await caller.auditVehicles({ depotId: "depot-b" });
+    const args = findMany.mock.calls[0]?.[0] as { where?: { depotId?: string } };
+    expect(args?.where?.depotId).toBe("depot-b");
+  });
+
+  it("attentionList scopes depot-assigned STAFF to their own depot", async () => {
+    const { ctx, findMany } = makeScopedCtx("STAFF", "depot-a");
+    const caller = fleetRouter.createCaller(ctx as never);
+    await caller.attentionList({ page: 1, pageSize: 25, sortBy: "dueDate", sortDir: "asc" });
+    const args = findMany.mock.calls[0]?.[0] as { where?: { depotId?: string } };
+    expect(args?.where?.depotId).toBe("depot-a");
+  });
+});

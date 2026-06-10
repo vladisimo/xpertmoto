@@ -63,8 +63,9 @@ export async function runStuckWebhookRecovery(): Promise<{
       continue;
     }
     // Reset to RECEIVED so Stripe's own retry (which will arrive with the
-    // same event id) re-enters our handler. The insert-then-process
-    // dedup keys on `id` so a replay is safe.
+    // same event id) re-enters our handler: the webhook route's status-aware
+    // claim reprocesses RECEIVED/FAILED rows and only acks
+    // PROCESSED/PROCESSING ones as duplicates.
     await prisma.stripeWebhookEvent.update({
       where: { id: evt.id },
       data: { status: "RECEIVED" },

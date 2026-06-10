@@ -191,8 +191,11 @@ async function runCapturePendingPaymentsImpl(
     }
 
     if (charge.status === "succeeded") {
-      await prisma.payment.update({
-        where: { id: row.id },
+      // CAS on PENDING: the Stripe webhook for this payment intent races the
+      // job, and both decrement balanceDue when they win the flip — so only
+      // the winner may apply it.
+      const flipped = await prisma.payment.updateMany({
+        where: { id: row.id, status: "PENDING" },
         data: {
           status: "SUCCEEDED",
           stripePaymentIntentId: charge.id,
@@ -204,12 +207,14 @@ async function runCapturePendingPaymentsImpl(
       // The charge was raised PENDING with its amount added to
       // Booking.balanceDue; now that it's collected, remove it so the
       // customer isn't shown (and dunned for) money already taken.
-      await applyCaptureToBalanceDue(prisma, {
-        bookingId: row.bookingId,
-        type: row.type,
-        amount: row.amount,
-        previousStatus: "PENDING",
-      });
+      if (flipped.count > 0) {
+        await applyCaptureToBalanceDue(prisma, {
+          bookingId: row.bookingId,
+          type: row.type,
+          amount: row.amount,
+          previousStatus: "PENDING",
+        });
+      }
       // Mirror the capture back onto the source Infringement when this
       // is an INFRINGEMENT_RECOVERY payment so the staff Tolls tab and
       // customer-facing surfaces both flip to "Paid".
