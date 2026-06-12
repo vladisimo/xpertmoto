@@ -2,8 +2,12 @@ import { describe, expect, test, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/redis", () => ({ getRedis: vi.fn() }));
 vi.mock("@/lib/logger", () => ({ logger: { warn: vi.fn(), error: vi.fn() } }));
+const captureMessage = vi.fn();
+vi.mock("@sentry/nextjs", () => ({
+  captureMessage: (...a: unknown[]) => captureMessage(...a),
+}));
 
-import { rateLimit } from "@/lib/rate-limit";
+import { rateLimit, rateLimiterStatus } from "@/lib/rate-limit";
 import { getRedis } from "@/lib/redis";
 
 type FakeClient = {
@@ -41,6 +45,24 @@ describe("rateLimit", () => {
     expect(r2.ok).toBe(true);
     expect(r3.ok).toBe(true);
     expect(r4.ok).toBe(false);
+  });
+
+  test("fail-open reaches Sentry and flips the limiter status; recovery clears it", async () => {
+    captureMessage.mockClear();
+    vi.mocked(getRedis).mockReturnValue(null as never);
+    const r = await rateLimit("test", 3, 60);
+    expect(r.ok).toBe(true);
+    expect(captureMessage).toHaveBeenCalledWith(
+      "rate-limit failing open — limiter disabled",
+      expect.objectContaining({ level: "error" }),
+    );
+    expect(rateLimiterStatus().degraded).toBe(true);
+
+    // Redis back → next successful check clears the degraded flag.
+    const fake = makeFake(() => [1, 2, Date.now() + 60_000]);
+    vi.mocked(getRedis).mockReturnValue(fake as never);
+    await rateLimit("test", 3, 60);
+    expect(rateLimiterStatus().degraded).toBe(false);
   });
 
   test("fails open when Redis is null", async () => {

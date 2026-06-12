@@ -489,6 +489,18 @@ export const bookingRouter = createTRPCRouter({
   }),
 
   create: protectedProcedure
+    // Money path: every call writes a booking row and creates up to two
+    // Stripe PaymentIntents. The read endpoints above run at 60/min — this
+    // must be far tighter, per-user as well as per-IP (one human checkout
+    // is 1 create; a couple of retries at most).
+    .use(
+      trpcRateLimit({
+        bucket: "booking:create",
+        limit: 5,
+        windowSec: 60,
+        identifier: (ctx) => ctx.session?.user?.id,
+      }),
+    )
     .input(
       quoteInput.extend({
         agreedToTerms: z.literal(true),

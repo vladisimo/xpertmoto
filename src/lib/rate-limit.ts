@@ -1,7 +1,38 @@
 import { randomUUID } from "node:crypto";
 import type { Redis } from "ioredis";
+import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "./redis";
 import { logger } from "./logger";
+
+/**
+ * Fail-open visibility. The limiter deliberately fails open when Redis is
+ * unreachable (the app must keep serving), but the pino warn it used to
+ * emit isn't shipped anywhere in production — a Redis outage silently
+ * disabled ALL rate limiting (login brute force, booking spam) until
+ * someone happened to read logs. Failures now reach Sentry, throttled to
+ * one event per minute per process so an outage at load doesn't flood the
+ * quota, and the degraded state is queryable for the health endpoint.
+ */
+let degradedSince: number | null = null;
+let lastSentryReport = 0;
+const SENTRY_REPORT_INTERVAL_MS = 60_000;
+
+function reportFailOpen(reason: "redis-unavailable" | "redis-error", key: string, err?: unknown): void {
+  if (degradedSince === null) degradedSince = Date.now();
+  const now = Date.now();
+  if (now - lastSentryReport >= SENTRY_REPORT_INTERVAL_MS) {
+    lastSentryReport = now;
+    Sentry.captureMessage("rate-limit failing open — limiter disabled", {
+      level: "error",
+      tags: { service: "rate-limit", reason },
+      extra: { key, err: err instanceof Error ? err.message : undefined },
+    });
+  }
+}
+
+export function rateLimiterStatus(): { degraded: boolean; degradedSince: number | null } {
+  return { degraded: degradedSince !== null, degradedSince };
+}
 
 const SLIDING_WINDOW_LUA = `
 local key = KEYS[1]
@@ -93,6 +124,7 @@ export async function rateLimit(
   const client = getRedis();
   if (!client) {
     logger.warn({ key, limit, windowSec }, "rate-limit: redis unavailable, failing open");
+    reportFailOpen("redis-unavailable", key);
     return { ok: true, remaining: limit, resetAt: Date.now() + windowSec * 1000 };
   }
   try {
@@ -104,9 +136,11 @@ export async function rateLimit(
       String(limit),
       randomUUID(),
     );
+    degradedSince = null;
     return { ok: ok === 1, remaining, resetAt };
   } catch (err) {
     logger.error({ err, key }, "rate-limit: redis error, failing open");
+    reportFailOpen("redis-error", key, err);
     return { ok: true, remaining: limit, resetAt: Date.now() + windowSec * 1000 };
   }
 }

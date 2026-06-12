@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getRedis } from "@/lib/redis";
+import { rateLimiterStatus } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
 /**
@@ -48,9 +49,23 @@ export async function GET(): Promise<Response> {
     };
   }
 
+  // Limiter state stays out of the public body — an unauthenticated caller
+  // learning "rate limiting is currently off" is an invitation. Operators
+  // get it via the logged diag (and rate-limit.ts's own Sentry event).
+  const limiter = rateLimiterStatus();
+  diag.rateLimiter = {
+    ok: !limiter.degraded,
+    ms: 0,
+    ...(limiter.degradedSince
+      ? { error: `failing open since ${new Date(limiter.degradedSince).toISOString()}` }
+      : {}),
+  };
+
   const databaseOk = diag.database.ok;
   if (!databaseOk) {
     logger.warn({ diag }, "health: database degraded");
+  } else if (limiter.degraded || !diag.redis.ok) {
+    logger.warn({ diag }, "health: redis/rate-limiter degraded (failing open)");
   }
 
   return NextResponse.json(
