@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { PartyPopper, FileText, BookOpen, Wrench } from "lucide-react";
 import { prisma } from "@/lib/prisma";
@@ -106,11 +107,17 @@ export default async function ConfirmationPage({
         <div className="grid gap-0 md:grid-cols-[minmax(0,3fr)_minmax(0,4fr)]">
           <div className="relative aspect-[4/3] bg-muted md:aspect-auto">
             {heroUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
+              // Above-the-fold hero on a page every customer lands on,
+              // often on mobile data right after paying. next/image gets
+              // it resized + WebP'd instead of shipping the staff upload
+              // (up to 8MB) at full resolution.
+              <Image
                 src={heroUrl}
                 alt={vehicleTitle}
-                className="absolute inset-0 h-full w-full object-contain"
+                fill
+                priority
+                sizes="(min-width: 768px) 40vw, 100vw"
+                className="object-contain"
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center text-xs uppercase tracking-wide text-muted-foreground">
