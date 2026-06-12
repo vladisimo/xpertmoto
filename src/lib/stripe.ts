@@ -61,7 +61,16 @@ async function getStripeClient(): Promise<unknown | null> {
     const req = eval("require") as NodeRequire;
     const Stripe = req("stripe");
     const Ctor = Stripe.default ?? Stripe;
-    return new Ctor(key, { apiVersion: "2024-09-30.acacia" });
+    // The SDK default timeout is 80s — far too long for calls sitting
+    // inside user-facing checkout mutations. 15s + one retry keeps the
+    // worst case under ~30s. Retrying creates is safe only because every
+    // create call site passes an idempotencyKey (and the SDK generates
+    // one automatically for requests without).
+    return new Ctor(key, {
+      apiVersion: "2024-09-30.acacia",
+      timeout: 15_000,
+      maxNetworkRetries: 1,
+    });
   } catch {
     return null;
   }
@@ -69,7 +78,14 @@ async function getStripeClient(): Promise<unknown | null> {
 
 export async function createPaymentIntent(args: CreatePaymentIntentArgs): Promise<PaymentIntentResult> {
   const stripe = (await getStripeClient()) as
-    | { paymentIntents: { create: (params: Record<string, unknown>) => Promise<{ id: string; client_secret: string | null; status: string }> } }
+    | {
+        paymentIntents: {
+          create: (
+            params: Record<string, unknown>,
+            opts?: { idempotencyKey?: string },
+          ) => Promise<{ id: string; client_secret: string | null; status: string }>;
+        };
+      }
     | null;
   if (!stripe) {
     assertNotStubbedInProduction();
@@ -79,29 +95,37 @@ export async function createPaymentIntent(args: CreatePaymentIntentArgs): Promis
       status: "succeeded",
     };
   }
-  const pi = await stripe.paymentIntents.create({
-    amount: Math.round(args.amount * 100),
-    currency: "aud",
-    description: args.description,
-    receipt_email: args.customerEmail,
-    metadata: { bookingId: args.bookingId },
-    // Card-only. The booking flow takes a bond hold (manual-capture PI)
-    // immediately after this charge confirms, and confirmCardPayment only
-    // accepts card-type PaymentMethods. Link/wallet types would silently
-    // break the bond step.
-    payment_method_types: ["card"],
-    // Attach the PM to the Stripe Customer + save for future off-session
-    // use. Without this pair of params the PM is single-use and the bond
-    // hold can't reuse the card the customer just entered — Stripe
-    // rejects with "PaymentMethod was previously used with a PaymentIntent
-    // without Customer attachment".
-    ...(args.customerId ? { customer: args.customerId } : {}),
-    setup_future_usage: "off_session",
-    // G11 — Let Stripe negotiate 3DS based on issuer + risk. AU cards
-    // rarely trigger a challenge, but EU/UK cards do and our client is
-    // wired to handle requires_action.
-    payment_method_options: { card: { request_three_d_secure: "automatic" } },
-  });
+  const amountCents = Math.round(args.amount * 100);
+  const pi = await stripe.paymentIntents.create(
+    {
+      amount: amountCents,
+      currency: "aud",
+      description: args.description,
+      receipt_email: args.customerEmail,
+      metadata: { bookingId: args.bookingId },
+      // Card-only. The booking flow takes a bond hold (manual-capture PI)
+      // immediately after this charge confirms, and confirmCardPayment only
+      // accepts card-type PaymentMethods. Link/wallet types would silently
+      // break the bond step.
+      payment_method_types: ["card"],
+      // Attach the PM to the Stripe Customer + save for future off-session
+      // use. Without this pair of params the PM is single-use and the bond
+      // hold can't reuse the card the customer just entered — Stripe
+      // rejects with "PaymentMethod was previously used with a PaymentIntent
+      // without Customer attachment".
+      ...(args.customerId ? { customer: args.customerId } : {}),
+      setup_future_usage: "off_session",
+      // G11 — Let Stripe negotiate 3DS based on issuer + risk. AU cards
+      // rarely trigger a challenge, but EU/UK cards do and our client is
+      // wired to handle requires_action.
+      payment_method_options: { card: { request_three_d_secure: "automatic" } },
+    },
+    // A network timeout + caller retry must not create a second charge.
+    // Key includes the amount so a legitimately re-priced retry for the
+    // same booking gets a fresh key instead of a Stripe parameter-mismatch
+    // rejection (same key + different params errors within the 24h window).
+    { idempotencyKey: `pi-${args.bookingId}-${amountCents}` },
+  );
   return {
     id: pi.id,
     clientSecret: pi.client_secret ?? "",
@@ -322,7 +346,14 @@ export async function refundCharge(args: RefundChargeArgs): Promise<RefundCharge
 
 export async function createBondHold(args: CreatePaymentIntentArgs): Promise<PaymentIntentResult> {
   const stripe = (await getStripeClient()) as
-    | { paymentIntents: { create: (params: Record<string, unknown>) => Promise<{ id: string; client_secret: string | null; status: string }> } }
+    | {
+        paymentIntents: {
+          create: (
+            params: Record<string, unknown>,
+            opts?: { idempotencyKey?: string },
+          ) => Promise<{ id: string; client_secret: string | null; status: string }>;
+        };
+      }
     | null;
   if (!stripe) {
     assertNotStubbedInProduction();
@@ -332,21 +363,26 @@ export async function createBondHold(args: CreatePaymentIntentArgs): Promise<Pay
       status: "succeeded",
     };
   }
-  const pi = await stripe.paymentIntents.create({
-    amount: Math.round(args.amount * 100),
-    currency: "aud",
-    capture_method: "manual",
-    description: `Bond hold — ${args.description}`,
-    metadata: { bookingId: args.bookingId, type: "bond" },
-    // Card-only — manual-capture PIs must use card-type PMs, and we
-    // reuse the card from the rental charge to confirm this one.
-    payment_method_types: ["card"],
-    // Attach to the Stripe Customer so the rental-charge PM (saved via
-    // setup_future_usage) is resolvable here.
-    ...(args.customerId ? { customer: args.customerId } : {}),
-    // G11 — bond holds get the same automatic 3DS treatment.
-    payment_method_options: { card: { request_three_d_secure: "automatic" } },
-  });
+  const amountCents = Math.round(args.amount * 100);
+  const pi = await stripe.paymentIntents.create(
+    {
+      amount: amountCents,
+      currency: "aud",
+      capture_method: "manual",
+      description: `Bond hold — ${args.description}`,
+      metadata: { bookingId: args.bookingId, type: "bond" },
+      // Card-only — manual-capture PIs must use card-type PMs, and we
+      // reuse the card from the rental charge to confirm this one.
+      payment_method_types: ["card"],
+      // Attach to the Stripe Customer so the rental-charge PM (saved via
+      // setup_future_usage) is resolvable here.
+      ...(args.customerId ? { customer: args.customerId } : {}),
+      // G11 — bond holds get the same automatic 3DS treatment.
+      payment_method_options: { card: { request_three_d_secure: "automatic" } },
+    },
+    // Same retry-safety contract as createPaymentIntent above.
+    { idempotencyKey: `bond-${args.bookingId}-${amountCents}` },
+  );
   return {
     id: pi.id,
     clientSecret: pi.client_secret ?? "",
