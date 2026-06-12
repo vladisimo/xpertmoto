@@ -8,6 +8,13 @@ import { buildCustomerListWhere, staffCustomerRouter } from "@/server/trpc/route
 const computeCustomerRewards = vi.fn();
 vi.mock("@/server/services/customer-rewards", () => ({
   computeCustomerRewards: (...args: unknown[]) => computeCustomerRewards(...args),
+  customerRewardsCacheKey: (userId: string) => `customer:rewards:${userId}`,
+}));
+
+// Pass-through: unit tests must not read/write the developer's real Redis
+// (a cache hit here would also leak one test's mock into the next run).
+vi.mock("@/lib/cache", () => ({
+  cached: <T>(_key: string, _ttl: number, fn: () => Promise<T>) => fn(),
 }));
 
 const NOW = new Date("2026-04-17T00:00:00.000Z");

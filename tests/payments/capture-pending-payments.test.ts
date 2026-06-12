@@ -31,6 +31,14 @@ vi.mock("@/lib/prisma", () => ({
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
     booking: { findUnique: bookingFindUnique, update: bookingUpdate },
+    // The flip + balanceDue decrement now share a transaction — route the
+    // tx's models to the same spies so the assertions keep working.
+    $transaction: vi.fn(async (cb: (tx: unknown) => unknown) =>
+      cb({
+        payment: { updateMany },
+        booking: { findUnique: bookingFindUnique, update: bookingUpdate },
+      }),
+    ),
   },
 }));
 

@@ -101,10 +101,28 @@ describe("gift-card service", () => {
     };
 
     function prismaWith(overrides?: { balance?: number; status?: string; expiresAt?: Date }) {
+      // Stateful mock mirroring the atomic conditional decrement: the
+      // claim succeeds (and mutates the balance) only when the WHERE's
+      // balance guard passes, exactly like the real updateMany.
+      const card = { ...fakeCard, ...overrides };
       const tx = {
         giftCard: {
-          findUnique: vi.fn().mockResolvedValue({ ...fakeCard, ...overrides }),
-          update: vi.fn().mockImplementation(async ({ data }) => ({ ...fakeCard, ...data })),
+          findUnique: vi.fn().mockImplementation(async () => ({ ...card })),
+          updateMany: vi.fn().mockImplementation(
+            async ({ where, data }: {
+              where: { balance: { gte: number } };
+              data: { balance: { decrement: number } };
+            }) => {
+              if (Number(card.balance) < where.balance.gte) return { count: 0 };
+              card.balance = Number(card.balance) - data.balance.decrement;
+              return { count: 1 };
+            },
+          ),
+          findUniqueOrThrow: vi.fn().mockImplementation(async () => ({ ...card })),
+          update: vi.fn().mockImplementation(async ({ data }: { data: object }) => ({
+            ...card,
+            ...data,
+          })),
         },
       };
       return {
