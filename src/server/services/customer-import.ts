@@ -11,6 +11,11 @@ export type PrismaLike = PrismaClient | Prisma.TransactionClient;
 
 export const MAX_IMPORT_ROWS = 2000;
 
+/** Rows per createMany statement. The profile insert binds ~22 params per
+ *  row, so 500 keeps each statement comfortably under Postgres's 65535
+ *  bind-parameter ceiling while still cutting 2000 rows to 4 round trips. */
+const CREATE_CHUNK_SIZE = 500;
+
 export type RawRow = Record<string, unknown>;
 
 export type RowResult =
@@ -195,20 +200,40 @@ export async function commitImport(
     ).map((u) => u.email),
   );
 
+  // Batched inserts: users then profiles via chunked createMany, instead of
+  // up to MAX_IMPORT_ROWS serial nested creates (2 round trips per row).
+  // createMany can't do nested writes, so the user ids are read back by
+  // email between the two passes. skipDuplicates + the returned count keep
+  // the totals honest if a concurrent insert sneaks past the re-check.
+  const toInsert = validRows.filter((r) => !taken.has(r.data.email));
   let inserted = 0;
-  for (const row of validRows) {
-    if (taken.has(row.data.email)) continue;
-    const d = row.data;
-    await db.user.create({
-      data: {
+  for (let i = 0; i < toInsert.length; i += CREATE_CHUNK_SIZE) {
+    const chunk = toInsert.slice(i, i + CREATE_CHUNK_SIZE);
+    const createdUsers = await db.user.createMany({
+      data: chunk.map(({ data: d }) => ({
         email: d.email,
         firstName: d.firstName,
         lastName: d.lastName,
         phone: d.phone,
         dateOfBirth: d.dateOfBirth,
-        role: "CUSTOMER",
-        customerProfile: {
-          create: {
+        role: "CUSTOMER" as const,
+      })),
+      skipDuplicates: true,
+    });
+    inserted += createdUsers.count;
+
+    const ids = await db.user.findMany({
+      where: { email: { in: chunk.map((r) => r.data.email) } },
+      select: { id: true, email: true },
+    });
+    const idByEmail = new Map(ids.map((u) => [u.email, u.id]));
+    await db.customerProfile.createMany({
+      data: chunk.flatMap(({ data: d }) => {
+        const userId = idByEmail.get(d.email);
+        if (!userId) return [];
+        return [
+          {
+            userId,
             licenceNumber: d.licenceNumber,
             licenceState: d.licenceState,
             licenceExpiry: d.licenceExpiry,
@@ -231,10 +256,10 @@ export async function commitImport(
             riskRating: d.riskRating ?? "LOW",
             loyaltyTier: d.loyaltyTier ?? "SILVER",
           },
-        },
-      },
+        ];
+      }),
+      skipDuplicates: true,
     });
-    inserted++;
   }
 
   return {

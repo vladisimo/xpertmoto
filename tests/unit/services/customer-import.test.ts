@@ -11,23 +11,34 @@ import {
 import { CUSTOMER_IMPORT_COLUMNS } from "../../../src/lib/validators/customer-import";
 
 function mkDb(existingEmails: string[] = []) {
-  const existing = new Set(existingEmails);
+  const existing = new Map<string, string>(existingEmails.map((e, i) => [e, `pre_${i}`]));
   const createdUsers: Array<Record<string, unknown>> = [];
+  const createdProfiles: Array<Record<string, unknown>> = [];
   const findMany = vi.fn(async (args: { where: { email: { in: string[] } } }) => {
     return args.where.email.in
       .filter((e) => existing.has(e))
-      .map((email) => ({ email }));
+      .map((email) => ({ email, id: existing.get(email)! }));
   });
-  const create = vi.fn(async (args: { data: Record<string, unknown> }) => {
-    const email = args.data.email as string;
-    existing.add(email);
-    createdUsers.push(args.data);
-    return { id: `u_${createdUsers.length}`, ...args.data };
+  const createMany = vi.fn(async (args: { data: Array<Record<string, unknown>> }) => {
+    let count = 0;
+    for (const row of args.data) {
+      const email = row.email as string;
+      if (existing.has(email)) continue; // skipDuplicates semantics
+      existing.set(email, `u_${existing.size + 1}`);
+      createdUsers.push(row);
+      count++;
+    }
+    return { count };
+  });
+  const profileCreateMany = vi.fn(async (args: { data: Array<Record<string, unknown>> }) => {
+    createdProfiles.push(...args.data);
+    return { count: args.data.length };
   });
   const db = {
-    user: { findMany, create },
+    user: { findMany, createMany },
+    customerProfile: { createMany: profileCreateMany },
   } as unknown as PrismaLike;
-  return { db, findMany, create, createdUsers };
+  return { db, findMany, createMany, profileCreateMany, createdUsers, createdProfiles };
 }
 
 function buildXlsx(rows: RawRow[]): Buffer {
@@ -211,24 +222,30 @@ describe("customer-import parseCustomerImportFile", () => {
 });
 
 describe("customer-import commitImport", () => {
-  it("creates a user per valid row and skips duplicates", async () => {
-    const { db, create } = mkDb(["already@example.com"]);
+  it("batch-inserts users + profiles for valid rows and skips duplicates", async () => {
+    const { db, createMany, createdUsers, createdProfiles } = mkDb(["already@example.com"]);
     const summary = await classifyRows(
       [
-        { email: "new@example.com", firstName: "New", lastName: "Guy" },
+        { email: "new@example.com", firstName: "New", lastName: "Guy", suburb: "Brisbane" },
         { email: "already@example.com", firstName: "Dup", lastName: "E" },
       ],
       db,
     );
     const result = await commitImport(summary, db);
     expect(result.inserted).toBe(1);
-    expect(create).toHaveBeenCalledTimes(1);
-    const createdArg = create.mock.calls[0]![0] as { data: { email: string } };
-    expect(createdArg.data.email).toBe("new@example.com");
+    // One chunked createMany, not one create per row.
+    expect(createMany).toHaveBeenCalledTimes(1);
+    expect(createdUsers).toEqual([
+      expect.objectContaining({ email: "new@example.com", role: "CUSTOMER" }),
+    ]);
+    // The profile rides a second createMany, linked by the read-back userId.
+    expect(createdProfiles).toEqual([
+      expect.objectContaining({ userId: "u_2", suburb: "Brisbane", country: "Australia" }),
+    ]);
   });
 
   it("re-checks DB existence and skips rows claimed by a concurrent writer", async () => {
-    const { db, create } = mkDb();
+    const { db, createMany } = mkDb();
     // Dry-run says 1 valid.
     const summary: ImportSummary = await classifyRows(
       [{ email: "race@example.com", firstName: "Ra", lastName: "Ce" }],
@@ -238,22 +255,22 @@ describe("customer-import commitImport", () => {
 
     // Simulate: between validate and commit, another staff member created the user.
     (db as unknown as { user: { findMany: (args: unknown) => Promise<Array<{ email: string }>> } }).user.findMany = vi.fn(
-      async () => [{ email: "race@example.com" }],
+      async () => [{ email: "race@example.com", id: "u_other" }],
     );
 
     const result = await commitImport(summary, db);
     expect(result.inserted).toBe(0);
-    expect(create).not.toHaveBeenCalled();
+    expect(createMany).not.toHaveBeenCalled();
   });
 
   it("returns zero inserts when no valid rows", async () => {
-    const { db, create } = mkDb();
+    const { db, createMany } = mkDb();
     const summary = await classifyRows(
       [{ email: "", firstName: "", lastName: "" }],
       db,
     );
     const result = await commitImport(summary, db);
     expect(result.inserted).toBe(0);
-    expect(create).not.toHaveBeenCalled();
+    expect(createMany).not.toHaveBeenCalled();
   });
 });
