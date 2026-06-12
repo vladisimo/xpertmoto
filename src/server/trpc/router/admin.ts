@@ -1093,7 +1093,9 @@ export const adminRouter = createTRPCRouter({
     }),
 
   /** Active vehicles currently assigned to a category — used by the
-   *  archive wizard to list what needs reassigning or disposing. */
+   *  archive wizard to list what needs reassigning or disposing. Capped:
+   *  a category that somehow holds more than 1000 active vehicles should
+   *  be retired in batches, not serialised into one wizard payload. */
   categoryActiveVehicles: adminProcedure
     .input(z.object({ id: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
@@ -1101,6 +1103,7 @@ export const adminRouter = createTRPCRouter({
         where: { categoryId: input.id, isActive: true },
         select: { id: true, internalCode: true, make: true, model: true, rego: true },
         orderBy: { internalCode: "asc" },
+        take: 1000,
       });
     }),
 

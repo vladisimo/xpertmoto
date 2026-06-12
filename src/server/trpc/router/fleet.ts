@@ -366,6 +366,13 @@ export const fleetRouter = createTRPCRouter({
       return { items, totalCount, pageCount, page: input.page, pageSize: input.pageSize };
     }),
 
+  /**
+   * Flat picker list (per-vehicle pricing-ladder dropdown). Deliberately
+   * not cursor-paginated — the consumer needs every option at once — so
+   * the payload is bounded the other way: a scalar select instead of full
+   * category+depot relations per row, and a hard cap as a runaway guard
+   * for fleets that have outgrown a flat dropdown.
+   */
   listVehicles: staffProcedure
     .input(
       z.object({
@@ -391,8 +398,18 @@ export const fleetRouter = createTRPCRouter({
               }
             : {}),
         },
-        include: { category: true, depot: true },
+        select: {
+          id: true,
+          internalCode: true,
+          make: true,
+          model: true,
+          rego: true,
+          status: true,
+          depotId: true,
+          categoryId: true,
+        },
         orderBy: { internalCode: "asc" },
+        take: 1000,
       }),
     ),
 
