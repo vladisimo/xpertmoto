@@ -69,6 +69,11 @@ export const DEFAULT_ALLOWLIST: AllowRule[] = [
   },
   // Next.js aborts in-flight RSC/prefetch fetches on navigation; not a bug.
   { pattern: /net::ERR_ABORTED/, kinds: ["request-failed"] },
+  // Same abort class, surfaced through next-auth instead: SessionProvider's
+  // getSession() fetch gets killed by the next navigation (frequent on slow
+  // CI runners during route sweeps) and authjs logs ClientFetchError. A
+  // genuinely broken /api/auth/session still fails via http-error capture.
+  { pattern: /ClientFetchError: Failed to fetch/, kinds: ["console-error"] },
   // Sentry tunnel route — forwards envelopes to sentry.io and 500s when the
   // upstream is unreachable/rate-limited. Monitoring infrastructure, not app
   // function; the should-degrade-gracefully issue is tracked in

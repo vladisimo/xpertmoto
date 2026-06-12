@@ -23,7 +23,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xpertmoto
+      # connection_limit: env.ts requires it whenever NODE_ENV=production,
+      # which `next build` sets during page-data collection.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xpertmoto?connection_limit=10
       AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
       AUTH_URL: http://localhost:3000
       AUTH_TRUST_HOST: "true"
@@ -92,8 +94,14 @@ jobs:
     # test job above) — ephemeral service containers, never real deployments.
     # Real deploys set their own secrets; env.ts rejects these in production.
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e?connection_limit=10
       REDIS_URL: redis://localhost:6379/3
+      # The Playwright browser context emulates Australia/Brisbane
+      # (playwright.config.ts timezoneId). The server must render in the same
+      # zone or every SSR'd date/time hydrates differently and the strict
+      # browser guard fails on the hydration errors. Local runs pass because
+      # dev machines already sit in the same TZ as the emulated browser.
+      TZ: Australia/Brisbane
       AUTH_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
       AUTH_URL: http://localhost:3137
       AUTH_TRUST_HOST: "true"
@@ -126,7 +134,7 @@ jobs:
       - name: Write .env.e2e
         run: |
           cat > .env.e2e <<'ENV'
-          DATABASE_URL=postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e
+          DATABASE_URL=postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e?connection_limit=10
           REDIS_URL=redis://localhost:6379/3
           NEXT_DIST_DIR=.next-e2e
           E2E_TOTP_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
