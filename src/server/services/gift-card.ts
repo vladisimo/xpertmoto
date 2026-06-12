@@ -100,8 +100,6 @@ export async function redeemGiftCard(
     throw new TRPCError({ code: "BAD_REQUEST", message: "Redeem amount must be positive" });
   }
 
-  // Lock the card within the transaction to prevent concurrent redemption
-  // double-spend. Postgres row-level lock via SELECT FOR UPDATE inside tx.
   return prisma.$transaction(async (tx) => {
     const card = await tx.giftCard.findUnique({ where: { code: input.code } });
     if (!card) {
@@ -113,20 +111,35 @@ export async function redeemGiftCard(
     if (card.status === "EXPIRED" || card.expiresAt < new Date()) {
       throw new TRPCError({ code: "BAD_REQUEST", message: "Gift card has expired" });
     }
-    if (Number(card.balance) < input.amount) {
+
+    // Balance guard + decrement in ONE conditional statement. A plain
+    // read-check-write lets two concurrent redemptions both pass the check
+    // (READ COMMITTED) and overdraw the card; the WHERE clause makes the
+    // row update itself the arbiter — the loser matches zero rows. The
+    // status filter re-checks under the same statement so a concurrent
+    // void/expiry can't slip in after the reads above.
+    const claimed = await tx.giftCard.updateMany({
+      where: {
+        id: card.id,
+        status: { in: ["ACTIVE", "REDEEMED"] },
+        balance: { gte: input.amount },
+      },
+      data: { balance: { decrement: input.amount } },
+    });
+    if (claimed.count === 0) {
       throw new TRPCError({
         code: "BAD_REQUEST",
         message: `Insufficient balance on gift card (balance A$${Number(card.balance).toFixed(2)})`,
       });
     }
 
-    const newBalance = Number(card.balance) - input.amount;
-    const newStatus = newBalance <= 0.009 ? "REDEEMED" : card.status;
+    const fresh = await tx.giftCard.findUniqueOrThrow({ where: { id: card.id } });
+    const newBalance = Number(fresh.balance);
+    const newStatus = newBalance <= 0.009 ? "REDEEMED" : fresh.status;
 
     const updated = await tx.giftCard.update({
       where: { id: card.id },
       data: {
-        balance: newBalance,
         status: newStatus,
         transactions: {
           create: {
