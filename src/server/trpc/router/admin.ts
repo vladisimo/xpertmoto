@@ -15,7 +15,7 @@ import {
 import { geocodeAddress } from "@/lib/geo";
 import { trackServerGroupIdentify } from "@/lib/analytics";
 import { revalidateTag } from "next/cache";
-import { invalidateTag } from "@/lib/cache";
+import { cached, invalidateTag } from "@/lib/cache";
 import { CACHE_TAGS } from "@/lib/cache-tags";
 import { paymentNetWeight, signedPaymentAmount } from "@/lib/payment-labels";
 import { roundCents } from "@/lib/money";
@@ -651,25 +651,35 @@ export const adminRouter = createTRPCRouter({
     }),
 
   // ----- Pricing -----
-  pricingSummary: adminProcedure.query(async ({ ctx }) => {
-    const [categories, addons, insurance, discounts, seasons, tierCounts] = await Promise.all([
-      ctx.prisma.vehicleCategory.findMany({ orderBy: { displayOrder: "asc" } }),
-      ctx.prisma.addon.findMany({ orderBy: { name: "asc" } }),
-      ctx.prisma.insuranceOption.findMany({ orderBy: { dailyRate: "asc" } }),
-      ctx.prisma.discount.findMany({ orderBy: { code: "asc" } }),
-      ctx.prisma.season.findMany({ orderBy: { startDate: "asc" } }),
-      ctx.prisma.pricingTier.groupBy({
-        by: ["categoryId"],
-        where: { categoryId: { not: null }, isActive: true },
-        _count: { _all: true },
-      }),
-    ]);
-    const tierCountByCategory: Record<string, number> = {};
-    for (const row of tierCounts) {
-      if (row.categoryId) tierCountByCategory[row.categoryId] = row._count._all;
-    }
-    return { categories, addons, insurance, discounts, seasons, tierCountByCategory };
-  }),
+  // Six unbounded catalog reads per admin pricing page view, for data that
+  // changes only via the pricing mutations below — every one of which
+  // invalidates CACHE_TAGS.CATEGORIES, so this caches under that tag.
+  pricingSummary: adminProcedure.query(async ({ ctx }) =>
+    cached(
+      "admin:pricing-summary",
+      60 * 60,
+      async () => {
+        const [categories, addons, insurance, discounts, seasons, tierCounts] = await Promise.all([
+          ctx.prisma.vehicleCategory.findMany({ orderBy: { displayOrder: "asc" } }),
+          ctx.prisma.addon.findMany({ orderBy: { name: "asc" } }),
+          ctx.prisma.insuranceOption.findMany({ orderBy: { dailyRate: "asc" } }),
+          ctx.prisma.discount.findMany({ orderBy: { code: "asc" } }),
+          ctx.prisma.season.findMany({ orderBy: { startDate: "asc" } }),
+          ctx.prisma.pricingTier.groupBy({
+            by: ["categoryId"],
+            where: { categoryId: { not: null }, isActive: true },
+            _count: { _all: true },
+          }),
+        ]);
+        const tierCountByCategory: Record<string, number> = {};
+        for (const row of tierCounts) {
+          if (row.categoryId) tierCountByCategory[row.categoryId] = row._count._all;
+        }
+        return { categories, addons, insurance, discounts, seasons, tierCountByCategory };
+      },
+      [CACHE_TAGS.CATEGORIES],
+    ),
+  ),
 
   updateCategoryRates: adminProcedure
     .input(
@@ -1163,11 +1173,14 @@ export const adminRouter = createTRPCRouter({
         isActive: z.boolean().default(true),
       }),
     )
-    .mutation(({ ctx, input }) => {
+    .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
-      return id
-        ? ctx.prisma.discount.update({ where: { id }, data })
-        : ctx.prisma.discount.create({ data });
+      const discount = id
+        ? await ctx.prisma.discount.update({ where: { id }, data })
+        : await ctx.prisma.discount.create({ data });
+      // pricingSummary caches under this tag.
+      await invalidateTag(CACHE_TAGS.CATEGORIES);
+      return discount;
     }),
 
   upsertSeason: adminProcedure
@@ -1181,11 +1194,14 @@ export const adminRouter = createTRPCRouter({
         isActive: z.boolean().default(true),
       }),
     )
-    .mutation(({ ctx, input }) => {
+    .mutation(async ({ ctx, input }) => {
       const { id, ...data } = input;
-      return id
-        ? ctx.prisma.season.update({ where: { id }, data })
-        : ctx.prisma.season.create({ data });
+      const season = id
+        ? await ctx.prisma.season.update({ where: { id }, data })
+        : await ctx.prisma.season.create({ data });
+      // pricingSummary caches under this tag.
+      await invalidateTag(CACHE_TAGS.CATEGORIES);
+      return season;
     }),
 
   // ----- Finance (rebuilt) -----
