@@ -28,7 +28,11 @@ import {
   type DetectedLicenceMetadata,
   type DetectedPassportMetadata,
 } from "@/server/services/document-extract";
-import { computeCustomerRewards } from "@/server/services/customer-rewards";
+import {
+  computeCustomerRewards,
+  customerRewardsCacheKey,
+} from "@/server/services/customer-rewards";
+import { cached } from "@/lib/cache";
 import {
   applyLatestDocumentToProfile,
   PROJECTABLE_IDENTITY_TYPES,
@@ -404,7 +408,14 @@ export const staffCustomerRouter = createTRPCRouter({
       // bookings are in-flight (CONFIRMED/ACTIVE) would otherwise show stale zeros
       // on the detail card. Overlay a live, read-only snapshot so the card always
       // reflects truth; the persisted counters still serve the leaderboard.
-      const rewards = await computeCustomerRewards(ctx.prisma, user.id);
+      // Cached: the 4-query live computation changes only when a booking
+      // completes / no-shows / the nightly recompute runs — all of which
+      // funnel through recomputeCustomerRewards, which invalidates this key.
+      const rewards = await cached(
+        customerRewardsCacheKey(user.id),
+        10 * 60,
+        () => computeCustomerRewards(ctx.prisma, user.id),
+      );
       user.customerProfile.totalSpend = rewards.totalSpend;
       user.customerProfile.totalBookings = rewards.totalBookings;
       user.customerProfile.completedBookings = rewards.completedBookings;

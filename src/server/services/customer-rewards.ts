@@ -6,6 +6,7 @@ import {
   type LoyaltyTier,
 } from "@prisma/client";
 import type { Prisma as P } from "@prisma/client";
+import { invalidateKey } from "@/lib/cache";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
 import { tierForPoints } from "./loyalty";
 
@@ -292,10 +293,19 @@ export async function applyCustomerRewards(
   });
 }
 
+/** Cache key for the staff detail card's live rewards snapshot. */
+export function customerRewardsCacheKey(userId: string): string {
+  return `customer:rewards:${userId}`;
+}
+
 /** Compute + write a single customer's rewards. */
 export async function recomputeCustomerRewards(db: Db, userId: string): Promise<RewardsSnapshot> {
   const snap = await computeCustomerRewards(db, userId);
   await applyCustomerRewards(db, userId, snap);
+  // The staff detail card caches a snapshot under this key (10 min TTL) —
+  // every path that changes the counters lands here, so this is the single
+  // invalidation point.
+  await invalidateKey(customerRewardsCacheKey(userId));
   return snap;
 }
 
@@ -315,11 +325,24 @@ export async function recomputeAllCustomerRewards(
   for (const b of bookingCustomers) ids.add(b.customerId);
   for (const l of ledgerUsers) ids.add(l.userId);
 
+  // Small parallel batches instead of one-at-a-time: each recompute is
+  // ~4 serial queries, so a fully serial sweep is minutes-per-10k
+  // customers of mostly idle round-trip latency. Batch of 5 stays well
+  // inside the prod pool (connection_limit=10) shared with anything else
+  // the worker is doing.
+  const BATCH = 5;
+  const idList = Array.from(ids);
   let count = 0;
-  for (const userId of ids) {
-    const snap = await recomputeCustomerRewards(db, userId);
-    onEach?.(userId, snap);
-    count += 1;
+  for (let i = 0; i < idList.length; i += BATCH) {
+    const batch = idList.slice(i, i + BATCH);
+    const snaps = await Promise.all(
+      batch.map(async (userId) => ({
+        userId,
+        snap: await recomputeCustomerRewards(db, userId),
+      })),
+    );
+    for (const { userId, snap } of snaps) onEach?.(userId, snap);
+    count += batch.length;
   }
   return count;
 }
