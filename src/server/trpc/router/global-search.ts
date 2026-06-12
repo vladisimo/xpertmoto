@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
-import { createTRPCRouter, staffProcedure } from "../trpc";
+import { createTRPCRouter, staffProcedure, trpcRateLimit } from "../trpc";
 import { customerDirectoryUserWhere } from "@/lib/customer-identity";
 
 /**
@@ -17,7 +17,11 @@ import { customerDirectoryUserWhere } from "@/lib/customer-identity";
  */
 
 export const GlobalSearchInput = z.object({
-  query: z.string().trim().min(2),
+  // min(3): every keystroke fans out into five unindexed contains-scans;
+  // two characters match half the database for ten times the cost of a
+  // useful query. The palette's client debounce is necessary but not
+  // sufficient (it doesn't bound multiple staff typing at once).
+  query: z.string().trim().min(3),
   perGroup: z.number().int().min(1).max(10).default(5),
 });
 
@@ -31,6 +35,16 @@ function customerName(
 
 export const globalSearchRouter = createTRPCRouter({
   search: staffProcedure
+    // Server-side ceiling on the palette's fan-out: 2/sec sustained per
+    // user is faster than anyone types debounced queries.
+    .use(
+      trpcRateLimit({
+        bucket: "global-search",
+        limit: 20,
+        windowSec: 10,
+        identifier: (ctx) => ctx.session?.user?.id,
+      }),
+    )
     .input(GlobalSearchInput)
     .query(async ({ ctx, input }) => {
       const { query, perGroup } = input;

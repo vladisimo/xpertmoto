@@ -34,8 +34,8 @@ interface GlobalSearchProps {
   accent: ShellAccent;
 }
 
-/** Min characters before we hit the server — matches the router's Zod min(2). */
-const MIN_QUERY = 2;
+/** Min characters before we hit the server — matches the router's Zod min(3). */
+const MIN_QUERY = 3;
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = React.useState(value);
