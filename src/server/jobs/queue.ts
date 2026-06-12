@@ -71,6 +71,7 @@ export type QueueName =
   | "no-show-detector"
   | "no-show-reminder"
   | "etoll-health"
+  | "etoll-sync"
   | "integration-secret-audit"
   | "booking-billing"
   | "insights-refresh"
