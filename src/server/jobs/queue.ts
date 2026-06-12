@@ -101,7 +101,16 @@ export function getQueue(name: QueueName): Queue | null {
     // in the audit log (writeAudit on start/complete/failed) and Sentry, so
     // Redis only needs a short debugging tail. Callers can still override
     // per-add.
+    //
+    // attempts/backoff: without these every job is one-shot — a transient
+    // DB/API blip fails the run outright (repeatables wait a whole tick,
+    // event-driven adds are lost for good). Processors tolerate retries:
+    // money paths gate on CAS updateMany, the rest are idempotent sweeps.
+    // capture-retry deliberately overrides back to attempts: 1 per-add —
+    // its escalation ladder schedules its own delayed re-attempts.
     defaultJobOptions: {
+      attempts: 3,
+      backoff: { type: "exponential", delay: 5000 },
       removeOnComplete: { age: 7 * 24 * 3600, count: 1000 },
       removeOnFail: { age: 30 * 24 * 3600, count: 5000 },
     },
