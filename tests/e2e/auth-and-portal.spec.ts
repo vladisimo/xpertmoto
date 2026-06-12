@@ -110,12 +110,20 @@ test.describe("/portal-select — dual-access (back-office + customerProfile)", 
   });
 
   test("picking Staff Portal navigates to /staff/dashboard", async ({ page }) => {
+    // Login + two compile-heavy navigations on a cold CI dev server can
+    // brush the default 60s test timeout.
+    test.slow();
     await login(page, DUAL.email, DUAL.password, { expectedUrl: /portal-select|staff/i });
     // /portal-select self-forwards when it decides only one portal is
     // usable (e.g. the customer profile still requires onboarding) — accept
-    // either the selector (click through) or a direct staff landing.
+    // either the selector (click through) or a direct staff landing. The
+    // forward can also race this very click (tile vanishes mid-click), so
+    // swallow the click failure and let waitForURL be the real assertion.
     if (/portal-select/i.test(page.url())) {
-      await page.getByRole("link", { name: /staff portal/i }).click();
+      await page
+        .getByRole("link", { name: /staff portal/i })
+        .click({ timeout: 30_000 })
+        .catch(() => undefined);
     }
     // Generous: first compile of /staff/dashboard on a cold dev server.
     await page.waitForURL(/staff/i, { timeout: 30_000 });

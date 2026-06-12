@@ -287,6 +287,12 @@ function BackupSettings() {
 
   const form = useForm<BackupSettingsValues>({
     resolver: zodResolver(backupSettingsSchema),
+    // defaultValues must be present even though the form only renders once
+    // q.data exists: `values` is applied in an effect, so the first render
+    // after the query resolves still reads RHF's initial state — without
+    // defaults the inputs mount uncontrolled (value undefined) and flip to
+    // controlled a frame later.
+    defaultValues: { schedule: "", retentionDays: 7, alertOnFailure: false },
     values: q.data
       ? {
           schedule: q.data.schedule,
