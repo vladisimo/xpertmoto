@@ -4,6 +4,7 @@ import { logger } from "@/lib/logger";
 import { invalidateTag } from "@/lib/cache";
 import { CACHE_TAGS } from "@/lib/cache-tags";
 import { getQueue, registerWorker } from "./queue";
+import { withJobLock } from "./run-lock";
 
 const QUEUE = "revenue-reconcile" as const;
 const log = logger.child({ component: "revenue-reconcile" });
@@ -88,7 +89,9 @@ export async function backfillDailyRevenue(): Promise<number> {
 }
 
 export function startRevenueReconcileScheduler() {
-  registerWorker(QUEUE, async () => reconcileDailyRevenue());
+  // Full-table scan: lock so a hung/restarted run can't overlap the next
+  // tick and double-write the same daily rows.
+  registerWorker(QUEUE, async () => withJobLock(QUEUE, 30 * 60, () => reconcileDailyRevenue()));
   const q = getQueue(QUEUE);
   if (q) {
     q.add(

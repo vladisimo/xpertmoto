@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { recomputeAllCustomerRewards } from "@/server/services/customer-rewards";
 import { getQueue, registerWorker } from "./queue";
+import { withJobLock } from "./run-lock";
 
 const QUEUE = "rewards-recompute" as const;
 const log = logger.child({ component: "rewards-recompute" });
@@ -22,7 +23,9 @@ export async function runRewardsRecompute(): Promise<number> {
 }
 
 export function startRewardsRecomputeScheduler() {
-  registerWorker(QUEUE, async () => runRewardsRecompute());
+  // Full-table scan: lock so a hung/restarted run can't overlap the next
+  // tick. 30 min TTL — the scan is minutes even at 100k customers.
+  registerWorker(QUEUE, async () => withJobLock(QUEUE, 30 * 60, () => runRewardsRecompute()));
   const q = getQueue(QUEUE);
   if (q) {
     // 02:40 Brisbane — after revenue-reconcile (02:15), off-peak.

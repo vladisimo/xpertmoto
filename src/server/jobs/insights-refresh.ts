@@ -15,6 +15,7 @@ import {
 } from "@/server/services/insights/cache";
 import { assessInsightsReadiness } from "@/server/services/insights/readiness";
 import { getQueue, registerWorker } from "./queue";
+import { withJobLock } from "./run-lock";
 
 const QUEUE = "insights-refresh" as const;
 const CRON = process.env.INSIGHTS_REFRESH_CRON ?? "0 3 * * *";
@@ -67,7 +68,9 @@ export async function runInsightsRefresh(): Promise<{
 }
 
 export function startInsightsRefreshScheduler() {
-  registerWorker(QUEUE, async () => runInsightsRefresh());
+  // Every-scope regeneration hits the LLM + DB hard: lock so a hung run
+  // can't overlap the next daily tick. 60 min TTL — generation is slow.
+  registerWorker(QUEUE, async () => withJobLock(QUEUE, 60 * 60, () => runInsightsRefresh()));
   const queue = getQueue(QUEUE);
   if (queue) {
     queue.add(
