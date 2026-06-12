@@ -77,4 +77,9 @@ COPY --from=builder --chown=nextjs:nodejs /app/tsconfig.json ./tsconfig.json
 COPY --from=geolite --chown=nextjs:nodejs /data ./data
 ENV MAXMIND_DB_PATH=/app/data/GeoLite2-City.mmdb
 USER nextjs
+# Worker liveness: src/server/jobs/worker.ts serves /health (Redis PING +
+# registered-worker count). A worker that lost Redis or idles with zero
+# queues silently stops all background processing — restart it instead.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.WORKER_HEALTH_PORT||8786)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["npm", "run", "worker"]

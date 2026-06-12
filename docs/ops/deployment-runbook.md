@@ -208,8 +208,14 @@ services:
       redis:    { condition: service_healthy }
     ports:
       - "127.0.0.1:3000:3000"   # only Caddy (on the host) talks to it
-    # migrate deploy runs once before the server starts (idempotent)
-    command: ["sh", "-c", "npx prisma migrate deploy && npm run start"]
+    # migrate deploy runs once before the server starts (idempotent).
+    # `exec` is load-bearing: without it SIGTERM stops at sh and docker
+    # SIGKILLs node mid-request after 10s. With it, `next start` receives
+    # the signal and drains in-flight requests + after() callbacks.
+    command: ["sh", "-c", "npx prisma migrate deploy && exec npm run start"]
+    # Drain headroom: longest expected request is a checkout Stripe call
+    # (15s timeout + 1 retry ≈ 30s) plus margin. Docker default is 10s.
+    stop_grace_period: 45s
 
   worker:
     build: { context: ., dockerfile: Dockerfile, target: worker }
@@ -218,6 +224,10 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+    # Must exceed the worker's 60s in-flight-job drain (SHUTDOWN_TIMEOUT_MS
+    # in src/server/jobs/worker.ts). The image-level HEALTHCHECK (Dockerfile
+    # worker target) probes /health on WORKER_HEALTH_PORT (default 8786).
+    stop_grace_period: 75s
 
 volumes:
   postgres-data:

@@ -89,6 +89,13 @@ export function getConnection(): Redis | null {
   return getRedis();
 }
 
+/** How many Workers actually registered — the worker entrypoint refuses to
+ *  idle with zero (looks healthy, processes nothing) and the health endpoint
+ *  reports it. */
+export function registeredWorkerCount(): number {
+  return workers.size;
+}
+
 export function getQueue(name: QueueName): Queue | null {
   if (queues.has(name)) return queues.get(name)!;
   const redis = getRedis();

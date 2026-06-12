@@ -164,7 +164,23 @@ services:
     volumes:
       - ./:/app
       - /app/node_modules
-    command: ["sh", "-c", "sleep 10 && npm run worker"]
+    # `exec` so SIGTERM reaches node and the worker's graceful drain runs.
+    command: ["sh", "-c", "sleep 10 && exec npm run worker"]
+    # Must exceed the worker's 60s in-flight-job drain (SHUTDOWN_TIMEOUT_MS
+    # in src/server/jobs/worker.ts) or docker SIGKILLs mid-payment-capture.
+    stop_grace_period: 75s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:'+(process.env.WORKER_HEALTH_PORT||8786)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
 volumes:
   postgres-data:

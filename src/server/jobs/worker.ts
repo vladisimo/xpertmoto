@@ -16,12 +16,14 @@
  * Run with `npm run worker`. No-ops when REDIS_URL is not set.
  */
 
+import { createServer, type Server } from "node:http";
+
 import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "@/lib/redis";
 import { prisma } from "@/lib/prisma";
 import { scrubSentryEvent } from "@/lib/observability/sentry-scrub";
 import { logger } from "@/lib/logger";
-import { shutdownQueues } from "./queue";
+import { registeredWorkerCount, shutdownQueues } from "./queue";
 
 const log = logger.child({ component: "worker" });
 import { startBookingReminderScheduler } from "./booking-reminder";
@@ -79,6 +81,65 @@ if (process.env.SENTRY_DSN) {
     serverName: "xpertmoto-worker",
     beforeSend: scrubSentryEvent,
   });
+}
+
+/**
+ * Process-level heartbeat. The per-queue cron check-ins only fire while a
+ * job is running — a worker that crashed *between* jobs (or booted with
+ * zero queues) emits nothing and Sentry's job monitors stay green until
+ * their next scheduled slot, hours away for the dailies. This check-in
+ * fires every 30 minutes regardless, so "worker process is gone" alerts
+ * within the check-in margin instead of at the next missed daily.
+ */
+const HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
+function emitWorkerHeartbeat() {
+  if (!process.env.SENTRY_DSN) return;
+  const checkInId = Sentry.captureCheckIn(
+    { monitorSlug: "worker-heartbeat", status: "in_progress" },
+    {
+      schedule: { type: "crontab", value: "*/30 * * * *" },
+      timezone: "Etc/UTC",
+      checkinMargin: 10,
+      maxRuntime: 5,
+    },
+  );
+  Sentry.captureCheckIn({ checkInId, monitorSlug: "worker-heartbeat", status: "ok" });
+}
+
+/**
+ * Liveness endpoint for the container HEALTHCHECK. 200 only when Redis
+ * answers PING and at least one Worker is registered — a worker that lost
+ * Redis or idles with zero queues is dead weight and should be restarted
+ * by the orchestrator.
+ */
+function startHealthServer(): Server {
+  const port = Number(process.env.WORKER_HEALTH_PORT ?? 8786);
+  const server = createServer((req, res) => {
+    if (req.url !== "/health") {
+      res.writeHead(404).end();
+      return;
+    }
+    void (async () => {
+      let redisOk = false;
+      try {
+        const redis = getRedis();
+        redisOk = !!redis && (await redis.ping()) === "PONG";
+      } catch {
+        redisOk = false;
+      }
+      const workers = registeredWorkerCount();
+      const ok = redisOk && workers > 0;
+      res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok, workers, redis: redisOk ? "ok" : "down" }));
+    })();
+  });
+  server.on("error", (err) => {
+    // A second worker on the same host (or a port clash) shouldn't kill
+    // job processing — health reporting degrades, the worker keeps going.
+    log.warn({ err: err.message, port }, "worker health endpoint unavailable");
+  });
+  server.listen(port, () => log.info({ port }, "worker health endpoint listening"));
+  return server;
 }
 
 async function main() {
@@ -154,19 +215,40 @@ async function main() {
   // Platform cost tab — daily Sentry quota pull (03:45 AEST).
   startPlatformSentryStatsScheduler();
 
-  log.info("all schedulers registered, waiting for jobs…");
+  // The start* calls above all no-op individually when their getQueue()/
+  // registerWorker() returns null — a worker that "booted" with zero
+  // queues would sit here looking healthy while processing nothing.
+  // Refuse to idle: exit non-zero so the orchestrator restarts us into a
+  // (hopefully) healthier environment.
+  const registered = registeredWorkerCount();
+  if (registered === 0) {
+    log.fatal("no workers registered — Redis vanished during boot? exiting for restart");
+    Sentry.captureMessage("worker booted with zero registered queues", { level: "fatal" });
+    await Sentry.flush(2000);
+    process.exit(1);
+  }
+  log.info({ registered }, "all schedulers registered, waiting for jobs…");
+
+  const healthServer = startHealthServer();
+  emitWorkerHeartbeat();
+  setInterval(emitWorkerHeartbeat, HEARTBEAT_INTERVAL_MS).unref();
 
   // Bounded drain: if Redis is gone or a job hangs, shutdownQueues() can
   // block past the orchestrator's grace period and earn a SIGKILL with
   // transactions still open. Race it against a timeout, then release the
   // Prisma pool so the next instance doesn't inherit stale connections.
-  const SHUTDOWN_TIMEOUT_MS = 15_000;
+  // 60s (not 15s): a money-path job mid Stripe capture + ledger write needs
+  // room to finish — killing it between the two is exactly the torn state
+  // the capture transactions exist to avoid. The container stop grace
+  // period must exceed this (stop_grace_period 75s in docker-compose).
+  const SHUTDOWN_TIMEOUT_MS = 60_000;
   const shutdown = async (signal: string) => {
     log.info({ signal }, "shutting down…");
     await Promise.race([
       shutdownQueues(),
       new Promise<void>((resolve) => setTimeout(resolve, SHUTDOWN_TIMEOUT_MS)),
     ]);
+    healthServer.close();
     await prisma.$disconnect().catch((err: unknown) => {
       log.warn({ err }, "prisma disconnect failed during shutdown");
     });
