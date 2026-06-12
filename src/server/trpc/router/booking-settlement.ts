@@ -230,28 +230,33 @@ export const bookingSettlementRouter = createTRPCRouter({
       if (charge.status === "succeeded") {
         // CAS on the PENDING status: the Stripe webhook for this same
         // payment intent races this mutation, and both decrement balanceDue
-        // when they win the flip — so only the winner may apply it.
-        const flipped = await ctx.prisma.payment.updateMany({
-          where: { id: p.id, status: "PENDING" },
-          data: {
-            status: "SUCCEEDED",
-            stripePaymentIntentId: charge.id,
-            stripeChargeId: charge.chargeId ?? null,
-            processedAt: new Date(),
-            processedById: ctx.user.id,
-          },
-        });
-        // Remove the charge's increment from balanceDue now it's collected
-        // (it was added when the PENDING charge was raised). Shared with the
-        // capture-pending job and the Stripe webhook so they can't drift.
-        if (flipped.count > 0) {
-          await applyCaptureToBalanceDue(ctx.prisma, {
-            bookingId: p.bookingId,
-            type: p.type,
-            amount: p.amount,
-            previousStatus: "PENDING",
+        // when they win the flip — so only the winner may apply it. Flip +
+        // decrement share one transaction: the flip is a consumed-once
+        // gate, so a decrement failure after a committed flip could never
+        // be retried.
+        await ctx.prisma.$transaction(async (tx) => {
+          const flipped = await tx.payment.updateMany({
+            where: { id: p.id, status: "PENDING" },
+            data: {
+              status: "SUCCEEDED",
+              stripePaymentIntentId: charge.id,
+              stripeChargeId: charge.chargeId ?? null,
+              processedAt: new Date(),
+              processedById: ctx.user.id,
+            },
           });
-        }
+          // Remove the charge's increment from balanceDue now it's collected
+          // (it was added when the PENDING charge was raised). Shared with the
+          // capture-pending job and the Stripe webhook so they can't drift.
+          if (flipped.count > 0) {
+            await applyCaptureToBalanceDue(tx, {
+              bookingId: p.bookingId,
+              type: p.type,
+              amount: p.amount,
+              previousStatus: "PENDING",
+            });
+          }
+        });
         // Keep the Infringement row in sync when staff capture an
         // INFRINGEMENT_RECOVERY payment manually — the Tolls tab and
         // customer surfaces both derive their paid/unpaid status from

@@ -1,4 +1,7 @@
 import type { Prisma, PaymentStatus, PaymentEventType } from "@prisma/client";
+import * as Sentry from "@sentry/nextjs";
+
+import { logger } from "@/lib/logger";
 
 /**
  * G9 — PaymentEvent append-only writer.
@@ -11,6 +14,8 @@ import type { Prisma, PaymentStatus, PaymentEventType } from "@prisma/client";
  * Failure to write a PaymentEvent row should NOT abort the business
  * operation — the function throws only on unrecoverable errors and
  * callers can pass `swallow: true` to explicitly opt out of rethrow.
+ * Swallowed failures still log + reach Sentry: a silent PaymentEvent gap
+ * breaks reconciliation with no operator signal.
  */
 
 type PrismaLike = {
@@ -53,7 +58,22 @@ export async function writePaymentEvent(
       },
     });
   } catch (err) {
-    if (options.swallow) return;
+    if (options.swallow) {
+      logger.error(
+        {
+          err: err instanceof Error ? err.message : String(err),
+          paymentId: input.paymentId,
+          eventType: input.eventType,
+          source: input.source,
+        },
+        "paymentEvent write failed (swallowed)",
+      );
+      Sentry.captureException(err, {
+        tags: { service: "payment-events", eventType: input.eventType },
+        extra: { paymentId: input.paymentId, source: input.source },
+      });
+      return;
+    }
     throw err;
   }
 }

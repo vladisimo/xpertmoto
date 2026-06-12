@@ -193,28 +193,32 @@ async function runCapturePendingPaymentsImpl(
     if (charge.status === "succeeded") {
       // CAS on PENDING: the Stripe webhook for this payment intent races the
       // job, and both decrement balanceDue when they win the flip — so only
-      // the winner may apply it.
-      const flipped = await prisma.payment.updateMany({
-        where: { id: row.id, status: "PENDING" },
-        data: {
-          status: "SUCCEEDED",
-          stripePaymentIntentId: charge.id,
-          stripeChargeId: charge.chargeId ?? null,
-          processedAt: new Date(),
-          notes: appendNote(row.notes, `capture-pending: captured via off-session`),
-        },
-      });
-      // The charge was raised PENDING with its amount added to
-      // Booking.balanceDue; now that it's collected, remove it so the
-      // customer isn't shown (and dunned for) money already taken.
-      if (flipped.count > 0) {
-        await applyCaptureToBalanceDue(prisma, {
-          bookingId: row.bookingId,
-          type: row.type,
-          amount: row.amount,
-          previousStatus: "PENDING",
+      // the winner may apply it. Flip + decrement share one transaction:
+      // the flip is a consumed-once gate, so a decrement failure after a
+      // committed flip could never be retried.
+      await prisma.$transaction(async (tx) => {
+        const flipped = await tx.payment.updateMany({
+          where: { id: row.id, status: "PENDING" },
+          data: {
+            status: "SUCCEEDED",
+            stripePaymentIntentId: charge.id,
+            stripeChargeId: charge.chargeId ?? null,
+            processedAt: new Date(),
+            notes: appendNote(row.notes, `capture-pending: captured via off-session`),
+          },
         });
-      }
+        // The charge was raised PENDING with its amount added to
+        // Booking.balanceDue; now that it's collected, remove it so the
+        // customer isn't shown (and dunned for) money already taken.
+        if (flipped.count > 0) {
+          await applyCaptureToBalanceDue(tx, {
+            bookingId: row.bookingId,
+            type: row.type,
+            amount: row.amount,
+            previousStatus: "PENDING",
+          });
+        }
+      });
       // Mirror the capture back onto the source Infringement when this
       // is an INFRINGEMENT_RECOVERY payment so the staff Tolls tab and
       // customer-facing surfaces both flip to "Paid".

@@ -21,6 +21,9 @@ const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
 const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
   cb({
     payment: { updateMany: paymentUpdateMany },
+    // The succeeded handler applies the balanceDue decrement on the same tx
+    // as the status flip — route the tx's booking model to the same spies.
+    booking: { findUnique: bookingFindUnique, update: bookingUpdate },
     dailyRevenue: { upsert: vi.fn().mockResolvedValue({}) },
     auditLog: { create: auditCreate },
   }),
@@ -174,6 +177,32 @@ describe("Stripe webhook", () => {
       where: { id: "b1" },
       data: { balanceDue: 50, amountPaid: 954.97 },
     });
+  });
+
+  it("fails the event (500) when the balanceDue decrement throws, so Stripe retries", async () => {
+    paymentFindFirst.mockResolvedValueOnce({
+      bookingId: "b1",
+      type: "EXTENSION",
+      amount: 100,
+      status: "PENDING",
+    });
+    // The decrement's booking read blows up mid-transaction — the flip must
+    // roll back with it (shared tx) and the delivery must NOT be PROCESSED.
+    bookingFindUnique.mockRejectedValueOnce(new Error("db connection reset"));
+    constructMock.mockResolvedValue({
+      id: "evt_torn",
+      type: "payment_intent.succeeded",
+      data: { object: { id: "pi_torn", latest_charge: "ch_torn" } },
+    });
+
+    const res = await post({});
+    expect(res.status).toBe(500);
+    expect(webhookEventUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "evt_torn" },
+        data: expect.objectContaining({ status: "FAILED" }),
+      }),
+    );
   });
 
   it("does not decrement balanceDue when the charge was already SUCCEEDED (redelivery)", async () => {

@@ -263,28 +263,35 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         select: { bookingId: true, type: true, amount: true, status: true },
       });
 
-      const flipped = await prisma.payment.updateMany({
-        where: {
-          stripePaymentIntentId: id,
-          status: { notIn: ["SUCCEEDED", "REFUNDED", "PARTIALLY_REFUNDED"] },
-        },
-        data: {
-          status: "SUCCEEDED",
-          stripeChargeId: chargeId,
-          processedAt: new Date(),
-        },
-      });
-      // Remove a now-collected ancillary charge from Booking.balanceDue —
-      // only when THIS delivery performed the flip (no-op for the deposit /
-      // bonds / redeliveries / races lost to another capture path).
-      if (priorCharge && flipped.count > 0) {
-        await applyCaptureToBalanceDue(prisma, {
-          bookingId: priorCharge.bookingId,
-          type: priorCharge.type,
-          amount: priorCharge.amount,
-          previousStatus: priorCharge.status,
+      // The flip and the balanceDue application share one transaction: the
+      // flip is the consumed-once CAS gate, so if the decrement failed after
+      // a committed flip, the Stripe retry would find count=0 and the
+      // decrement would be lost for good. Atomic = the FAILED→retry path
+      // re-runs both.
+      await prisma.$transaction(async (tx) => {
+        const flipped = await tx.payment.updateMany({
+          where: {
+            stripePaymentIntentId: id,
+            status: { notIn: ["SUCCEEDED", "REFUNDED", "PARTIALLY_REFUNDED"] },
+          },
+          data: {
+            status: "SUCCEEDED",
+            stripeChargeId: chargeId,
+            processedAt: new Date(),
+          },
         });
-      }
+        // Remove a now-collected ancillary charge from Booking.balanceDue —
+        // only when THIS delivery performed the flip (no-op for the deposit /
+        // bonds / redeliveries / races lost to another capture path).
+        if (priorCharge && flipped.count > 0) {
+          await applyCaptureToBalanceDue(tx, {
+            bookingId: priorCharge.bookingId,
+            type: priorCharge.type,
+            amount: priorCharge.amount,
+            previousStatus: priorCharge.status,
+          });
+        }
+      });
       const payment = await prisma.payment.findFirst({
         where: { stripePaymentIntentId: id },
         select: {
