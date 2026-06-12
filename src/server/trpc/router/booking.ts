@@ -26,6 +26,11 @@ import {
   enforceDateTimeWithinDepotHours,
 } from "@/server/services/booking-times-guard";
 import { createPaymentIntent, createBondHold } from "@/lib/stripe";
+import { cached } from "@/lib/cache";
+import {
+  AVAILABILITY_CACHE_TTL_SEC,
+  availabilityTags,
+} from "@/server/services/availability-cache";
 import {
   createSetupIntentForUser,
   ensureStripeCustomer,
@@ -383,6 +388,12 @@ export const bookingRouter = createTRPCRouter({
       return { bookingReference: booking.bookingReference, documents: docs };
     }),
 
+  // The two availability reads are the hottest public queries on busy
+  // dates — every wizard step re-checks them — and each one is a
+  // multi-table scan (vehicles × overlapping bookings × maintenance).
+  // Short-TTL Redis cache, tagged per depot+day; confirm/cancel events
+  // invalidate the touched days (availability-cache.ts). Stale answers
+  // can't oversell: the exclusion constraint rejects them at confirm.
   availability: publicProcedure
     .use(trpcRateLimit({ bucket: "booking:avail", limit: 60, windowSec: 60 }))
     .input(
@@ -394,12 +405,18 @@ export const bookingRouter = createTRPCRouter({
       }),
     )
     .query(({ ctx, input }) =>
-      countAvailable(ctx.prisma, {
-        categoryId: input.categoryId,
-        depotId: input.depotId,
-        pickup: input.pickupDateTime,
-        ret: input.returnDateTime,
-      }),
+      cached(
+        `avail:count:${input.depotId}:${input.categoryId}:${input.pickupDateTime.toISOString()}:${input.returnDateTime.toISOString()}`,
+        AVAILABILITY_CACHE_TTL_SEC,
+        () =>
+          countAvailable(ctx.prisma, {
+            categoryId: input.categoryId,
+            depotId: input.depotId,
+            pickup: input.pickupDateTime,
+            ret: input.returnDateTime,
+          }),
+        availabilityTags(input.depotId, input.pickupDateTime, input.returnDateTime),
+      ),
     ),
 
   listAvailableVehicles: publicProcedure
@@ -414,13 +431,19 @@ export const bookingRouter = createTRPCRouter({
       }),
     )
     .query(({ ctx, input }) =>
-      listAvailableVehicles(ctx.prisma, {
-        pickup: input.pickupDateTime,
-        ret: input.returnDateTime,
-        categoryId: input.categoryId,
-        depotId: input.depotId,
-        limit: input.limit ?? 200,
-      }),
+      cached(
+        `avail:list:${input.depotId ?? "all"}:${input.categoryId ?? "all"}:${input.limit ?? 200}:${input.pickupDateTime.toISOString()}:${input.returnDateTime.toISOString()}`,
+        AVAILABILITY_CACHE_TTL_SEC,
+        () =>
+          listAvailableVehicles(ctx.prisma, {
+            pickup: input.pickupDateTime,
+            ret: input.returnDateTime,
+            categoryId: input.categoryId,
+            depotId: input.depotId,
+            limit: input.limit ?? 200,
+          }),
+        availabilityTags(input.depotId, input.pickupDateTime, input.returnDateTime),
+      ),
     ),
 
   popularPicks: publicProcedure

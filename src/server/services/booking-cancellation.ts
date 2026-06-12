@@ -536,6 +536,20 @@ export async function cancel(
     },
   });
 
+  // The cancelled span is sellable again — drop cached availability for
+  // those days so the public wizard reflects the freed capacity ahead of
+  // the cache TTL. Best-effort.
+  try {
+    const { invalidateAvailability } = await import("@/server/services/availability-cache");
+    await invalidateAvailability(
+      booking.pickupDepotId,
+      booking.pickupDateTime,
+      booking.returnDateTime,
+    );
+  } catch {
+    // non-fatal — TTL expiry covers it
+  }
+
   // Issue an ATO §29-75 adjustment note (DECREASE) sized to the *change in
   // consideration*, not the cash refunded. A cancelled booking is a supply
   // never rendered, so the invoice must be credited down to the cash the

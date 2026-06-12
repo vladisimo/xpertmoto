@@ -314,6 +314,20 @@ export async function confirmBookingPayment(
   }
   const updated = txResult.row;
 
+  // Drop cached availability for the days this booking now blocks so the
+  // public wizard stops offering the just-taken capacity ahead of the
+  // cache TTL. Best-effort — the exclusion constraint is the backstop.
+  try {
+    const { invalidateAvailability } = await import("@/server/services/availability-cache");
+    await invalidateAvailability(
+      booking.pickupDepotId,
+      booking.pickupDateTime,
+      booking.returnDateTime,
+    );
+  } catch {
+    // non-fatal — TTL expiry covers it
+  }
+
   // Issue the canonical Tax Invoice for the booking. Best-effort —
   // failures here don't roll back the confirmation; the retroactive
   // sweep job picks up bookings without invoices on its next run.
