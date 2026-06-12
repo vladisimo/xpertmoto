@@ -16,7 +16,15 @@ export function LoginImageCarousel() {
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
+    // Same contract as HeroCarousel: no auto-rotate under
+    // prefers-reduced-motion, and no ticking (CPU/GPU compositing every
+    // 9s) while the tab sits hidden behind another window.
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) return;
     const id = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
       setActiveIndex((current) => (current + 1) % IMAGES.length);
     }, HOLD_MS + FADE_MS);
     return () => window.clearInterval(id);

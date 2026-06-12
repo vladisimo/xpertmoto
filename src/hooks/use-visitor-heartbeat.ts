@@ -147,6 +147,11 @@ export function useVisitorHeartbeat(): void {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      // A backgrounded tab isn't a live visitor: skipping the tick both
+      // sheds the idle-tab share of heartbeat traffic (every hidden window
+      // on every public page, all day) and stops hidden tabs inflating
+      // presence. The session resumes on the first visible tick.
+      if (document.visibilityState === "hidden") return;
       heartbeatRef.current.mutate({
         path: pathRef.current ?? "/",
         wizardStep: stepRef.current,
