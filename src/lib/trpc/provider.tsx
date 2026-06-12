@@ -17,7 +17,11 @@ function createQueryClient() {
         staleTime: 30_000,
         gcTime: 5 * 60_000,
         refetchOnWindowFocus: false,
-        refetchOnReconnect: "always",
+        // true (the default = refetch only stale queries), NOT "always":
+        // a reconnect (wifi blip, laptop wake) with "always" refetched
+        // every mounted query at once — 50–100 simultaneous calls from a
+        // busy back-office tab. Fresh queries (< staleTime) ride it out.
+        refetchOnReconnect: true,
         retry: (failureCount, error) => {
           const status = (error as { data?: { httpStatus?: number } } | null)?.data?.httpStatus;
           if (status && status >= 400 && status < 500) return false;
