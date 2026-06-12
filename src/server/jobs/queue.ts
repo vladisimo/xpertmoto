@@ -51,6 +51,7 @@ export type QueueName =
   | "pending-payment-ttl"
   | "support-notify"
   | "booking-confirmation-notify"
+  | "report-export"
   | "licence-expiry"
   | "campaign-dispatcher"
   | "debt-reminder"
@@ -126,6 +127,21 @@ export function getQueue(name: QueueName): Queue | null {
   });
   queues.set(name, q);
   return q;
+}
+
+/**
+ * QueueEvents for request/response use of a queue (`job.waitUntilFinished`)
+ * from the web process. Lazy + cached like getQueue; BullMQ duplicates the
+ * shared connection internally for its blocking reads. Null without Redis —
+ * callers fall back to inline execution.
+ */
+export function getQueueEvents(name: QueueName): QueueEvents | null {
+  if (queueEvents.has(name)) return queueEvents.get(name)!;
+  const redis = getRedis();
+  if (!redis) return null;
+  const e = new QueueEvents(name, { connection: redis });
+  queueEvents.set(name, e);
+  return e;
 }
 
 export function registerWorker<T = unknown>(

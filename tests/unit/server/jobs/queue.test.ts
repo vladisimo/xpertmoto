@@ -32,7 +32,7 @@ vi.mock("@/lib/logger", () => ({
 vi.mock("@sentry/nextjs", () => ({ captureCheckIn: vi.fn(), captureException: vi.fn() }));
 vi.mock("@/server/services/audit", () => ({ writeAudit: vi.fn() }));
 
-import { getQueue } from "@/server/jobs/queue";
+import { getQueue, getQueueEvents } from "@/server/jobs/queue";
 
 describe("getQueue defaults", () => {
   it("applies retry attempts + exponential backoff so transient failures are not one-shot", () => {
@@ -46,5 +46,13 @@ describe("getQueue defaults", () => {
     // Retention defaults must survive alongside the retry policy.
     expect(opts.defaultJobOptions.removeOnComplete).toEqual({ age: 7 * 24 * 3600, count: 1000 });
     expect(opts.defaultJobOptions.removeOnFail).toEqual({ age: 30 * 24 * 3600, count: 5000 });
+  });
+});
+
+describe("getQueueEvents", () => {
+  it("lazily creates and caches a QueueEvents per queue for waitUntilFinished callers", () => {
+    const first = getQueueEvents("report-export");
+    expect(first).not.toBeNull();
+    expect(getQueueEvents("report-export")).toBe(first);
   });
 });

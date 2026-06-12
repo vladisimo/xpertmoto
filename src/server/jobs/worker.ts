@@ -42,6 +42,7 @@ import { startAuditRetentionScheduler } from "./audit-retention";
 import { startPendingPaymentTtlScheduler } from "./pending-payment-ttl";
 import { startSupportNotifyWorker } from "./support-notify";
 import { startBookingConfirmationNotifyWorker } from "./booking-confirmation-notify";
+import { startReportExportWorker } from "./report-export";
 import { startLicenceExpiryScheduler } from "./licence-expiry";
 import { startCampaignDispatcherScheduler } from "./campaign-dispatcher";
 import { startDebtReminderScheduler } from "./debt-reminder";
@@ -169,6 +170,9 @@ async function main() {
   // Event-driven: confirmBookingPayment enqueues the confirmation email/SMS
   // here so Resend/Twilio latency stays out of the checkout response.
   startBookingConfirmationNotifyWorker();
+  // Event-driven: admin report PDF renders (CPU-bound react-pdf) — the
+  // export route enqueues and waits via QueueEvents.
+  startReportExportWorker();
   startLicenceExpiryScheduler();
   startCampaignDispatcherScheduler();
   startDebtReminderScheduler();

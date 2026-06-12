@@ -4,7 +4,6 @@ import { withAudit } from "@/lib/with-audit";
 import { getReport } from "@/lib/export/registry";
 import { toCsv } from "@/lib/export/csv";
 import { toXlsx } from "@/lib/export/xlsx";
-import { toPdfBuffer } from "@/lib/export/pdf";
 import { type ExportMeta, type ExportBrand } from "@/lib/export";
 import { getBranding } from "@/lib/branding";
 
@@ -58,14 +57,11 @@ async function handleGet(req: Request) {
     }
   }
 
-  const result = await report.fetch(
-    {
-      userId: session.user.id ?? null,
-      userRole: role,
-      depotId: session.user.depotId ?? null,
-    },
-    input,
-  );
+  const userCtx = {
+    userId: session.user.id ?? null,
+    userRole: role,
+    depotId: session.user.depotId ?? null,
+  };
 
   const branding = await getBranding();
   const brand: ExportBrand = {
@@ -75,6 +71,32 @@ async function handleGet(req: Request) {
     website: "",
   };
 
+  const from = params.from ? params.from.slice(0, 10) : "all";
+  const to = params.to ? params.to.slice(0, 10) : "all";
+  const slug = (branding.siteName || "report").toLowerCase().replace(/\s+/g, "-");
+  const baseFilename = `${slug}-${reportId}-${from}-to-${to}`;
+
+  if (format === "pdf") {
+    // CPU-bound react-pdf render: hand it to the report-export worker and
+    // wait for the result so the web process's event loop stays free. The
+    // worker re-validates params and re-runs the fetch itself; render
+    // inline only when the queue is unavailable or doesn't answer in time.
+    const renderArgs = { reportId, params, ctx: userCtx };
+    const { renderReportPdfQueued } = await import("@/server/jobs/report-export");
+    const { renderReportPdfBuffer } = await import("@/server/services/report-export");
+    const pdfBuf =
+      (await renderReportPdfQueued(renderArgs)) ?? (await renderReportPdfBuffer(renderArgs));
+    const pdfU8 = new Uint8Array(pdfBuf);
+    return new NextResponse(new Blob([pdfU8]), {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${baseFilename}.pdf"`,
+      },
+    });
+  }
+
+  const result = await report.fetch(userCtx, input);
+
   const meta: ExportMeta = {
     title: result.meta.title ?? report.title,
     subtitle: result.meta.subtitle,
@@ -82,11 +104,6 @@ async function handleGet(req: Request) {
     filters: result.meta.filters ?? [],
     brand,
   };
-
-  const from = params.from ? params.from.slice(0, 10) : "all";
-  const to = params.to ? params.to.slice(0, 10) : "all";
-  const slug = (branding.siteName || "report").toLowerCase().replace(/\s+/g, "-");
-  const baseFilename = `${slug}-${reportId}-${from}-to-${to}`;
 
   if (format === "csv") {
     const csv = toCsv(result.rows, report.columns);
@@ -98,23 +115,12 @@ async function handleGet(req: Request) {
     });
   }
 
-  if (format === "xlsx") {
-    const buf = toXlsx(result.rows, report.columns, { sheetName: report.title.slice(0, 31), meta });
-    const u8 = new Uint8Array(buf);
-    return new NextResponse(new Blob([u8]), {
-      headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "Content-Disposition": `attachment; filename="${baseFilename}.xlsx"`,
-      },
-    });
-  }
-
-  const pdfBuf = await toPdfBuffer({ meta, columns: report.columns, rows: result.rows });
-  const pdfU8 = new Uint8Array(pdfBuf);
-  return new NextResponse(new Blob([pdfU8]), {
+  const buf = toXlsx(result.rows, report.columns, { sheetName: report.title.slice(0, 31), meta });
+  const u8 = new Uint8Array(buf);
+  return new NextResponse(new Blob([u8]), {
     headers: {
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename="${baseFilename}.pdf"`,
+      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="${baseFilename}.xlsx"`,
     },
   });
 }
