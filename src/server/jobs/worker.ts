@@ -41,6 +41,7 @@ import { startLinktSyncScheduler } from "./linkt-sync";
 import { startAuditRetentionScheduler } from "./audit-retention";
 import { startPendingPaymentTtlScheduler } from "./pending-payment-ttl";
 import { startSupportNotifyWorker } from "./support-notify";
+import { startBookingConfirmationNotifyWorker } from "./booking-confirmation-notify";
 import { startLicenceExpiryScheduler } from "./licence-expiry";
 import { startCampaignDispatcherScheduler } from "./campaign-dispatcher";
 import { startDebtReminderScheduler } from "./debt-reminder";
@@ -165,6 +166,9 @@ async function main() {
   startAuditRetentionScheduler();
   startPendingPaymentTtlScheduler();
   startSupportNotifyWorker();
+  // Event-driven: confirmBookingPayment enqueues the confirmation email/SMS
+  // here so Resend/Twilio latency stays out of the checkout response.
+  startBookingConfirmationNotifyWorker();
   startLicenceExpiryScheduler();
   startCampaignDispatcherScheduler();
   startDebtReminderScheduler();

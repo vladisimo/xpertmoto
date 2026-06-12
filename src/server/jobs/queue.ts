@@ -50,6 +50,7 @@ export type QueueName =
   | "audit-retention"
   | "pending-payment-ttl"
   | "support-notify"
+  | "booking-confirmation-notify"
   | "licence-expiry"
   | "campaign-dispatcher"
   | "debt-reminder"

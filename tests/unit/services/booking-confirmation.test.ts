@@ -25,6 +25,10 @@ vi.mock("@/server/services/invoice-lifecycle", () => ({
   issueInvoiceForBooking: vi.fn(),
   issueReceiptForPayment: vi.fn(),
 }));
+const enqueueNotifyMock = vi.fn();
+vi.mock("@/server/jobs/booking-confirmation-notify", () => ({
+  enqueueBookingConfirmationNotify: (...a: unknown[]) => enqueueNotifyMock(...a),
+}));
 const allocateVehicleMock = vi.fn();
 const isVehicleFreeMock = vi.fn();
 vi.mock("@/server/services/availability", () => ({
@@ -35,6 +39,7 @@ vi.mock("@/server/services/availability", () => ({
 
 import {
   confirmBookingPayment,
+  sendBookingConfirmationNotification,
   PaymentNotSucceededError,
   BondNotHeldError,
   BookingNotConfirmableError,
@@ -135,9 +140,9 @@ describe("confirmBookingPayment — happy path", () => {
     expect(update.data.payments.create.amount).toBe(100);
     expect(update.data.payments.create.stripePaymentIntentId).toBe("pi_1");
     expect(tx.bondLedger.upsert).toHaveBeenCalled();
-    expect(sendNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "cust1", type: "BOOKING_CONFIRMATION" }),
-    );
+    // The send itself is queued (booking-confirmation-notify), not inline.
+    expect(enqueueNotifyMock).toHaveBeenCalledWith("b1");
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 });
 
@@ -152,7 +157,7 @@ describe("confirmBookingPayment — idempotency", () => {
 
     expect(res.alreadyConfirmed).toBe(true);
     expect(top.$transaction).not.toHaveBeenCalled();
-    expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(enqueueNotifyMock).not.toHaveBeenCalled();
   });
 
   it("no-ops when a concurrent confirm flipped the status while waiting on the lock", async () => {
@@ -165,7 +170,7 @@ describe("confirmBookingPayment — idempotency", () => {
 
     expect(res.alreadyConfirmed).toBe(true);
     expect(tx.booking.update).not.toHaveBeenCalled();
-    expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(enqueueNotifyMock).not.toHaveBeenCalled();
   });
 
   it("does not duplicate the deposit Payment row or clobber money fields when one already exists", async () => {
@@ -224,5 +229,41 @@ describe("confirmBookingPayment — guards", () => {
       confirmBookingPayment(prisma, { bookingId: "b1", source: "stripe-webhook" }),
     ).rejects.toBeInstanceOf(BookingNotConfirmableError);
     expect(top.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendBookingConfirmationNotification (queue processor)", () => {
+  function makeNotifyPrisma(booking: Record<string, unknown> | null) {
+    return {
+      booking: { findUnique: vi.fn().mockResolvedValue(booking) },
+      invoice: { findFirst: vi.fn().mockResolvedValue({ id: "inv1" }) },
+      payment: { findFirst: vi.fn().mockResolvedValue({ id: "pay1" }) },
+    } as never;
+  }
+
+  it("sends the confirmation with invoice + receipt attachments", async () => {
+    const prisma = makeNotifyPrisma(makeBooking({ status: "CONFIRMED" }));
+
+    await sendBookingConfirmationNotification(prisma, "b1");
+
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "cust1",
+        type: "BOOKING_CONFIRMATION",
+        bookingId: "b1",
+        attachments: [
+          { kind: "invoice", invoiceId: "inv1" },
+          { kind: "receipt", paymentId: "pay1" },
+        ],
+      }),
+    );
+  });
+
+  it("skips quietly when the booking no longer exists (stale retry)", async () => {
+    const prisma = makeNotifyPrisma(null);
+
+    await sendBookingConfirmationNotification(prisma, "gone");
+
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 });

@@ -345,7 +345,6 @@ export async function confirmBookingPayment(
 
   // If the booking generated a SUCCEEDED Payment row up-front (online
   // capture), issue a branded receipt PDF for it now.
-  let onlinePaymentId: string | null = null;
   if (Number(booking.payOnlineAmount) > 0) {
     try {
       const { issueReceiptForPayment } = await import(
@@ -357,7 +356,6 @@ export async function confirmBookingPayment(
         orderBy: { createdAt: "desc" },
       });
       if (onlinePayment) {
-        onlinePaymentId = onlinePayment.id;
         await issueReceiptForPayment({ paymentId: onlinePayment.id });
       }
     } catch (err) {
@@ -366,6 +364,95 @@ export async function confirmBookingPayment(
         "booking.confirm: receipt issuance failed; non-blocking",
       );
     }
+  }
+
+  // The confirmation email/SMS (render + Resend/Twilio round trips) rides
+  // the booking-confirmation-notify queue so checkout responds as soon as
+  // the booking is CONFIRMED. Without Redis the enqueue helper runs the
+  // same send inline. Dynamic import to avoid a module cycle (the job
+  // module imports sendBookingConfirmationNotification from this file).
+  const { enqueueBookingConfirmationNotify } = await import(
+    "@/server/jobs/booking-confirmation-notify"
+  );
+  await enqueueBookingConfirmationNotify(booking.id);
+
+  await writeAudit(prisma, {
+    userId: actorId,
+    action: "BOOKING_CONFIRMED",
+    entity: "Booking",
+    entityId: booking.id,
+    newData: {
+      reference: booking.bookingReference,
+      total: Number(booking.totalAmount),
+      vehicleId: assignedVehicleId,
+      source: args.source,
+    },
+  });
+  writeCustomerAuditAsync(prisma, booking.customerId, {
+    userId: actorId,
+    action: "BOOKING_CONFIRMED",
+    reqId: args.reqId,
+    newData: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      total: Number(booking.totalAmount),
+      vehicleId: assignedVehicleId,
+      source: args.source,
+    },
+  });
+
+  // Lifetime confirmed-or-beyond bookings for this customer, used to
+  // refresh the PostHog person profile. Best-effort alongside the event.
+  const lifetimeBookings = await prisma.booking.count({
+    where: {
+      customerId: booking.customerId,
+      status: { in: ["CONFIRMED", "CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED", "COMPLETED"] },
+    },
+  });
+  await trackServer({
+    event: "booking.confirmed",
+    distinctId: booking.customerId,
+    properties: {
+      bookingId: booking.id,
+      reference: booking.bookingReference,
+      category: booking.category.slug,
+      depotSlug: booking.pickupDepot.slug,
+      totalAud: Number(booking.totalAmount),
+      durationDays: booking.durationDays,
+      hasBond: Number(booking.bondAmount) > 0,
+      source: booking.source,
+    },
+    groups: { depot: booking.pickupDepot.slug },
+    set: { lifetimeBookings, depotAffinity: booking.pickupDepot.slug },
+  });
+
+  return { booking: updated, alreadyConfirmed: false };
+}
+
+/**
+ * Builds and sends the booking-confirmation email/SMS, attaching the tax
+ * invoice and online-payment receipt issued during confirm. Runs on the
+ * `booking-confirmation-notify` queue (or inline when Redis is absent) so
+ * the render + Resend/Twilio round trips stay out of the checkout
+ * response. The booking is CONFIRMED before this ever runs, so a failure
+ * or BullMQ retry here can only affect the notification — never money or
+ * allocation state.
+ */
+export async function sendBookingConfirmationNotification(
+  prisma: PrismaClient,
+  bookingId: string,
+): Promise<void> {
+  const booking = await prisma.booking.findUnique({
+    where: { id: bookingId },
+    include: {
+      category: true,
+      pickupDepot: true,
+      customer: { select: { firstName: true } },
+    },
+  });
+  if (!booking) {
+    logger.warn({ bookingId }, "confirmation notify: booking not found; skipping");
+    return;
   }
 
   const payOnline = Number(booking.payOnlineAmount);
@@ -432,17 +519,25 @@ export async function confirmBookingPayment(
 
   // Find the just-issued tax invoice for the booking so it rides out
   // with the confirmation email. Best-effort — if invoice issuance
-  // failed earlier (caught above), there's no row to attach and the
-  // resolver drops the entry.
+  // failed during confirm, there's no row to attach and the resolver
+  // drops the entry.
   const issuedInvoice = await prisma.invoice.findFirst({
     where: { bookingId: booking.id, deletedAt: null, status: { not: "VOID" } },
     orderBy: { createdAt: "desc" },
     select: { id: true },
   });
+  const onlinePayment =
+    payOnline > 0
+      ? await prisma.payment.findFirst({
+          where: { bookingId: booking.id, type: "BOOKING_PAYMENT", status: "SUCCEEDED" },
+          orderBy: { createdAt: "desc" },
+          select: { id: true },
+        })
+      : null;
 
   const attachments: import("@/server/services/notification-sender").AttachmentRef[] = [];
   if (issuedInvoice) attachments.push({ kind: "invoice", invoiceId: issuedInvoice.id });
-  if (onlinePaymentId) attachments.push({ kind: "receipt", paymentId: onlinePaymentId });
+  if (onlinePayment) attachments.push({ kind: "receipt", paymentId: onlinePayment.id });
 
   await sendNotification({
     userId: booking.customerId,
@@ -470,56 +565,4 @@ export async function confirmBookingPayment(
       bondAud,
     },
   });
-
-  await writeAudit(prisma, {
-    userId: actorId,
-    action: "BOOKING_CONFIRMED",
-    entity: "Booking",
-    entityId: booking.id,
-    newData: {
-      reference: booking.bookingReference,
-      total: Number(booking.totalAmount),
-      vehicleId: assignedVehicleId,
-      source: args.source,
-    },
-  });
-  writeCustomerAuditAsync(prisma, booking.customerId, {
-    userId: actorId,
-    action: "BOOKING_CONFIRMED",
-    reqId: args.reqId,
-    newData: {
-      bookingId: booking.id,
-      reference: booking.bookingReference,
-      total: Number(booking.totalAmount),
-      vehicleId: assignedVehicleId,
-      source: args.source,
-    },
-  });
-
-  // Lifetime confirmed-or-beyond bookings for this customer, used to
-  // refresh the PostHog person profile. Best-effort alongside the event.
-  const lifetimeBookings = await prisma.booking.count({
-    where: {
-      customerId: booking.customerId,
-      status: { in: ["CONFIRMED", "CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED", "COMPLETED"] },
-    },
-  });
-  await trackServer({
-    event: "booking.confirmed",
-    distinctId: booking.customerId,
-    properties: {
-      bookingId: booking.id,
-      reference: booking.bookingReference,
-      category: booking.category.slug,
-      depotSlug: booking.pickupDepot.slug,
-      totalAud: Number(booking.totalAmount),
-      durationDays: booking.durationDays,
-      hasBond: Number(booking.bondAmount) > 0,
-      source: booking.source,
-    },
-    groups: { depot: booking.pickupDepot.slug },
-    set: { lifetimeBookings, depotAffinity: booking.pickupDepot.slug },
-  });
-
-  return { booking: updated, alreadyConfirmed: false };
 }
