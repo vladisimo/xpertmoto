@@ -1,7 +1,10 @@
+import * as Sentry from "@sentry/nextjs";
+
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
 import { confirmBookingPayment } from "@/server/services/booking-confirmation";
+import { sendNotification } from "@/server/services/notification-sender";
 import { getQueue, registerWorker } from "./queue";
 
 const QUEUE = "pending-payment-ttl" as const;
@@ -72,14 +75,43 @@ export async function runPendingPaymentTtl(): Promise<PendingPaymentTtlResult> {
           "pending-payment-ttl: booking was already paid — confirmed instead of cancelling",
         );
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
         logger.error(
-          {
-            err: err instanceof Error ? err.message : String(err),
-            bookingId: b.id,
-            reference: b.bookingReference,
-          },
+          { err: message, bookingId: b.id, reference: b.bookingReference },
           "pending-payment-ttl: paid booking could not be confirmed — needs staff follow-up, NOT cancelling",
         );
+        // The customer's money is taken and their booking is invisible —
+        // and this branch re-runs every night until someone intervenes.
+        // A pino line alone never reaches a human; page the admins.
+        Sentry.captureException(err, {
+          tags: { job: QUEUE, kind: "paid-booking-rescue-failed" },
+          extra: { bookingId: b.id, reference: b.bookingReference },
+        });
+        try {
+          const managers = await prisma.user.findMany({
+            where: { role: { in: ["ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
+            select: { id: true },
+          });
+          for (const m of managers) {
+            await sendNotification({
+              userId: m.id,
+              type: "INCIDENT_REPORTED",
+              channels: ["EMAIL", "IN_APP"],
+              subject: `Paid booking stuck unconfirmed — ${b.bookingReference}`,
+              title: "Paid booking could not be confirmed",
+              body: `Booking ${b.bookingReference} has a successful deposit payment but automatic confirmation keeps failing (latest error: ${message.slice(0, 300)}). The nightly sweep will retry; investigate and confirm or refund manually from the staff console.`,
+              bookingId: b.id,
+              data: { bookingId: b.id, reference: b.bookingReference },
+              // One alert per booking per day even if the job retries.
+              dedupKey: `pending-ttl-rescue-failed:${b.id}:${new Date().toISOString().slice(0, 10)}`,
+            });
+          }
+        } catch (notifyErr) {
+          logger.warn(
+            { err: notifyErr instanceof Error ? notifyErr.message : String(notifyErr), bookingId: b.id },
+            "pending-payment-ttl: manager alert failed",
+          );
+        }
       }
       continue;
     }
