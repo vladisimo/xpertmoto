@@ -58,6 +58,9 @@ import { autoCloseByTarget } from "@/server/services/staff-tasks";
 // security issue.
 const RESEND_MIN_INTERVAL_MS = 60_000;
 const resendConfirmationLastSent = new Map<string, number>();
+
+/** Per-relation cap on the booking-detail child collections. */
+const DETAIL_CHILD_TAKE = 50;
 const resendInvoiceLastSent = new Map<string, number>();
 
 export const staffBookingRouter = createTRPCRouter({
@@ -178,23 +181,29 @@ export const staffBookingRouter = createTRPCRouter({
           returnDepot: true,
           addons: { include: { addon: true } },
           insurance: { include: { insuranceOption: true } },
-          payments: { orderBy: { createdAt: "desc" } },
+          // Child collections are newest-first and capped: a long-running
+          // booking (long-term hire, dispute) can accumulate hundreds of
+          // rows per relation, and the detail page only renders the recent
+          // tail. 50 is comfortably above any non-pathological booking.
+          payments: { orderBy: { createdAt: "desc" }, take: DETAIL_CHILD_TAKE },
           inspections: {
             orderBy: { dateTime: "desc" },
+            take: DETAIL_CHILD_TAKE,
             include: {
               inspector: { select: { firstName: true, lastName: true } },
             },
           },
-          incidents: { orderBy: { dateTime: "desc" } },
-          infringements: { orderBy: { offenceDate: "desc" } },
-          invoices: { orderBy: { createdAt: "desc" } },
+          incidents: { orderBy: { dateTime: "desc" }, take: DETAIL_CHILD_TAKE },
+          infringements: { orderBy: { offenceDate: "desc" }, take: DETAIL_CHILD_TAKE },
+          invoices: { orderBy: { createdAt: "desc" }, take: DETAIL_CHILD_TAKE },
           bookingNotes: {
             orderBy: { createdAt: "desc" },
+            take: DETAIL_CHILD_TAKE,
             include: {
               user: { select: { firstName: true, lastName: true, role: true } },
             },
           },
-          statusLog: { orderBy: { timestamp: "desc" } },
+          statusLog: { orderBy: { timestamp: "desc" }, take: DETAIL_CHILD_TAKE },
           bondLedger: true,
           createdBy: { select: { firstName: true, lastName: true } },
           confirmedBy: { select: { firstName: true, lastName: true } },

@@ -271,3 +271,36 @@ describe("staffBooking depot scoping (B1 IDOR fix)", () => {
     expect(args?.where?.depotId).toBe("depot1");
   });
 });
+
+describe("staffBooking.detail — bounded child collections", () => {
+  it("caps every unbounded child relation so a long-running booking can't fetch hundreds of rows", async () => {
+    const findUnique = vi.fn().mockResolvedValue({ id: "b1", depotId: "depot1" });
+    const ctx = {
+      prisma: { booking: { findUnique } },
+      user: { id: "staff1", role: "STAFF" as const, depotId: "depot1" },
+      session: { user: { id: "staff1", role: "STAFF" as const, depotId: "depot1" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.detail({ id: "b1" });
+
+    const include = (findUnique.mock.calls[0]![0] as {
+      include: Record<string, { take?: number } | true>;
+    }).include;
+    for (const rel of [
+      "payments",
+      "inspections",
+      "incidents",
+      "infringements",
+      "invoices",
+      "bookingNotes",
+      "statusLog",
+    ]) {
+      const relInclude = include[rel];
+      expect(relInclude, rel).not.toBe(true);
+      expect((relInclude as { take?: number }).take, rel).toBe(50);
+    }
+  });
+});
