@@ -42,6 +42,12 @@ vi.mock("@/lib/storage", () => ({
   downloadFile: (...a: unknown[]) => downloadFileSpy(...a),
 }));
 
+const redisExists = vi.fn();
+const redisSet = vi.fn();
+vi.mock("@/lib/redis", () => ({
+  getRedis: () => ({ exists: redisExists, set: redisSet }),
+}));
+
 // consent gate passes through by default — we're testing the admin pause gate,
 // not consent logic.
 vi.mock("@/server/services/consent", () => ({
@@ -246,5 +252,47 @@ describe("sendNotification attachment resolution", () => {
     expect(downloadFileSpy).not.toHaveBeenCalled();
     expect(invoiceFindUnique).not.toHaveBeenCalled();
     expect(sendSmsSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sendNotification cross-process dedup", () => {
+  it("skips the send when another process already marked the dedupKey in Redis", async () => {
+    settingsFindMany.mockResolvedValue([]);
+    redisExists.mockResolvedValue(1); // present in the shared ledger
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    const res = await sendNotification({
+      userId: "u1",
+      type: "BOOKING_CONFIRMATION",
+      channels: ["EMAIL"],
+      body: "hi",
+      dedupKey: "redis-shared-key",
+    });
+
+    expect(sendEmailSpy).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ status: "SKIPPED", reason: "DEDUPED" });
+  });
+
+  it("writes the dedupKey to Redis (with TTL) after a successful send", async () => {
+    settingsFindMany.mockResolvedValue([]);
+    redisExists.mockResolvedValue(0);
+    redisSet.mockResolvedValue("OK");
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "BOOKING_CONFIRMATION",
+      channels: ["EMAIL"],
+      body: "hi",
+      dedupKey: `mark-key-${Math.random()}`,
+    });
+
+    expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+    expect(redisSet).toHaveBeenCalledWith(
+      expect.stringContaining("notif-dedup:mark-key-"),
+      "1",
+      "EX",
+      3600,
+    );
   });
 });

@@ -10,6 +10,7 @@ import { htmlToText, sendEmail, type EmailAttachment } from "@/lib/email";
 import { getEmailBrandingVars } from "@/lib/email-branding-vars";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { getRedis } from "@/lib/redis";
 import { sendPushToUser } from "@/lib/push";
 import { sendSms } from "@/lib/sms";
 import { downloadFile } from "@/lib/storage";
@@ -194,24 +195,34 @@ const toCampaignStatus = (ok: boolean): CampaignRecipientStatus =>
 
 const toNotificationStatus = (ok: boolean) => (ok ? "SENT" : "FAILED");
 
-// In-memory dedup ledger. Redis would be the right home for a multi-process
-// worker fleet, but a module-scope Map covers the common single-worker dev
-// + single-replica prod shape and guards the most-common double-fire case
-// (BullMQ job restart within a few seconds).
+// Dedup ledger. Redis-backed so every process that sends (web container,
+// worker, future replicas) shares one ledger — the previous module-scope
+// Map deduped per-process only, so the same dedupKey fired from the
+// webhook (web) and a job (worker) sent twice. The Map stays as the local
+// fast path and the no-Redis dev fallback. Mark happens only after a
+// channel actually SENT (see call site), so failed sends remain retryable.
 const DEDUP_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const DEDUP_PREFIX = "notif-dedup:";
 const sentDedupKeys = new Map<string, number>();
 
-function hasRecentlySent(key: string): boolean {
+async function hasRecentlySent(key: string): Promise<boolean> {
   const at = sentDedupKeys.get(key);
-  if (!at) return false;
-  if (Date.now() - at > DEDUP_WINDOW_MS) {
+  if (at !== undefined) {
+    if (Date.now() - at <= DEDUP_WINDOW_MS) return true;
     sentDedupKeys.delete(key);
+  }
+  const redis = getRedis();
+  if (!redis) return false;
+  try {
+    return (await redis.exists(`${DEDUP_PREFIX}${key}`)) === 1;
+  } catch {
+    // Redis down → local Map is the best we have; prefer sending twice
+    // over not sending at all.
     return false;
   }
-  return true;
 }
 
-function markSent(key: string): void {
+async function markSent(key: string): Promise<void> {
   sentDedupKeys.set(key, Date.now());
   // Prevent unbounded growth. 10k entries at ~100 bytes = ~1MB — fine.
   if (sentDedupKeys.size > 10_000) {
@@ -219,6 +230,13 @@ function markSent(key: string): void {
     for (const [k, t] of sentDedupKeys) {
       if (t < cutoff) sentDedupKeys.delete(k);
     }
+  }
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    await redis.set(`${DEDUP_PREFIX}${key}`, "1", "EX", Math.floor(DEDUP_WINDOW_MS / 1000));
+  } catch {
+    // non-fatal — the local entry still covers this process.
   }
 }
 
@@ -230,7 +248,7 @@ export async function sendNotification(
   const logIds: string[] = [];
   const notificationIds: string[] = [];
 
-  if (input.dedupKey && hasRecentlySent(input.dedupKey)) {
+  if (input.dedupKey && (await hasRecentlySent(input.dedupKey))) {
     logger.info(
       { dedupKey: input.dedupKey, type: input.type },
       "sendNotification: deduped, already sent within window",
@@ -436,7 +454,7 @@ export async function sendNotification(
   }
 
   if (input.dedupKey && results.some((r) => r.status === "SENT")) {
-    markSent(input.dedupKey);
+    await markSent(input.dedupKey);
   }
 
   return { results, logIds, notificationIds };
