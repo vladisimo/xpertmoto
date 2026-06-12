@@ -3,9 +3,18 @@ import * as Sentry from "@sentry/nextjs";
 import { logger } from "@/lib/logger";
 
 // Models that carry a `deletedAt` timestamp. The extension below auto-filters
-// findFirst/findMany/findUnique/count/aggregate/groupBy to `deletedAt: null`
-// unless the caller passes `deletedAt` explicitly in the where clause
-// (e.g. for staff admin views that want to see soft-deleted rows).
+// findFirst/findMany/count/aggregate/groupBy to `deletedAt: null` unless the
+// caller passes `deletedAt` explicitly in the where clause (e.g. for staff
+// admin views that want to see soft-deleted rows).
+//
+// findUnique/findUniqueOrThrow are deliberately NOT filtered — and cannot
+// be, since their where accepts unique fields only. Fetch-by-id sees
+// soft-deleted rows by design: disposed-vehicle detail pages, the
+// internalCode duplicate check on vehicle onboarding, and the anonymise/
+// restore flows all depend on it. List surfaces hide deleted rows; direct
+// lookups do not. Don't "fix" this by post-filtering results — that breaks
+// the call sites above. (This comment previously claimed findUnique was
+// covered; it never was.)
 const SOFT_DELETE_MODELS = new Set<string>([
   "User",
   "Depot",
