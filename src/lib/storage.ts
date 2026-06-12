@@ -36,6 +36,16 @@ function getEnv(): StorageEnv {
 
 let client: S3Client | null = null;
 
+// Uploads sit inside customer-facing flows (licence photos, signed
+// agreements) — bound how long a single attempt can hang and let the SDK
+// retry transient 5xx/network failures one extra time beyond its default.
+const S3_MAX_ATTEMPTS = 4;
+const S3_OP_TIMEOUT_MS = 30_000;
+
+function s3Timeout(): { abortSignal: AbortSignal } {
+  return { abortSignal: AbortSignal.timeout(S3_OP_TIMEOUT_MS) };
+}
+
 function getClient(): S3Client | null {
   if (client) return client;
   const env = getEnv();
@@ -44,6 +54,7 @@ function getClient(): S3Client | null {
     region: env.region,
     endpoint: env.endpoint,
     forcePathStyle: env.forcePathStyle,
+    maxAttempts: S3_MAX_ATTEMPTS,
     credentials: {
       accessKeyId: env.accessKey,
       secretAccessKey: env.secretKey,
@@ -132,6 +143,7 @@ export async function uploadFile(args: UploadArgs): Promise<UploadResult> {
       Body: args.body,
       ContentType: args.contentType,
     }),
+    s3Timeout(),
   );
 
   await recordStorageUpload({
@@ -176,6 +188,7 @@ export async function downloadFile(key: string): Promise<Buffer> {
   }
   const res = await s3.send(
     new GetObjectCommand({ Bucket: getEnv().bucket, Key: key }),
+    s3Timeout(),
   );
   const body = res.Body;
   if (!body) throw new Error(`No body for S3 object ${key}`);
@@ -204,7 +217,7 @@ export async function deleteFile(
     await recordStorageDelete({ key, ctx: opts.log });
     return;
   }
-  await s3.send(new DeleteObjectCommand({ Bucket: getEnv().bucket, Key: key }));
+  await s3.send(new DeleteObjectCommand({ Bucket: getEnv().bucket, Key: key }), s3Timeout());
   await recordStorageDelete({ key, ctx: opts.log });
 }
 

@@ -20,6 +20,14 @@ const AUTH_URL = "https://login.xero.com/identity/connect/authorize";
 const TOKEN_URL = "https://identity.xero.com/connect/token";
 const API_BASE = "https://api.xero.com/api.xro/2.0";
 const CONNECTIONS_URL = "https://api.xero.com/connections";
+
+// Xero normally answers in well under a second; a hung upstream must not
+// pin the admin OAuth callback or the hourly sync job forever.
+const XERO_TIMEOUT_MS = 10_000;
+
+function xeroFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(XERO_TIMEOUT_MS) });
+}
 const SCOPES = [
   "offline_access",
   "accounting.contacts",
@@ -71,7 +79,7 @@ export async function exchangeCode(code: string, redirectUri: string): Promise<X
   const creds = await getCreds();
   if (!creds) throw new Error("Xero not configured");
   const basic = Buffer.from(`${creds.id}:${creds.secret}`).toString("base64");
-  const res = await fetch(TOKEN_URL, {
+  const res = await xeroFetch(TOKEN_URL, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
@@ -90,7 +98,7 @@ export async function exchangeCode(code: string, redirectUri: string): Promise<X
     expires_in: number;
   };
 
-  const connRes = await fetch(CONNECTIONS_URL, {
+  const connRes = await xeroFetch(CONNECTIONS_URL, {
     headers: { Authorization: `Bearer ${data.access_token}` },
   });
   const connections = (await connRes.json()) as Array<{ tenantId: string }>;
@@ -109,7 +117,7 @@ async function refreshIfNeeded(t: XeroTokens): Promise<XeroTokens> {
   const creds = await getCreds();
   if (!creds) throw new Error("Xero credentials missing");
   const basic = Buffer.from(`${creds.id}:${creds.secret}`).toString("base64");
-  const res = await fetch(TOKEN_URL, {
+  const res = await xeroFetch(TOKEN_URL, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
@@ -179,7 +187,7 @@ export async function syncInvoice(invoiceId: string): Promise<"pushed" | "skippe
   };
 
   if (!fresh.tenant_id) return "skipped";
-  const res = await fetch(`${API_BASE}/Invoices`, {
+  const res = await xeroFetch(`${API_BASE}/Invoices`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${fresh.access_token}`,

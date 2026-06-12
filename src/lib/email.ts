@@ -90,6 +90,32 @@ export function htmlToText(html: string): string {
 
 type SendResult = { id?: string; via: "resend" | "smtp" | "console" };
 
+// Sends run inline in user-facing flows (booking confirmation, receipts) —
+// a slow provider must surface as an error the caller can handle, not pin
+// the request open. Note the underlying HTTP request isn't aborted; the
+// caller is just unblocked.
+const SEND_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${SEND_TIMEOUT_MS}ms`)),
+      SEND_TIMEOUT_MS,
+    );
+    timer.unref?.();
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 async function fromAddress(override?: string): Promise<string> {
   if (override) return override;
   const branding = await getBranding();
@@ -105,10 +131,10 @@ async function fromAddress(override?: string): Promise<string> {
 
 export async function sendEmail(payload: EmailPayload): Promise<SendResult> {
   const html = payload.html ?? (payload.react ? await render(payload.react) : undefined);
-  const text =
-    payload.text ??
-    payload.body ??
-    (payload.react ? await render(payload.react, { plainText: true }) : undefined);
+  // Derive the text part from the single HTML render — a second
+  // render(react, { plainText: true }) walks the whole React tree again,
+  // doubling per-send CPU on the hot notification paths.
+  const text = payload.text ?? payload.body ?? (html ? htmlToText(html) : undefined);
 
   if (!html && !text) {
     throw new Error("sendEmail: must provide html, text, body, or react");
@@ -125,24 +151,27 @@ export async function sendEmail(payload: EmailPayload): Promise<SendResult> {
     const resend = new Resend(resendKey);
     // Resend requires one of html or text (not both empty). Pass undefined
     // when a part is missing so clients don't render an empty alternative.
-    const res = await resend.emails.send({
-      from,
-      to: payload.to,
-      subject: payload.subject,
-      ...(html ? { html } : {}),
-      ...(text ? { text } : {}),
-      ...(attachments.length
-        ? {
-            attachments: attachments.map((a) => ({
-              filename: a.filename,
-              content: a.content.toString("base64"),
-              ...(a.contentType ? { contentType: a.contentType } : {}),
-            })),
-          }
-        : {}),
-      // At least one of html/text is required by Resend; we guarded this
-      // above with the "must provide" check.
-    } as Parameters<typeof resend.emails.send>[0]);
+    const res = await withTimeout(
+      resend.emails.send({
+        from,
+        to: payload.to,
+        subject: payload.subject,
+        ...(html ? { html } : {}),
+        ...(text ? { text } : {}),
+        ...(attachments.length
+          ? {
+              attachments: attachments.map((a) => ({
+                filename: a.filename,
+                content: a.content.toString("base64"),
+                ...(a.contentType ? { contentType: a.contentType } : {}),
+              })),
+            }
+          : {}),
+        // At least one of html/text is required by Resend; we guarded this
+        // above with the "must provide" check.
+      } as Parameters<typeof resend.emails.send>[0]),
+      "resend.emails.send",
+    );
     if (res.error) {
       await recordEmailSend({
         provider: "resend",
@@ -178,6 +207,10 @@ export async function sendEmail(payload: EmailPayload): Promise<SendResult> {
         process.env.SMTP_USER && process.env.SMTP_PASS
           ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
           : undefined,
+      // A wedged SMTP server must error out, not hold the caller open.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: SEND_TIMEOUT_MS,
       tls: {
         // Opt-out for dev/staging servers with self-signed or private-CA
         // certificates. Default is strict verification.
