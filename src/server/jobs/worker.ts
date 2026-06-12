@@ -22,6 +22,7 @@ import * as Sentry from "@sentry/nextjs";
 import { getRedis } from "@/lib/redis";
 import { prisma } from "@/lib/prisma";
 import { scrubSentryEvent } from "@/lib/observability/sentry-scrub";
+import { sentryTracesSampleRate } from "@/lib/observability/sentry-sample-rate";
 import { logger } from "@/lib/logger";
 import { registeredWorkerCount, shutdownQueues } from "./queue";
 
@@ -76,7 +77,7 @@ if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
     environment: process.env.NODE_ENV,
-    tracesSampleRate: process.env.NODE_ENV === "production" ? 0.1 : 1.0,
+    tracesSampleRate: sentryTracesSampleRate(),
     enabled: process.env.NODE_ENV !== "test",
     serverName: "xpertmoto-worker",
     beforeSend: scrubSentryEvent,
