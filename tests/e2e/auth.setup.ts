@@ -6,6 +6,11 @@ const CUSTOMER = { email: "sarah.smith@example.com", password: "customer1234" };
 const STAFF = { email: "staff.lewisham@xpertmoto.com.au", password: "staff1234" };
 const ADMIN = { email: "admin@xpertmoto.com.au", password: "admin1234" };
 
+// The three logins run in parallel against a COLD `next dev` — first
+// compiles of /login, /verify-2fa-step-up, /portal-select and three role
+// dashboards all contend at once and can starve the 60s default.
+setup.describe.configure({ timeout: 180_000 });
+
 setup("authenticate as customer", async ({ page }) => {
   await login(page, CUSTOMER.email, CUSTOMER.password, { expectedUrl: /dashboard/i });
   await expect(page.locator("body")).toContainText(/dashboard|booking/i);

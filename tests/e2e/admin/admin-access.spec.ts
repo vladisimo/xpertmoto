@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../_fixtures/test";
 
 /**
  * Admin access (runs with the seeded admin@xpertmoto.com.au SUPER_ADMIN

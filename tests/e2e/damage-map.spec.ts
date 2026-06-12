@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures/test";
+import { login as sharedLogin } from "./_fixtures/login";
 
 /**
  * Damage-map smoke: 4 tabs render, marker placed on a non-LEFT tab persists
@@ -7,15 +8,7 @@ import { test, expect } from "@playwright/test";
  * when the seed isn't present so CI doesn't fail on fresh databases.
  */
 
-const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
-
-async function login(page: import("@playwright/test").Page) {
-  await page.goto("/login");
-  await page.fill('input[type="email"]', STAFF.email);
-  await page.fill('input[type="password"]', STAFF.password);
-  await page.getByRole("button", { name: /sign in|log in/i }).click();
-  await page.waitForURL(/staff/i, { timeout: 10_000 }).catch(() => undefined);
-}
+const STAFF = { email: "staff.lewisham@xpertmoto.com.au", password: "staff1234" };
 
 async function findBookingIdByReference(page: import("@playwright/test").Page, reference: string): Promise<string | null> {
   // Hit the tRPC list endpoint authenticated (cookie set after login) and grep by bookingReference.
@@ -37,7 +30,7 @@ async function findBookingIdByReference(page: import("@playwright/test").Page, r
 }
 
 test("damage map renders 4 view tabs and places a marker on the Rear view", async ({ page }) => {
-  await login(page);
+  await sharedLogin(page, STAFF.email, STAFF.password);
 
   // Prefer the seeded QA-CONFIRMED booking; fall back to any available one.
   let bookingId = await findBookingIdByReference(page, "QA-CONFIRMED");
@@ -64,7 +57,9 @@ test("damage map renders 4 view tabs and places a marker on the Rear view", asyn
 
   // Switch to the Rear tab and click the centre of the silhouette.
   await page.getByRole("tab", { name: /^Rear/ }).click();
-  const rearCanvas = page.getByRole("img", { name: /Rear view/i });
+  // Two role=img nodes carry "Rear view" (placeholder <img> + the
+  // interactive SVG) — target the damage-map SVG explicitly.
+  const rearCanvas = page.getByRole("img", { name: /^Damage map — Rear view/i });
   await expect(rearCanvas).toBeVisible();
 
   const box = await rearCanvas.boundingBox();

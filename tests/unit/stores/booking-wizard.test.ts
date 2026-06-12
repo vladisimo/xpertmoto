@@ -245,26 +245,48 @@ describe("booking wizard store", () => {
   });
 
   describe("isCustomerComplete()", () => {
-    it("returns false without an identityPath", () => {
+    it("null identityPath (legacy mode) accepts a complete licence triplet", () => {
+      // Profiles saved before licenceType existed (licenceType=null) and the
+      // wizard_intl_licence_flow=off rollout both leave identityPath null.
+      // detailsStepSchema's documented flag-off rule is "at least one valid
+      // ID" — requiring identityPath here silently dead-ended such customers
+      // at step 4 (w.next() clamped back with no visible error).
+      const legacyCustomer = {
+        firstName: "Jo",
+        lastName: "B",
+        email: "j@x",
+        phone: "",
+        dateOfBirth: "1990-01-01",
+        licenceNumber: "1",
+        licenceState: "QLD",
+        licenceCountry: "",
+        licenceExpiry: "2030-01-01",
+        licenceClass: "",
+        passportNumber: "",
+        passportCountry: "",
+        passportExpiry: "",
+        emergencyContactName: "",
+        emergencyContactPhone: "",
+      };
+      expect(isCustomerComplete(legacyCustomer, null)).toBe(true);
+      // Passport-only is also a valid single ID in legacy mode.
       expect(
         isCustomerComplete(
           {
-            firstName: "Jo",
-            lastName: "B",
-            email: "j@x",
-            phone: "",
-            dateOfBirth: "1990-01-01",
-            licenceNumber: "1",
-            licenceState: "QLD",
-            licenceCountry: "",
-            licenceExpiry: "2030-01-01",
-            licenceClass: "",
-            passportNumber: "",
-            passportCountry: "",
-            passportExpiry: "",
-            emergencyContactName: "",
-            emergencyContactPhone: "",
+            ...legacyCustomer,
+            licenceNumber: "",
+            licenceState: "",
+            licenceExpiry: "",
+            passportNumber: "P123",
+            passportExpiry: "2030-01-01",
           },
+          null,
+        ),
+      ).toBe(true);
+      // No ID at all still blocks step 5.
+      expect(
+        isCustomerComplete(
+          { ...legacyCustomer, licenceNumber: "", licenceState: "", licenceExpiry: "" },
           null,
         ),
       ).toBe(false);

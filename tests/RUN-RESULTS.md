@@ -1,8 +1,17 @@
 # Scenario Suite — Run Results
 
-Run against `main` at `/home/vlad/scootering` on 2026-04-18. Environment:
-host-level Postgres 16 on :5432, Redis on :6379, seeded via
-`npm run db:seed` (full demo dataset).
+Run against `launch-prep` at `/home/vlad/scootering` on 2026-06-13, as part of
+the comprehensive front-end test effort (browser-error guard + per-role route
+sweeps + interactive flow specs). Environment: isolated e2e stack — Postgres
+`xpertmoto_e2e`, Redis DB 3, `.next-e2e`, port 3137, **stub Stripe**, dedicated
+Mailpit on :1027/:8027. See `tests/e2e/README.md` for conventions and
+`docs/frontend-test-findings.md` for every bug found in the effort
+(6 fixed in-branch, the rest triaged open/noted).
+
+Previous run for comparison: 2026-04-18 on `main` — 12 e2e passed / 5 failed
+("pre-existing environmental" failures, since root-caused: legacy specs'
+local login helpers predated mandatory back-office TOTP and had never
+actually signed in).
 
 ---
 
@@ -10,107 +19,61 @@ host-level Postgres 16 on :5432, Redis on :6379, seeded via
 
 | Step | Command | Outcome |
 |---|---|---|
-| Typecheck | `npm run typecheck` | ✅ clean (0 errors) |
-| Lint | `npm run lint` | ✅ 0 errors, 86 pre-existing warnings |
-| Vitest | `npm run test` | ✅ **997 passed / 18 skipped** across 156 files (+2 skipped files). Duration 5.5s. |
-| Integration (node test runner) | `npm run test:integration` | ✅ 3/3 pass in 214 ms |
-| Playwright E2E | `npm run test:e2e` | ⚠️ **12 passed / 5 skipped / 5 failed** — failures are pre-existing environmental issues (see below), not scenarios authored in this change. |
+| Typecheck | `npm run typecheck` | ✅ clean |
+| Lint | `npx eslint` over all changed files | ✅ clean |
+| Vitest | `npm run test` | ✅ **3,951 passed / 18 skipped** (465 files) — incl. new `isCustomerComplete` legacy-path cases and the `live.heartbeat` create-race fallback test |
+| Playwright E2E (full, clean-room) | `npm run test:e2e:local` | ✅ **237 passed / 0 failed / 11 skipped** in 5.1 min (4 workers, fresh reseed, fresh server) |
 
-Baseline before this change: 977 passed vitest tests (154 files). After:
-997 passed + 18 skipped. **+20 passing tests, +9 documented gap stubs.**
+The 11 skips are deliberate: real-Stripe specs (`STRIPE_READY` guard — run
+locally via `npm run test:e2e:stripe`), the two `KNOWN_BUG_ROUTES` fixmes
+(STAFF campaigns/segments 403 — finding #13), data-conditional skips
+(swap-wizard full path), and placeholder shells awaiting deeper DOM work
+(check-in-damage).
 
----
+## What the suite now covers
 
-## New tests authored in this run
+- **Browser-error guard on every spec** (`tests/e2e/_fixtures/browser-guard.ts`):
+  console errors, uncaught page exceptions, failed same-origin requests and
+  same-origin HTTP ≥ 400 fail strict-mode tests; API errors attach their
+  request/response payloads to the report. This is the passive dead-button /
+  broken-sequence detector — it found the analytics beacon bug (#17) and the
+  heartbeat create-race 500 (#24) without any targeted assertion.
+- **Per-role route sweeps** (~165 routes): every public, customer, staff
+  (role STAFF) and admin (SUPER_ADMIN) page incl. all `?tab=` deep links and
+  representative `[id]` pages, asserted to render with zero non-allowlisted
+  browser issues. Manifest derives from `src/lib/nav.ts`, so new nav items
+  are swept automatically. Plus tab-control crawls, sidebar-flyout crawl,
+  and a public link-integrity sweep.
+- **Booking funnel**: full 6-step wizard end-to-end in stub mode (guest auth
+  gate, `?step` URL sync, reload persistence, back button, consent
+  checkboxes, confirmation + portal visibility); real-card happy/decline/3DS
+  specs behind the Stripe tier.
+- **Staff lifecycle**: factory booking → pre-hire inspection → check-out
+  verify (UI) → agreement signing (the same tRPC chain the tablet pad
+  calls) → handover (UI) → ACTIVE → StatusActions return + complete →
+  COMPLETED with the vehicle back to AVAILABLE.
+- **Back-office flows**: walk-in POS modal end-to-end, pricing discount CRUD
+  verified against the public quote engine, invoice void (prompt/confirm
+  dialogs), Linkt CSV import → unmatched queue, admin branding round-trip,
+  fleet CTP document upload (DB-asserted), damage-map marker placement,
+  staff priority tasks.
+- **Auth**: customer/staff/admin UI logins with TOTP (in-page step AND the
+  `/verify-2fa-step-up` redirect variant, clock-edge retry), dual-access
+  portal-select (incl. its self-forwarding), forgot/reset password
+  end-to-end with token-reuse rejection, anonymous redirect contracts.
+- **Devices**: iPhone 14 wizard + bottom tab bar; iPad check-out
+  (chromium-engined emulation — host lacks WebKit system libraries).
+- **Email**: booking confirmation captured by Mailpit; zero real outbound
+  mail from e2e runs (previously they relayed real email).
 
-| File | Tests | Purpose |
-|---|---|---|
-| `tests/unit/trpc/router/auth-schema.test.ts` | 10 pass | Auth Zod validators (register + login schemas): short password, malformed email, blank names, DOB coercion, empty-phone normalisation, default marketingOptIn, login schema rejections. Covers rows A2, A3, A5a in SCENARIOS.md. |
-| `tests/unit/_gaps.test.ts` | 9 skipped | Every row marked `GAP` in SCENARIOS.md surfaces here with a TODO pointing to the missing feature. |
+## Coverage gaps that remain
 
----
-
-## Coverage rollup (from `tests/SCENARIOS.md`)
-
-22 module sections, ~130 scenarios:
-
-- **Covered by existing tests** — 118 scenarios (including the richly-tested
-  payments suite, pricing cascade, availability engine, loyalty, eligibility,
-  inspections, task collectors).
-- **New in this change** — 3 scenarios (register + login schema validation).
-- **Implemented but not unit-tested** — 4 scenarios (licence-expiry,
-  maintenance-alert and overdue-check jobs + walk-in booking path). Each
-  links to the source file; adding coverage requires a DB-integration
-  harness we don't have yet. SCENARIOS.md flags each explicitly so they
-  can't silently drift.
-- **GAP — implementation missing** — 9 items (password reset, magic link,
-  email/phone verification, 2FA, rate-limiting, session revocation,
-  PHONE/AGENT booking source, inter-depot transfer order). Tracked in
-  `_gaps.test.ts` as `.skip` so vitest surfaces them every run.
-
----
-
-## Playwright E2E details
-
-### Passed (12)
-
-- `public-pages.spec.ts` — homepage hero + CTA
-- `live-view.spec.ts` — visitor cookie set on first visit
-- `damage-map.spec.ts` — damage map 4 views + marker placement (3 tests)
-- `check-in-damage.spec.ts` — check-in flow through damage → bond capture (all)
-- `auth-and-portal.spec.ts` — both unauthenticated redirect tests
-- `staff-tasks.spec.ts` — navigation smoke (one of three)
-
-### Skipped (5)
-
-- `booking-payment.spec.ts` — auto-skipped because `STRIPE_TEST_SECRET_KEY`
-  is not set in the environment. Expected behaviour — the spec is designed
-  to skip safely so CI without Stripe credentials still stays green.
-
-### Failed (5) — **pre-existing environmental**
-
-All five are login-related: the credentials seed ran successfully (confirmed
-by `npm run db:seed` output listing all four seed credentials), but
-NextAuth's credentials provider was unable to authenticate them through the
-running dev server during the test window. Possible causes — all outside
-this scenario-coverage task:
-
-- NextAuth config relying on Redis-backed session state that the
-  host Redis returned stale on; or
-- bcrypt cost mismatch between seed write-time and auth verify-time; or
-- NextAuth/AUTH_TRUST_HOST handling interacting oddly with the Playwright
-  localhost base URL.
-
-Failed tests:
-
-- `auth-and-portal.spec.ts › customer login reaches dashboard`
-- `auth-and-portal.spec.ts › staff login reaches staff area`
-- `auth-and-portal.spec.ts › admin login reaches admin area`
-- `staff-tasks.spec.ts › staff can open Priority Tasks page and see the queue chrome`
-- `staff-tasks.spec.ts › clicking Start on a task claims it and redirects to the action page`
-
-The last two cascade from the auth failure — staff-tasks requires a logged-in
-staff session. Fix is environmental, not behavioural: investigate the
-`/api/auth/callback/credentials` POST response when the dev server is up,
-and reconcile with session cookies.
-
-These failures are **not** regressions caused by this change; they occur
-against `main` with no new code.
-
----
-
-## Files created / modified in this change
-
-- `tests/SCENARIOS.md` — full coverage matrix
-- `tests/RUN-RESULTS.md` — this file
-- `tests/unit/_gaps.test.ts` — 9 documented gap stubs
-- `tests/unit/trpc/router/auth-schema.test.ts` — 10 new tests
-
-## Follow-ups for future sessions
-
-1. Investigate and fix the 5 pre-existing Playwright auth failures.
-2. Add integration tests for `runOverdueCheck`, `runMaintenanceAlerts`,
-   `runLicenceExpiryAlerts`, and the `createWalkIn` staff procedure — each
-   needs a DB harness since they hit `prisma` directly.
-3. Land the 9 gap features one at a time, removing the corresponding
-   `.skip` stub and adding a real test alongside each.
+- Magic-link end-to-end (NextAuth hashes the token; needs a Mailpit-driven
+  spec — `E2E_MAILPIT_API` is already plumbed).
+- TOTP enrolment UI and email/phone verification (SCENARIOS A10 remainder).
+- Real-Stripe webhook-driven paths (needs `stripe listen`; manual/local).
+- Tablet signature-pad canvas drawing inside the agreement flow (the
+  lifecycle spec signs via tRPC; canvas interaction is covered by
+  damage-map.spec).
+- Check-in damage → assess → settle through the UI (lifecycle uses the
+  no-damage StatusActions path; `check-in-damage.spec.ts` remains a shell).

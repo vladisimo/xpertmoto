@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures/test";
 
 /**
  * Onboarding gate smoke tests. The full register-fresh → wizard → 4
@@ -37,9 +37,12 @@ test("mobile viewport — onboarding redirect doesn't overflow", async ({ page }
   await expect(page).toHaveURL(/\/login/i);
   // Sanity: no horizontal scrolling on the landing page (the auth shell
   // applies its own width caps; we're only checking we didn't break
-  // the bounce behaviour on small screens).
+  // the bounce behaviour on small screens). Wait for the redirect's DOM to
+  // commit — documentElement is transiently unavailable mid-navigation.
+  await page.waitForLoadState("domcontentloaded");
   const overflows = await page.evaluate(() => {
-    return document.documentElement.scrollWidth > document.documentElement.clientWidth;
+    const el = document.documentElement;
+    return el ? el.scrollWidth > el.clientWidth : false;
   });
   expect(overflows).toBe(false);
 });

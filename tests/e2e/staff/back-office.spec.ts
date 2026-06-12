@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../_fixtures/test";
 
 /**
  * Staff back-office access (runs with the seeded staff.lewisham session from

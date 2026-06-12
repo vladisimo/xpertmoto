@@ -19,6 +19,9 @@ export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 60_000,
   fullyParallel: true,
+  // One shared dev-server process serves every worker — more than ~4 local
+  // workers just queues on the server and the per-depot allocation lock.
+  workers: process.env.CI ? 2 : 4,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   globalSetup: require.resolve("./tests/e2e/global-setup"),
@@ -47,12 +50,16 @@ export default defineConfig({
       name: "customer",
       use: { ...devices["Desktop Chrome"], storageState: STORAGE_STATE.customer },
       testMatch: /(customer|booking|payments)\/.*\.spec\.ts/,
+      // booking/*mobile* specs run only under mobile-customer.
+      testIgnore: /mobile/,
       dependencies: ["setup"],
     },
     {
       name: "staff",
       use: { ...devices["Desktop Chrome"], storageState: STORAGE_STATE.staff },
       testMatch: /staff\/.*\.spec\.ts/,
+      // staff/*tablet* specs run only under tablet-staff.
+      testIgnore: /tablet/,
       dependencies: ["setup"],
     },
     {
@@ -63,13 +70,24 @@ export default defineConfig({
     },
     {
       name: "mobile-customer",
-      use: { ...devices["iPhone 14"], storageState: STORAGE_STATE.customer },
+      // Chromium-engined device emulation (viewport/touch/UA): the WebKit
+      // binary needs system libraries (libgtk-4) not present on the dev host,
+      // and engine fidelity matters less here than layout/touch coverage.
+      use: {
+        ...devices["iPhone 14"],
+        browserName: "chromium",
+        storageState: STORAGE_STATE.customer,
+      },
       testMatch: /booking\/.*mobile.*\.spec\.ts/,
       dependencies: ["setup"],
     },
     {
       name: "tablet-staff",
-      use: { ...devices["iPad (gen 7)"], storageState: STORAGE_STATE.staff },
+      use: {
+        ...devices["iPad (gen 7)"],
+        browserName: "chromium",
+        storageState: STORAGE_STATE.staff,
+      },
       testMatch: /staff\/.*(inspect|tablet).*\.spec\.ts/,
       dependencies: ["setup"],
     },

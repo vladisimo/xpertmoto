@@ -156,6 +156,7 @@ export function BodyEditor({
             format={effectiveFormat}
             subject={renderedSubject}
             body={renderedBody}
+            pending={!preview}
           />
         </div>
       </div>
@@ -167,10 +168,19 @@ function PreviewPane({
   format,
   subject,
   body,
+  pending,
 }: {
   format: TemplateFormat;
   subject: string;
   body: string;
+  /**
+   * True while the server-side preview (variable substitution) is still in
+   * flight. The HTML iframe must not render the raw template in the
+   * meantime: literal `{{logoUrl}}` becomes a relative URL inside the
+   * srcdoc document, firing a junk request that bounces off the auth
+   * middleware and gets ORB-blocked as HTML-into-img.
+   */
+  pending?: boolean;
 }) {
   return (
     <div className="space-y-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
@@ -182,7 +192,9 @@ function PreviewPane({
       )}
       <div>
         <div className="eyebrow text-xs">Body</div>
-        {format === "HTML" ? (
+        {format === "HTML" && pending ? (
+          <WysiwygSkeleton />
+        ) : format === "HTML" ? (
           <iframe
             title="Email body preview"
             className={cn(

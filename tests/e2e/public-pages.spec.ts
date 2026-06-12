@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures/test";
 
 /**
  * Smoke tests for the public marketing + booking flow. These verify the

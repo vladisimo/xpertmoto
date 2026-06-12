@@ -1,4 +1,4 @@
-import { test, expect } from "../_fixtures/api";
+import { test, expect } from "../_fixtures/test";
 import {
   bookingRefData,
   quoteWindow,

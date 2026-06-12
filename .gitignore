@@ -45,3 +45,6 @@ dist
 /.claude/hooks/.typecheck.stamp
 /.claude/hooks/.log
 /.claude/transcripts/
+
+# Playwright MCP browser-session artefacts (console logs, page snapshots)
+/.playwright-mcp/

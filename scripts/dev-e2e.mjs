@@ -18,6 +18,16 @@ const parsed = config({ path: ".env.e2e" }).parsed ?? {};
 const port = process.env.PORT || "3137"; // matches playwright.config E2E default
 const env = { ...process.env, ...parsed, PORT: port };
 
+// Tier-2 Stripe: the default e2e profile runs stub mode (.env.e2e blanks the
+// Stripe vars). Exporting STRIPE_TEST_SECRET_KEY / STRIPE_TEST_PUBLISHABLE_KEY
+// (the names the Playwright stripe fixture already gates on via STRIPE_READY)
+// maps them onto the real var names for this server run only, so
+// `npm run test:e2e:stripe` exercises real test-mode Elements/3DS/decline.
+if (process.env.STRIPE_TEST_SECRET_KEY && process.env.STRIPE_TEST_PUBLISHABLE_KEY) {
+  env.STRIPE_SECRET_KEY = process.env.STRIPE_TEST_SECRET_KEY;
+  env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_TEST_PUBLISHABLE_KEY;
+}
+
 const child = spawn(
   process.execPath,
   ["node_modules/next/dist/bin/next", "dev", "-p", port],

@@ -210,3 +210,50 @@ describe("live.events — dedup-constraint safety", () => {
     expect(rows[0]!.occurredAt.getTime()).not.toBe(rows[1]!.occurredAt.getTime());
   });
 });
+
+describe("live.heartbeat — concurrent first-heartbeat create race", () => {
+  test("a P2002 on visitorSession.create falls back to a touch update instead of 500ing", async () => {
+    const { liveRouter } = await import("@/server/trpc/router/live");
+    const { Prisma } = await import("@prisma/client");
+    const p2002 = new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+      code: "P2002",
+      clientVersion: "5.22.0",
+    });
+    const now = new Date();
+    const update = vi.fn().mockResolvedValue({
+      id: "v_race",
+      user: null,
+      userId: null,
+      currentPath: "/booking",
+      wizardStep: 1,
+      deviceType: "DESKTOP",
+      startedAt: now,
+      lastSeenAt: now,
+    });
+    const ctx = {
+      headers: h("xpertmoto_vid=v_race").headers,
+      ipAddress: null,
+      userAgent: "vitest",
+      session: null,
+      prisma: {
+        visitorSession: {
+          // No existing row → create branch; the create then loses the race.
+          findUnique: vi.fn().mockResolvedValue(null),
+          count: vi.fn().mockResolvedValue(0),
+          create: vi.fn().mockRejectedValue(p2002),
+          update,
+        },
+        visitorPageView: { create: vi.fn().mockResolvedValue({}) },
+      },
+    };
+    posthogServerEnabled.mockResolvedValue(false);
+
+    const caller = liveRouter.createCaller(ctx as never);
+    const res = await caller.heartbeat({ path: "/booking" });
+
+    expect(res.ok).toBe(true);
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "v_race" } }),
+    );
+  });
+});

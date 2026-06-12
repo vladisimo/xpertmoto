@@ -169,8 +169,12 @@ export function useVisitorEvents(): void {
 
     const onUnload = () => {
       if (queueRef.current.length === 0) return;
+      // tRPC expects the transformer envelope ({ json: <input> }) as the
+      // POST body for a non-batched mutation — a bare { events } body 400s
+      // and the exit-flush batch (EXIT_INTENT, final wizard events) is
+      // silently dropped.
       const payload = new Blob(
-        [JSON.stringify({ events: queueRef.current })],
+        [JSON.stringify({ json: { events: queueRef.current } })],
         { type: "application/json" },
       );
       queueRef.current = [];

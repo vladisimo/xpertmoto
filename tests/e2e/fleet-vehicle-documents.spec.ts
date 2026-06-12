@@ -1,5 +1,6 @@
-import { test, expect } from "@playwright/test";
-import { prisma } from "../../src/lib/prisma";
+import { test, expect } from "./_fixtures/test";
+import { login as sharedLogin } from "./_fixtures/login";
+import { e2ePrisma as prisma } from "./_fixtures/db";
 
 /**
  * Documents tab smoke. Staff uploads a CTP document with an expiry date
@@ -8,19 +9,7 @@ import { prisma } from "../../src/lib/prisma";
  * updated to match.
  */
 
-const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
-
-async function login(page: import("@playwright/test").Page) {
-  await page.goto("/login");
-  await page.fill('input[type="email"]', STAFF.email);
-  await page.fill('input[type="password"]', STAFF.password);
-  await Promise.all([
-    page
-      .waitForURL((url) => !/\/login(\?|$)/.test(url.toString()), { timeout: 30_000 })
-      .catch(() => undefined),
-    page.getByRole("button", { name: /sign in|log in/i }).click(),
-  ]);
-}
+const STAFF = { email: "staff.lewisham@xpertmoto.com.au", password: "staff1234" };
 
 test.afterAll(async () => {
   await prisma.$disconnect();
@@ -32,7 +21,7 @@ test("staff can upload a CTP document and it updates the vehicle's CTP expiry", 
   const vehicle = await prisma.vehicle.findFirst({ where: { isActive: true, deletedAt: null } });
   test.skip(!vehicle, "No seeded vehicle — run `npm run db:seed`");
 
-  await login(page);
+  await sharedLogin(page, STAFF.email, STAFF.password);
   await page.goto(`/staff/fleet/vehicles/${vehicle!.id}?tab=documents`);
 
   await expect(page.getByRole("heading", { name: /documents/i })).toBeVisible();
@@ -57,8 +46,21 @@ test("staff can upload a CTP document and it updates the vehicle's CTP expiry", 
   await expect(page.getByText("CTP").first()).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText(/valid/i).first()).toBeVisible();
 
-  // Overview tab reflects the updated CTP expiry.
+  // The vehicle's ctpExpiry is the contract — assert it in the DB (display
+  // format drifts; the date does not), then check the Overview tab shows it.
+  await expect
+    .poll(
+      async () =>
+        (
+          await prisma.vehicle.findUnique({
+            where: { id: vehicle!.id },
+            select: { ctpExpiry: true },
+          })
+        )?.ctpExpiry?.toISOString().slice(0, 10),
+      { timeout: 15_000 },
+    )
+    .toBe("2027-06-30");
   await page.getByRole("tab", { name: /overview/i }).click();
   await expect(page.getByText(/CTP expiry/i)).toBeVisible();
-  await expect(page.getByText(/30 Jun 2027/i)).toBeVisible();
+  await expect(page.getByText(/2027/).first()).toBeVisible();
 });

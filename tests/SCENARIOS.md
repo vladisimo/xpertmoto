@@ -24,8 +24,8 @@ Legend:
 | A6 | Licence verification workflow | Covered | `tests/unit/trpc/router/staff-customer.test.ts` |
 | A7 | Licence expiry reminders (30/14/7 day windows) | Implemented, not unit-tested | `src/server/jobs/licence-expiry.ts` — job hits prisma directly; would need a DB integration test |
 | A8 | Suspended / banned user gated from sending notifications | Covered | `tests/unit/consent.test.ts` |
-| A9 | Role-based route protection (customer→staff, staff→admin) | Covered (implicit) | Next.js layout guards; not in automated tests |
-| A10 | GAP: password reset, magic link, email/phone verify, 2FA, rate-limit | GAP | `tests/unit/_gaps.test.ts` |
+| A9 | Role-based route protection (customer→staff, staff→admin) | Covered | Per-role route sweeps (`tests/e2e/{public,customer,staff,admin}/route-sweep.spec.ts`) assert no auth bounce + content mounts for ~165 routes per role |
+| A10 | Password reset (request → token → reset → reuse rejected) | Covered (e2e) | `tests/e2e/password-reset.spec.ts` — token read from VerificationToken; magic link / email-phone verify / 2FA-enrol UI remain GAP (`tests/unit/_gaps.test.ts`) |
 
 ## B. Public booking wizard (customer)
 

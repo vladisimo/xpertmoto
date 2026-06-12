@@ -1,5 +1,7 @@
-import { test, expect } from "@playwright/test";
-import { prisma } from "../../src/lib/prisma";
+import { test, expect } from "./_fixtures/test";
+import { login } from "./_fixtures/login";
+import { totpNow } from "./_fixtures/totp";
+import { e2ePrisma as prisma } from "./_fixtures/db";
 
 /**
  * Auth + role-protected-route tests. Assumes the seed script has been
@@ -9,19 +11,12 @@ import { prisma } from "../../src/lib/prisma";
  */
 
 const CUSTOMER = { email: "sarah.smith@example.com", password: "customer1234" };
-const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
+const STAFF = { email: "staff.lewisham@xpertmoto.com.au", password: "staff1234" };
 const ADMIN = { email: "admin@xpertmoto.com.au", password: "admin1234" };
 // Re-used as a "dual access" user — a MANAGER (back-office role) who also
 // has a customerProfile attached in beforeAll. Triggers the /portal-select
 // flow without polluting the always-back-office STAFF / ADMIN cases above.
-const DUAL = { email: "manager.gold-coast@xpertmoto.com.au", password: "staff1234" };
-
-async function login(page: import("@playwright/test").Page, email: string, password: string) {
-  await page.goto("/login");
-  await page.fill('input[type="email"]', email);
-  await page.fill('input[type="password"]', password);
-  await page.getByRole("button", { name: /sign in|log in/i }).click();
-}
+const DUAL = { email: "manager.lewisham@xpertmoto.com.au", password: "staff1234" };
 
 test("customer login reaches dashboard", async ({ page }) => {
   await login(page, CUSTOMER.email, CUSTOMER.password);
@@ -30,14 +25,21 @@ test("customer login reaches dashboard", async ({ page }) => {
 });
 
 test("staff login reaches staff area", async ({ page }) => {
-  await login(page, STAFF.email, STAFF.password);
-  await page.waitForURL(/staff/i, { timeout: 10_000 }).catch(() => undefined);
+  await login(page, STAFF.email, STAFF.password, { expectedUrl: /staff|portal-select/i });
+  // Back-office users with a customerProfile land on the portal selector.
+  if (/portal-select/.test(page.url())) {
+    await page.getByRole("link", { name: /staff portal/i }).click();
+  }
+  await page.waitForURL(/staff/i, { timeout: 15_000 });
   await expect(page.locator("body")).toContainText(/pickup|return|booking/i);
 });
 
 test("admin login reaches admin area", async ({ page }) => {
-  await login(page, ADMIN.email, ADMIN.password);
-  await page.waitForURL(/admin/i, { timeout: 10_000 }).catch(() => undefined);
+  await login(page, ADMIN.email, ADMIN.password, { expectedUrl: /admin|portal-select/i });
+  if (/portal-select/.test(page.url())) {
+    await page.getByRole("link", { name: /admin portal/i }).click();
+  }
+  await page.waitForURL(/admin/i, { timeout: 15_000 });
   await expect(page.locator("body")).toContainText(/dashboard|revenue|reports/i);
 });
 
@@ -100,7 +102,7 @@ test.describe("/portal-select — dual-access (back-office + customerProfile)", 
 
   test("dual-access user lands on /portal-select with Customer + Staff tiles", async ({ page }) => {
     await login(page, DUAL.email, DUAL.password);
-    await page.waitForURL(/portal-select/i, { timeout: 10_000 });
+    await page.waitForURL(/portal-select/i, { timeout: 30_000 });
     await expect(page.getByRole("link", { name: /customer portal/i })).toBeVisible();
     await expect(page.getByRole("link", { name: /staff portal/i })).toBeVisible();
     // MANAGER must NOT see Admin Portal — only ADMIN / SUPER_ADMIN do.
@@ -108,10 +110,15 @@ test.describe("/portal-select — dual-access (back-office + customerProfile)", 
   });
 
   test("picking Staff Portal navigates to /staff/dashboard", async ({ page }) => {
-    await login(page, DUAL.email, DUAL.password);
-    await page.waitForURL(/portal-select/i, { timeout: 10_000 });
-    await page.getByRole("link", { name: /staff portal/i }).click();
-    await page.waitForURL(/staff/i, { timeout: 10_000 });
+    await login(page, DUAL.email, DUAL.password, { expectedUrl: /portal-select|staff/i });
+    // /portal-select self-forwards when it decides only one portal is
+    // usable (e.g. the customer profile still requires onboarding) — accept
+    // either the selector (click through) or a direct staff landing.
+    if (/portal-select/i.test(page.url())) {
+      await page.getByRole("link", { name: /staff portal/i }).click();
+    }
+    // Generous: first compile of /staff/dashboard on a cold dev server.
+    await page.waitForURL(/staff/i, { timeout: 30_000 });
     await expect(page.locator("body")).toContainText(/pickup|return|booking/i);
   });
 
@@ -120,6 +127,11 @@ test.describe("/portal-select — dual-access (back-office + customerProfile)", 
     await page.fill('input[type="email"]', DUAL.email);
     await page.fill('input[type="password"]', DUAL.password);
     await page.getByRole("button", { name: /sign in|log in/i }).click();
+    // Back-office user → TOTP step before sign-in completes.
+    const totpInput = page.locator("#totpCode");
+    await totpInput.waitFor({ state: "visible", timeout: 15_000 });
+    await totpInput.fill(totpNow());
+    await totpInput.press("Enter");
     // Even with an explicit callbackUrl, the dual-access user must land
     // on the selector — per spec, deep-links are intentionally dropped.
     await page.waitForURL(/portal-select/i, { timeout: 10_000 });

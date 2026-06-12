@@ -1,5 +1,6 @@
-import { test as base, type Page, type BrowserContext } from "@playwright/test";
+import { type Page, type Browser, type BrowserContext } from "@playwright/test";
 import { STORAGE_STATE } from "../../../playwright.config";
+import { test as guardTest, attachGuard, type BrowserIssue } from "./browser-guard";
 
 type RoleContexts = {
   customerPage: Page;
@@ -14,28 +15,35 @@ type RoleContexts = {
   freshCustomerEmail: string;
 };
 
-async function newContextFromState(
-  browser: import("@playwright/test").Browser,
-  storageState: string,
+// Role fixtures create their own contexts (bypassing the guarded default
+// `context` fixture), so each attaches the browser-issue guard itself. Issues
+// land in the test's shared `browserIssues` sink.
+async function newGuardedContext(
+  browser: Browser,
+  sink: BrowserIssue[],
+  baseURL: string | undefined,
+  storageState?: string,
 ): Promise<BrowserContext> {
-  return browser.newContext({ storageState });
+  const ctx = await browser.newContext(storageState ? { storageState } : {});
+  if (baseURL) attachGuard(ctx, sink, baseURL);
+  return ctx;
 }
 
-export const test = base.extend<RoleContexts>({
-  customerPage: async ({ browser }, use) => {
-    const ctx = await newContextFromState(browser, STORAGE_STATE.customer);
+export const test = guardTest.extend<RoleContexts>({
+  customerPage: async ({ browser, browserIssues, baseURL }, use) => {
+    const ctx = await newGuardedContext(browser, browserIssues, baseURL, STORAGE_STATE.customer);
     const page = await ctx.newPage();
     await use(page);
     await ctx.close();
   },
-  staffPage: async ({ browser }, use) => {
-    const ctx = await newContextFromState(browser, STORAGE_STATE.staff);
+  staffPage: async ({ browser, browserIssues, baseURL }, use) => {
+    const ctx = await newGuardedContext(browser, browserIssues, baseURL, STORAGE_STATE.staff);
     const page = await ctx.newPage();
     await use(page);
     await ctx.close();
   },
-  adminPage: async ({ browser }, use) => {
-    const ctx = await newContextFromState(browser, STORAGE_STATE.admin);
+  adminPage: async ({ browser, browserIssues, baseURL }, use) => {
+    const ctx = await newGuardedContext(browser, browserIssues, baseURL, STORAGE_STATE.admin);
     const page = await ctx.newPage();
     await use(page);
     await ctx.close();
@@ -44,8 +52,8 @@ export const test = base.extend<RoleContexts>({
     const email = `e2e+${Date.now()}-${Math.random().toString(36).slice(2, 8)}@xpertmoto.test`;
     await use(email);
   },
-  freshCustomerPage: async ({ browser, freshCustomerEmail }, use) => {
-    const ctx = await browser.newContext();
+  freshCustomerPage: async ({ browser, browserIssues, baseURL, freshCustomerEmail }, use) => {
+    const ctx = await newGuardedContext(browser, browserIssues, baseURL);
     const page = await ctx.newPage();
     await page.goto("/register");
     await page.fill('input[type="email"]', freshCustomerEmail);

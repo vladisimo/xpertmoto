@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures/test";
+import { login as sharedLogin } from "./_fixtures/login";
 
 /**
  * Mid-rental vehicle swap — wizard reachability smoke.
@@ -14,15 +15,7 @@ import { test, expect } from "@playwright/test";
  * Skips gracefully when the seed doesn't expose a swappable booking.
  */
 
-const STAFF = { email: "staff.gold-coast@xpertmoto.com.au", password: "staff1234" };
-
-async function login(page: import("@playwright/test").Page) {
-  await page.goto("/login");
-  await page.fill('input[type="email"]', STAFF.email);
-  await page.fill('input[type="password"]', STAFF.password);
-  await page.getByRole("button", { name: /sign in|log in/i }).click();
-  await page.waitForURL(/staff/i, { timeout: 10_000 }).catch(() => undefined);
-}
+const STAFF = { email: "staff.lewisham@xpertmoto.com.au", password: "staff1234" };
 
 async function findSwappableBookingId(
   page: import("@playwright/test").Page,
@@ -60,7 +53,7 @@ async function findSwappableBookingId(
 }
 
 test("swap wizard loads at the Reason step with Reason + Origin selects", async ({ page }) => {
-  await login(page);
+  await sharedLogin(page, STAFF.email, STAFF.password);
 
   const bookingId = await findSwappableBookingId(page);
   if (!bookingId) {
@@ -97,7 +90,7 @@ test("swap wizard loads at the Reason step with Reason + Origin selects", async 
 });
 
 test("swap wizard shows a Cancel swap action", async ({ page }) => {
-  await login(page);
+  await sharedLogin(page, STAFF.email, STAFF.password);
   const bookingId = await findSwappableBookingId(page);
   if (!bookingId) {
     test.skip(true, "No swappable booking seeded — skipping.");

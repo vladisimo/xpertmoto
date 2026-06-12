@@ -77,9 +77,10 @@ async function main() {
   // Tax-document rendering hard-fails without legalName + ABN, so seed them
   // here in lock-step with the Organisation row. `update: {}` preserves any
   // values already configured through Admin → Settings.
-  // NOTE: verify the invoicing entity before launch — Organisation data says
-  // "XPERT Moto Group Pty Ltd / 72 629 456 408" while the platform contract
-  // names Mercury Road Equipment Pty Ltd / 36 614 422 187.
+  // Entity confirmed with the owner (2026-06-12): XPERT Moto Group Pty Ltd
+  // (ABN 72 629 456 408) runs the hire business and is the invoicing
+  // entity. Mercury Road Equipment Pty Ltd is only the platform vendor and
+  // must never appear on customer tax documents.
   const orgSettings: Array<{ key: string; value: string }> = [
     { key: "org.tradingName", value: "XPERT Moto" },
     { key: "org.legalName", value: "XPERT Moto Group Pty Ltd" },
@@ -541,11 +542,13 @@ async function main() {
         make: m.make,
         model: m.model,
         year: vehicleYear,
-        colour: rand(colours),
+        colour: colours[i % colours.length]!,
         categoryId: cat.id,
         modelId: linkedModelId,
         depotId: depot.id,
-        status: rand(statuses),
+        // Deterministic rotation (not rand) — e2e specs depend on a stable
+        // mix of AVAILABLE/RENTED/IN_MAINTENANCE vehicles being present.
+        status: statuses[i % statuses.length]!,
         currentOdometerKm: 500 + i * 1500,
         purchaseDate: new Date(2020 + (i % 6), 0, 1),
         purchasePrice: 4000 + i * 150,
@@ -590,9 +593,12 @@ async function main() {
 
     const subtotal = Number(cat.baseDailyRate) * duration;
     const gst = subtotal / 11;
-    const status: BookingStatus = rand([
+    // Deterministic rotation (not rand) — e2e specs self-skip when no booking
+    // in a given status exists, so the status mix must be stable run-to-run.
+    const statusCycle: BookingStatus[] = [
       "COMPLETED", "COMPLETED", "COMPLETED", "CONFIRMED", "ACTIVE", "CANCELLED", "PENDING_PAYMENT",
-    ] as BookingStatus[]);
+    ];
+    const status: BookingStatus = statusCycle[i % statusCycle.length]!;
 
     let assignedVehicle: (typeof vehicles)[number] | null = null;
     if (VEHICLE_REQUIRED_STATUSES.includes(status)) {
@@ -614,7 +620,7 @@ async function main() {
         pickupDepotId: depot.id,
         returnDepotId: depot.id,
         status,
-        source: rand(["WEBSITE", "WALK_IN", "PHONE"] as const),
+        source: (["WEBSITE", "WALK_IN", "PHONE"] as const)[i % 3]!,
         pickupDateTime: pickup,
         returnDateTime: ret,
         actualPickupDateTime: assignedVehicle ? pickup : undefined,
@@ -655,9 +661,9 @@ async function main() {
         workOrderNumber: `WO-${String(100000 + i)}`,
         vehicleId: v.id,
         depotId: v.depotId,
-        type: rand(["ROUTINE_SERVICE", "TYRE_REPLACEMENT", "BRAKE_SERVICE", "BATTERY"] as const),
-        priority: rand(["LOW", "MEDIUM", "HIGH"] as const),
-        status: rand(["OPEN", "ASSIGNED", "IN_PROGRESS", "COMPLETED"] as const),
+        type: (["ROUTINE_SERVICE", "TYRE_REPLACEMENT", "BRAKE_SERVICE", "BATTERY"] as const)[i % 4]!,
+        priority: (["LOW", "MEDIUM", "HIGH"] as const)[i % 3]!,
+        status: (["OPEN", "ASSIGNED", "IN_PROGRESS", "COMPLETED"] as const)[i % 4]!,
         title: "Scheduled maintenance",
         description: "Routine check and servicing",
         estimatedHours: 2,

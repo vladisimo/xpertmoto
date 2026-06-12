@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./_fixtures/test";
 
 /**
  * G15 — Staff check-in with damage assessed, bond captured.

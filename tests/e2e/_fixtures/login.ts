@@ -18,15 +18,53 @@ export async function login(
   await page.fill('input[type="password"]', password);
   await page.getByRole("button", { name: /sign in|log in/i }).click();
 
+  // Two outcomes from the credentials submit: credentials-only accounts
+  // navigate away from /login; TOTP-enrolled back-office accounts reveal the
+  // #totpCode step (after an auth.preauth round-trip that can take >5s on a
+  // cold dev server — don't time this out tightly, and never swallow a
+  // missing TOTP step silently: a back-office login stuck on the 2FA form
+  // used to "pass" the fixture and fail the spec with a confusing assertion).
+  // 60s: the very first cold hit pays for compiling /login, auth.preauth,
+  // and whatever routes the parallel setup workers are forcing at the same
+  // time — 20s starves out on a cold `next dev`.
   const totpInput = page.locator("#totpCode");
-  // The second step is gated client-side behind a preauth round-trip; give it a
-  // moment to appear. If it never does, this account has no TOTP — carry on.
-  try {
-    await totpInput.waitFor({ state: "visible", timeout: 5_000 });
-    await totpInput.fill(totpNow(opts.totpSecret));
-    await page.getByRole("button", { name: /verify and sign in|verify/i }).click();
-  } catch {
-    // No TOTP step — credentials-only account (e.g. seeded customers).
+  const outcome = await Promise.race([
+    totpInput
+      .waitFor({ state: "visible", timeout: 60_000 })
+      .then(() => "totp" as const)
+      .catch(() => "none" as const),
+    page
+      .waitForURL(/^(?!.*\/login).*$/, { timeout: 60_000 })
+      .then(() => "navigated" as const)
+      .catch(() => "none" as const),
+  ]);
+  if (outcome === "none") {
+    throw new Error(
+      `login(${email}): credentials submit produced neither a TOTP step nor a navigation within 60s (still at ${page.url()})`,
+    );
+  }
+  // The TOTP challenge appears either as the login form's in-page second step
+  // OR as a redirect to /verify-2fa-step-up (pending2fa session) — both render
+  // #totpCode. Submit with Enter (like a human) and retry once with a fresh
+  // code — a code generated at second 29 of its window can expire in flight.
+  if (outcome === "totp" || /verify-2fa-step-up/.test(page.url())) {
+    await totpInput.waitFor({ state: "visible", timeout: 10_000 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await totpInput.fill(totpNow(opts.totpSecret));
+      await totpInput.press("Enter");
+      const left = await page
+        .waitForURL((u) => !/\/(login|verify-2fa-step-up)(\?|$)/.test(new URL(u).pathname), {
+          timeout: 8_000,
+        })
+        .then(() => true)
+        .catch(() => false);
+      if (left) break;
+      if (attempt === 1) {
+        throw new Error(
+          `login(${email}): TOTP verification did not leave the 2FA step after 2 attempts (at ${page.url()})`,
+        );
+      }
+    }
   }
 
   await page.waitForURL(opts.expectedUrl ?? /^(?!.*\/login).*$/, { timeout: 20_000 });

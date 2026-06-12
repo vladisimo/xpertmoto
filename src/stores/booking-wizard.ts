@@ -166,18 +166,25 @@ export function isCustomerComplete(
 ): boolean {
   if (!customer.firstName || !customer.lastName) return false;
   if (!customer.email || !customer.dateOfBirth) return false;
-  if (!identityPath) return false;
-  if (identityPath === "AU_LICENCE") {
-    return !!(customer.licenceNumber && customer.licenceState && customer.licenceExpiry);
+  const licenceOk = !!(customer.licenceNumber && customer.licenceState && customer.licenceExpiry);
+  if (identityPath === "AU_LICENCE") return licenceOk;
+  if (identityPath === "INTERNATIONAL") {
+    // IDP + passport both required.
+    return !!(
+      customer.licenceNumber &&
+      customer.licenceCountry &&
+      customer.licenceExpiry &&
+      customer.passportNumber &&
+      customer.passportExpiry
+    );
   }
-  // INTERNATIONAL — IDP + passport both required.
-  return !!(
-    customer.licenceNumber &&
-    customer.licenceCountry &&
-    customer.licenceExpiry &&
-    customer.passportNumber &&
-    customer.passportExpiry
-  );
+  // identityPath null — legacy mode (wizard_intl_licence_flow off, or a
+  // profile saved before licenceType existed). Mirror detailsStepSchema's
+  // documented flag-off rule: at least one valid ID (licence OR passport)
+  // is sufficient. Requiring identityPath here left such customers silently
+  // stuck at step 4: w.next() clamped back to 4 with no visible error.
+  const passportOk = !!(customer.passportNumber && customer.passportExpiry);
+  return licenceOk || passportOk;
 }
 
 /**

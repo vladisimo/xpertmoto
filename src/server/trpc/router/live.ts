@@ -371,10 +371,31 @@ export const liveRouter = createTRPCRouter({
               trafficChannel,
               ...wizardColumns.createData,
             };
-            return ctx.prisma.visitorSession.create({
-              data,
-              include: { user: { select: { firstName: true, lastName: true } } },
-            });
+            try {
+              return await ctx.prisma.visitorSession.create({
+                data,
+                include: { user: { select: { firstName: true, lastName: true } } },
+              });
+            } catch (e) {
+              // Concurrent first-heartbeats for one visitor (layout + page
+              // components fire together on first load) race this create;
+              // the losers hit the id unique constraint. The winner owns
+              // the create — downgrade losers to a plain touch instead of
+              // bubbling a 500.
+              if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") {
+                throw e;
+              }
+              return await ctx.prisma.visitorSession.update({
+                where: { id: vid },
+                data: {
+                  currentPath: input.path,
+                  wizardStep: input.wizardStep ?? null,
+                  lastSeenAt: now,
+                  userId: ctx.session?.user?.id ?? undefined,
+                },
+                include: { user: { select: { firstName: true, lastName: true } } },
+              });
+            }
           })()
         : await ctx.prisma.visitorSession.update({
             where: { id: vid },

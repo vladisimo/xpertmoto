@@ -8,13 +8,14 @@ import { StaffTodayTab } from "@/components/staff/staff-today-tab";
 
 function TabPlaceholder() {
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="h-32 animate-pulse rounded-md bg-muted" />
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="h-32 animate-pulse rounded-lg bg-muted" />
         ))}
       </div>
-      <div className="min-h-[20rem] flex-1 animate-pulse rounded-md bg-muted" />
+      <div className="min-h-[14rem] flex-1 animate-pulse rounded-lg bg-muted" />
+      <div className="min-h-[12rem] flex-1 animate-pulse rounded-lg bg-muted" />
     </div>
   );
 }

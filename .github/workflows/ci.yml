@@ -106,6 +106,13 @@ jobs:
       PORT: "3137"
       E2E_NO_RESEED: "1"
       NEXT_DIST_DIR: .next-e2e
+      # Deterministic TOTP so the auth.setup project can pass the forced-2FA
+      # gate for staff/admin (must match tests/e2e/_fixtures/totp.ts).
+      E2E_TOTP_SECRET: GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+      # Every Playwright worker logs in from localhost — without this the
+      # auth:preauth IP bucket 429s the setup project on retries. Honoured
+      # only for localhost APP_URL (src/lib/rate-limit.ts).
+      LOADTEST_RATELIMIT_OFF: "1"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
@@ -122,9 +129,14 @@ jobs:
           DATABASE_URL=postgresql://postgres:postgres@localhost:5432/xpertmoto_e2e
           REDIS_URL=redis://localhost:6379/3
           NEXT_DIST_DIR=.next-e2e
+          E2E_TOTP_SECRET=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+          LOADTEST_RATELIMIT_OFF=1
           ENV
       - run: npm run db:reset:e2e
-      - run: npm run test:e2e:smoke
+      # Route sweeps (every page per role, strict browser-error guard) +
+      # auth/portal + the stub-Stripe booking funnel. Stripe-real specs are
+      # local-only (test:e2e:stripe).
+      - run: npm run test:e2e:critical
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

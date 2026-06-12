@@ -4,20 +4,20 @@ import {
   AlertOctagon,
   AlertTriangle,
   Bike,
-  Clock,
+  CheckCircle2,
   Disc,
   ImageIcon,
   LogIn,
   LogOut,
-  Send,
-  ShieldAlert,
   type LucideIcon,
 } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { NotReturnedBikes } from "@/components/staff/not-returned-bikes";
+import { StaffDashboardStats } from "@/components/staff/staff-dashboard-stats";
 import { CalendarMistakesView } from "@/components/staff/calendar-mistakes";
 import { TyreAlerts } from "@/components/staff/tyre-alerts";
 import { findNotReturnedBookings } from "@/server/services/staff-ops-signals";
@@ -64,6 +64,7 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
     fleetVehicles,
     mistakes,
     tyreAlerts,
+    fleetSize,
   ] = await Promise.all([
     prisma.booking.findMany({
       where: {
@@ -104,174 +105,202 @@ export async function StaffTodayTab({ depotId }: { depotId?: string }) {
     }),
     getCalendarMistakes(depotId),
     getTyreAlerts(depotId),
+    prisma.vehicle.count({
+      where: { isActive: true, ...(depotId ? { depotId } : {}) },
+    }),
   ]);
 
   // Overdue signals — merged in from the former Overdue tab. The not-returned
-  // query shares the Today "Overdue" definition, so derive the count from it.
+  // query shares the Today "Overdue" definition, so derive the counts from it.
   const overdueCount = overdueRows.length;
-  const noticeSent = overdueRows.filter((r) => r.overdueStage >= 1).length;
-  const managerEscalation = overdueRows.filter(
-    (r) => r.overdueStage >= 3,
-  ).length;
-  const over24h = overdueRows.filter((r) => r.hoursOverdue >= 24).length;
+  const stats = {
+    pickups: pickups.length,
+    returns: returns.length,
+    active: activeCount,
+    overdue: {
+      total: overdueCount,
+      due: overdueRows.filter((r) => r.overdueStage < 1).length,
+      noticeSent: overdueRows.filter(
+        (r) => r.overdueStage >= 1 && r.overdueStage < 3,
+      ).length,
+      escalated: overdueRows.filter((r) => r.overdueStage >= 3).length,
+      over24h: overdueRows.filter((r) => r.hoursOverdue >= 24).length,
+    },
+    fleet: {
+      total: fleetSize,
+      needsAttention: fleetAttentionCount,
+      calendarMistakes: mistakes.total,
+      tyreAlerts: tyreAlerts.length,
+    },
+  };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto lg:overflow-hidden">
-      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-        <StatCard title="Today's movements">
-          <StatTile label="Pickups" value={pickups.length} icon={LogOut} />
-          <StatTile label="Returns" value={returns.length} icon={LogIn} />
-          <StatTile label="Active" value={activeCount} icon={Bike} />
-          <StatTile
-            label="Overdue"
-            value={overdueCount}
-            icon={AlertTriangle}
-            tone={overdueCount > 0 ? "warn" : undefined}
-          />
-        </StatCard>
-        <StatCard title="Overdue escalation">
-          <StatTile
-            label="Not returned"
-            value={overdueCount}
-            icon={AlertOctagon}
-            tone={overdueCount > 0 ? "warn" : undefined}
-          />
-          <StatTile label="Notice sent" value={noticeSent} icon={Send} />
-          <StatTile
-            label="Manager escalation"
-            value={managerEscalation}
-            icon={ShieldAlert}
-            tone={managerEscalation > 0 ? "warn" : undefined}
-          />
-          <StatTile
-            label="Over 24 hours"
-            value={over24h}
-            icon={Clock}
-            tone={over24h > 0 ? "warn" : undefined}
-          />
-        </StatCard>
-        <StatCard title="Fleet & maintenance">
-          <StatTile
-            label="Fleet attention"
-            value={fleetAttentionCount}
-            icon={Bike}
-            tone={fleetAttentionCount > 0 ? "warn" : undefined}
-          />
-          <StatTile
-            label="Calendar mistakes"
-            value={mistakes.total}
-            icon={AlertOctagon}
-            tone={mistakes.total > 0 ? "warn" : undefined}
-          />
-          <StatTile
-            label="Tyre alerts"
-            value={tyreAlerts.length}
-            icon={Disc}
-            tone={tyreAlerts.length > 0 ? "warn" : undefined}
-          />
-        </StatCard>
-      </div>
+    // Viewport-fit when there is room (the min-h floors keep every card
+    // usable); on shorter screens (landing-bay iPads) the whole tab scrolls
+    // instead of crushing the card bodies.
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+      <StaffDashboardStats data={stats} />
 
-      <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
-        <ScrollCard title="Today's pickups" count={pickups.length}>
-          {pickups.length > 0 && (
-            <div className="flex flex-col gap-2">
-              {pickups.map((b) => (
-                <BookingRow
-                  key={b.id}
-                  b={b}
-                  kind="pickup"
-                  action="Check out"
-                  href={`/staff/bookings/${b.id}/check-out`}
-                />
-              ))}
-            </div>
-          )}
-        </ScrollCard>
-        <ScrollCard title="Today's returns" count={returns.length}>
-          {returns.length > 0 && (
-            <div className="flex flex-col gap-2">
-              {returns.map((b) => (
-                <BookingRow
-                  key={b.id}
-                  b={b}
-                  kind="return"
-                  action="Check in"
-                  href={`/staff/bookings/${b.id}/check-in`}
-                />
-              ))}
-            </div>
-          )}
-        </ScrollCard>
-        <ScrollCard title="Not returned" count={overdueCount}>
-          <NotReturnedBikes rows={overdueRows} />
-        </ScrollCard>
-      </div>
-
-      <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
-        <ScrollCard
-          title="Vehicles needing attention"
-          description="Rego / CTP / insurance within 30 days, or service within 14."
-          contentClassName="flex flex-col gap-1.5"
-        >
-          {fleetVehicles.length === 0 ? (
-            <EmptyState
-              icon={Bike}
-              title="Fleet is current"
-              hint="No rego, CTP, insurance or service due soon."
-            />
-          ) : (
-            fleetVehicles.map((v) => (
-              <FleetRow
-                key={v.id}
-                v={v}
-                chips={attentionChips(v, now, in30, in14)}
+      <div className="flex shrink-0 flex-col gap-2 lg:min-h-[18rem] lg:flex-[5]">
+        <p className="eyebrow shrink-0">Today&apos;s run sheet</p>
+        <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
+          <ScrollCard icon={LogOut} title="Pickups" count={pickups.length}>
+            {pickups.length === 0 ? (
+              <EmptyState
+                icon={LogOut}
+                title="No pickups today"
+                hint="Confirmed bookings due out will appear here."
               />
-            ))
-          )}
-        </ScrollCard>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {pickups.map((b) => (
+                  <BookingRow
+                    key={b.id}
+                    b={b}
+                    kind="pickup"
+                    action="Check out"
+                    href={`/staff/bookings/${b.id}/check-out`}
+                  />
+                ))}
+              </div>
+            )}
+          </ScrollCard>
+          <ScrollCard icon={LogIn} title="Returns" count={returns.length}>
+            {returns.length === 0 ? (
+              <EmptyState
+                icon={LogIn}
+                title="No returns due today"
+                hint="Active hires due back will appear here."
+              />
+            ) : (
+              <div className="flex flex-col gap-2">
+                {returns.map((b) => (
+                  <BookingRow
+                    key={b.id}
+                    b={b}
+                    kind="return"
+                    action="Check in"
+                    href={`/staff/bookings/${b.id}/check-in`}
+                  />
+                ))}
+              </div>
+            )}
+          </ScrollCard>
+          <ScrollCard
+            icon={AlertTriangle}
+            title="Not returned"
+            count={overdueCount}
+            alert
+          >
+            {overdueCount === 0 ? (
+              <EmptyState
+                icon={CheckCircle2}
+                title="All bikes accounted for"
+                hint="No hires are past their return time."
+              />
+            ) : (
+              <NotReturnedBikes rows={overdueRows} />
+            )}
+          </ScrollCard>
+        </div>
+      </div>
 
-        <ScrollCard
-          title="Calendar mistakes"
-          description="Booking ↔ vehicle ↔ maintenance inconsistencies."
-        >
-          <CalendarMistakesView data={mistakes} />
-        </ScrollCard>
+      <div className="flex shrink-0 flex-col gap-2 lg:min-h-[16rem] lg:flex-[4]">
+        <p className="eyebrow shrink-0">Fleet health</p>
+        <div className="flex flex-col gap-3 lg:min-h-0 lg:flex-1 lg:flex-row">
+          <ScrollCard
+            icon={Bike}
+            title="Vehicles needing attention"
+            count={fleetAttentionCount}
+            alert
+            description="Rego / CTP / insurance within 30 days, or service within 14."
+            contentClassName="flex flex-col gap-2"
+          >
+            {fleetVehicles.length === 0 ? (
+              <EmptyState
+                icon={Bike}
+                title="Fleet is current"
+                hint="No rego, CTP, insurance or service due soon."
+              />
+            ) : (
+              <>
+                {fleetVehicles.map((v) => (
+                  <FleetRow
+                    key={v.id}
+                    v={v}
+                    chips={attentionChips(v, now, in30, in14)}
+                  />
+                ))}
+                {fleetAttentionCount > fleetVehicles.length && (
+                  <Link
+                    href="/staff/fleet"
+                    className="rounded-md px-3 py-2 text-center text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/50"
+                  >
+                    +{fleetAttentionCount - fleetVehicles.length} more — view in
+                    Fleet
+                  </Link>
+                )}
+              </>
+            )}
+          </ScrollCard>
 
-        <ScrollCard
-          title="Tyre alerts"
-          description="Low tread or high km since last replacement."
-        >
-          <TyreAlerts rows={tyreAlerts} />
-        </ScrollCard>
+          <ScrollCard
+            icon={AlertOctagon}
+            title="Calendar mistakes"
+            count={mistakes.total}
+            alert
+            description="Booking ↔ vehicle ↔ maintenance inconsistencies."
+          >
+            <CalendarMistakesView data={mistakes} />
+          </ScrollCard>
+
+          <ScrollCard
+            icon={Disc}
+            title="Tyre alerts"
+            count={tyreAlerts.length}
+            alert
+            description="Low tread or high km since last replacement."
+          >
+            <TyreAlerts rows={tyreAlerts} />
+          </ScrollCard>
+        </div>
       </div>
     </div>
   );
 }
 
 function ScrollCard({
+  icon: Icon,
   title,
   count,
+  alert,
   description,
   contentClassName,
   children,
 }: {
+  icon: LucideIcon;
   title: string;
   count?: number;
+  /** Renders the count pill in the destructive tone while count > 0. */
+  alert?: boolean;
   description?: string;
   contentClassName?: string;
   children: React.ReactNode;
 }) {
   return (
     <Card className="flex min-h-0 flex-col overflow-hidden lg:flex-1">
-      <CardHeader className="shrink-0 pb-2">
-        <CardTitle className="flex items-baseline gap-1.5 text-base">
-          <span>{title}</span>
+      <CardHeader className="shrink-0 space-y-1 pb-2">
+        <CardTitle className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <span className="truncate">{title}</span>
           {count != null && (
-            <span className="text-sm font-normal text-muted-foreground">
-              ({count})
-            </span>
+            <Badge
+              variant={alert && count > 0 ? "destructive" : "outline"}
+              className="px-2 py-0 text-[11px] tabular-nums"
+            >
+              {count}
+            </Badge>
           )}
+          <Icon className="ml-auto h-4 w-4 shrink-0" aria-hidden />
         </CardTitle>
         {description && (
           <p className="text-caption text-muted-foreground">{description}</p>
@@ -406,70 +435,6 @@ function EmptyState({
       <Icon className="h-5 w-5 text-muted-foreground/60" aria-hidden />
       <p className="text-sm font-medium">{title}</p>
       <p className="text-xs text-muted-foreground">{hint}</p>
-    </div>
-  );
-}
-
-function StatCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-      </CardHeader>
-      <CardContent className="grid grid-cols-2 gap-2 p-3 pt-0">
-        {children}
-      </CardContent>
-    </Card>
-  );
-}
-
-function StatTile({
-  label,
-  value,
-  icon: Icon,
-  tone,
-}: {
-  label: string;
-  value: number;
-  icon: LucideIcon;
-  tone?: "warn";
-}) {
-  const active = tone === "warn" && value > 0;
-  return (
-    <div
-      className={`flex items-center gap-2.5 rounded-md border p-2.5 transition-colors ${
-        active
-          ? "border-destructive/30 bg-destructive/5"
-          : "border-border bg-background"
-      }`}
-    >
-      <span
-        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
-          active
-            ? "bg-destructive/10 text-destructive"
-            : "bg-muted text-muted-foreground"
-        }`}
-      >
-        <Icon className="h-4 w-4" aria-hidden />
-      </span>
-      <div className="min-w-0">
-        <div
-          className={`font-display text-xl font-semibold leading-none tracking-tight ${
-            active ? "text-destructive" : "text-foreground"
-          }`}
-        >
-          {value}
-        </div>
-        <div className="truncate text-[11px] text-muted-foreground">
-          {label}
-        </div>
-      </div>
     </div>
   );
 }

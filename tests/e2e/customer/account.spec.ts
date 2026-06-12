@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "../_fixtures/test";
 
 /**
  * Authenticated customer portal (runs with the seeded, fully-onboarded

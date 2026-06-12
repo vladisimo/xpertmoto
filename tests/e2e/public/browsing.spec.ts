@@ -1,5 +1,4 @@
-import { test as base, expect } from "@playwright/test";
-import { test as apiTest } from "../_fixtures/api";
+import { test, expect } from "../_fixtures/test";
 import { bookingRefData } from "../_fixtures/pricing";
 
 /**
@@ -10,8 +9,8 @@ import { bookingRefData } from "../_fixtures/pricing";
  * tests/e2e/booking/ (see the BookingWizard page object).
  */
 
-base.describe("marketing browsing", () => {
-  base("homepage shows brand + primary booking CTA", async ({ page }) => {
+test.describe("marketing browsing", () => {
+  test("homepage shows brand + primary booking CTA", async ({ page }) => {
     await page.goto("/");
     // Brand name is tenant-configurable (getBranding), so assert on the
     // product noun rather than a hardcoded trading name.
@@ -19,7 +18,7 @@ base.describe("marketing browsing", () => {
     await expect(page.getByRole("link", { name: /book now/i }).first()).toBeVisible();
   });
 
-  base("fleet page lists rentable bikes", async ({ page }) => {
+  test("fleet page lists rentable bikes", async ({ page }) => {
     await page.goto("/fleet");
     await expect(page.locator("body")).toContainText(/scooter|motorbike|motorcycle/i);
     await expect(
@@ -27,25 +26,25 @@ base.describe("marketing browsing", () => {
     ).toBeVisible();
   });
 
-  base("a fleet card deep-links into the booking wizard", async ({ page }) => {
+  test("a fleet card deep-links into the booking wizard", async ({ page }) => {
     await page.goto("/fleet");
     await page.locator("article").getByRole("link", { name: /book now/i }).first().click();
     await expect(page).toHaveURL(/\/booking/);
   });
 
-  base("pricing page renders dollar amounts", async ({ page }) => {
+  test("pricing page renders dollar amounts", async ({ page }) => {
     await page.goto("/pricing");
     await expect(page.locator("body")).toContainText(/\$/);
   });
 
-  base("locations page renders depot info", async ({ page }) => {
+  test("locations page renders depot info", async ({ page }) => {
     await page.goto("/locations");
     await expect(page.locator("body")).toContainText(/lewisham/i);
   });
 });
 
-apiTest.describe("booking wizard — first impression", () => {
-  apiTest("step 1 renders and its category rate matches the pricing engine", async ({
+test.describe("booking wizard — first impression", () => {
+  test("step 1 renders and its category rate matches the pricing engine", async ({
     page,
     publicApi,
   }) => {
