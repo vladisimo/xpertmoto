@@ -488,11 +488,15 @@ export const liveRouter = createTRPCRouter({
       const deviceType = session.deviceType;
       const now = new Date();
       await ctx.prisma.visitorEvent.createMany({
-        data: input.events.map((e) => ({
+        data: input.events.map((e, i) => ({
           sessionId: vid,
           kind: e.kind,
           path: e.path,
-          occurredAt: e.occurredAt ? new Date(e.occurredAt) : now,
+          // Per-index offset on the fallback: two same-kind events in one
+          // batch without client timestamps must not share an occurredAt,
+          // or the (sessionId, kind, occurredAt) dedup constraint would
+          // silently drop the second via skipDuplicates.
+          occurredAt: e.occurredAt ? new Date(e.occurredAt) : new Date(now.getTime() + i),
           target: e.target ?? null,
           value: e.value ?? null,
           numericValue: e.numericValue ?? null,

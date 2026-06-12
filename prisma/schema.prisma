@@ -3305,6 +3305,13 @@ model VisitorEvent {
   wizardStep Int?
   deviceType VisitorDeviceType?
 
+  // Dedup guard: the client flush retries on network failure and the
+  // ingest mutation uses createMany({ skipDuplicates: true }), which is a
+  // no-op without a unique constraint — retried batches inflated funnel
+  // counts. The backing unique index also serves (sessionId, kind,
+  // occurredAt) funnel scans. live.ts gives same-batch events distinct
+  // occurredAt fallbacks so this can't collapse two genuine events.
+  @@unique([sessionId, kind, occurredAt])
   @@index([sessionId, occurredAt])
   @@index([kind, occurredAt])
   @@index([path, kind, occurredAt])

@@ -177,3 +177,36 @@ describe("fanOutVisitorEvents", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("live.events — dedup-constraint safety", () => {
+  test("same-batch events without client timestamps get distinct occurredAt fallbacks", async () => {
+    const { liveRouter } = await import("@/server/trpc/router/live");
+    const createMany = vi.fn().mockResolvedValue({ count: 2 });
+    const ctx = {
+      headers: h("xpertmoto_vid=v_1").headers,
+      prisma: {
+        visitorSession: {
+          findUnique: vi
+            .fn()
+            .mockResolvedValue({ id: "v_1", deviceType: "DESKTOP", pickupDepotId: null }),
+        },
+        visitorEvent: { createMany },
+      },
+    };
+    posthogServerEnabled.mockResolvedValue(false);
+
+    const caller = liveRouter.createCaller(ctx as never);
+    const res = await caller.events({
+      events: [
+        { kind: "RAGE_CLICK", path: "/book" },
+        { kind: "RAGE_CLICK", path: "/book" },
+      ],
+    });
+
+    expect(res.ok).toBe(true);
+    const rows = createMany.mock.calls[0]![0].data as Array<{ occurredAt: Date }>;
+    // Without distinct fallbacks the (sessionId, kind, occurredAt) unique
+    // constraint + skipDuplicates would silently drop the second event.
+    expect(rows[0]!.occurredAt.getTime()).not.toBe(rows[1]!.occurredAt.getTime());
+  });
+});
