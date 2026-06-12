@@ -1,5 +1,6 @@
 "use client";
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useForm } from "react-hook-form";
@@ -35,7 +36,13 @@ import {
 import { DataTablePagination } from "@/components/ui/data-table-pagination";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { FormGrid, FormGridRow } from "@/components/forms/form-grid";
-import { UsersStats } from "@/components/admin/users-stats";
+import { LoadingBlock } from "@/components/ui/stat-shell";
+
+// recharts panel — keep it out of the initial bundle until it mounts.
+const UsersStats = dynamic(
+  () => import("@/components/admin/users-stats").then((m) => m.UsersStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
 
 const ROLES = ["CUSTOMER", "STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"] as const;
 const INVITE_ROLES = ["STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"] as const;

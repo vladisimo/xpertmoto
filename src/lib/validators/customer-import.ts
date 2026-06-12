@@ -88,7 +88,16 @@ const optionalDate = z.preprocess((v) => {
 }, z.date().optional());
 
 const phoneSchema = z.preprocess(
-  emptyToUndefined,
+  (v) => {
+    const s = emptyToUndefined(v);
+    // Excel numeric cells (sheet_to_json raw:true) arrive as numbers with
+    // the leading zero eaten — 0412 345 678 becomes 412345678. Every AU
+    // local number starts with 0, so restore it; string cells untouched.
+    if (typeof s === "number" && Number.isInteger(s) && s > 0) {
+      return `0${s}`;
+    }
+    return s;
+  },
   z
     .string()
     .optional()
@@ -150,6 +159,9 @@ export const customerImportRowSchema = z.object({
     (v) => {
       const s = emptyToUndefined(v);
       if (typeof s !== "string" && typeof s !== "number") return s;
+      // Numeric Excel cells drop leading zeros (NT postcode 0800 → 800);
+      // re-pad to 4 digits. Typed strings stay strict.
+      if (typeof s === "number") return String(s).padStart(4, "0");
       return String(s).trim();
     },
     z

@@ -6,6 +6,7 @@ import type { StaffTaskType } from "@prisma/client";
 import { trpc } from "@/lib/trpc/client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { DataTableSortState } from "@/components/ui/data-table";
+import { useStaggeredInterval } from "@/hooks/use-staggered-interval";
 import { ResumeBanner } from "./resume-banner";
 import { AbandonDialog } from "./abandon-dialog";
 import { QueueTab } from "./queue-tab";
@@ -99,8 +100,9 @@ export function TasksClient({ depotId }: { depotId: string | null }) {
     [router, searchParams],
   );
 
+  const activeRefetchMs = useStaggeredInterval(30_000);
   const activeQuery = trpc.staffTask.myActive.useQuery(undefined, {
-    refetchInterval: 30_000,
+    refetchInterval: activeRefetchMs,
   });
 
   const utils = trpc.useUtils();

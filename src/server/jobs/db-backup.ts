@@ -146,6 +146,14 @@ export function startDbBackupScheduler() {
 
   const q = getQueue(QUEUE);
   if (q) {
+    // Scheduling note: the retention sweep below is pinned to 03:15 Brisbane
+    // on the assumption the backup ran at the 03:00 default. If you override
+    // BACKUP_CRON to a later slot, retention prunes BEFORE that night's dump
+    // lands — never data-loss (it keeps the newest N days by mtime), but the
+    // oldest retained backup is one night shorter than configured until the
+    // next sweep. Move both together if the window matters. Shares the 03:00
+    // hour with platform-sentry-stats (03:45) — pg_dump I/O is the heavy one,
+    // keep other disk-heavy jobs out of this slot.
     const schedule = process.env.BACKUP_CRON ?? "0 3 * * *";
     monitorCron(QUEUE, schedule);
     q.add(

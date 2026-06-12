@@ -26,7 +26,14 @@ import {
   IntegrationsTabOperations,
   IntegrationsTabApiKeys,
 } from "@/components/admin/integration-tabs";
-import { IntegrationsStats } from "@/components/admin/integrations-stats";
+import dynamic from "next/dynamic";
+import { LoadingBlock } from "@/components/ui/stat-shell";
+
+// recharts panel — keep it out of the initial bundle until it mounts.
+const IntegrationsStats = dynamic(
+  () => import("@/components/admin/integrations-stats").then((m) => m.IntegrationsStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
 import { useBranding } from "@/components/shared/branding-provider";
 
 const TABS = [

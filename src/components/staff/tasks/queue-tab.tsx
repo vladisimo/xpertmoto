@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { TASK_TYPE_LABEL } from "@/lib/tasks/tiers";
 import { cn, formatDateTime } from "@/lib/utils";
+import { useStaggeredInterval } from "@/hooks/use-staggered-interval";
 import { TasksStats } from "./tasks-stats";
 import { AbandonDialog } from "./abandon-dialog";
 
@@ -84,13 +85,14 @@ export function QueueTab({
   const router = useRouter();
   const utils = trpc.useUtils();
 
+  const listRefetchMs = useStaggeredInterval(30_000);
   const listQuery = trpc.staffTask.list.useQuery(
     {
       depotId: depotId ?? undefined,
       onlyMine,
       tiers: tierFilter === "ALL" ? undefined : [tierFilter],
     },
-    { refetchInterval: 30_000 },
+    { refetchInterval: listRefetchMs },
   );
 
   const start = trpc.staffTask.start.useMutation({

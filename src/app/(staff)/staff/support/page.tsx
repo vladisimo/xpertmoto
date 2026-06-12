@@ -10,8 +10,18 @@ import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Lightbulb, Ticket } from "lucide-react";
-import { SupportStats } from "@/components/staff/support-stats";
-import { AdminSupportStats } from "@/components/admin/admin-support-stats";
+import dynamic from "next/dynamic";
+import { LoadingBlock } from "@/components/ui/stat-shell";
+
+// recharts panels — keep them out of the initial bundle until they mount.
+const SupportStats = dynamic(
+  () => import("@/components/staff/support-stats").then((m) => m.SupportStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
+const AdminSupportStats = dynamic(
+  () => import("@/components/admin/admin-support-stats").then((m) => m.AdminSupportStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
 import { formatDistanceToNow } from "date-fns";
 import {
   Select,

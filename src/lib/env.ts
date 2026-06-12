@@ -169,6 +169,19 @@ const envSchema = z
     requireInProd("APP_URL", "APP_URL is required in production");
     requireInProd("IP_HASH_SALT", "IP_HASH_SALT is required in production");
 
+    // The Prisma pool must be sized explicitly in production. Prisma's
+    // default (num_physical_cpus * 2 + 1 per process) across web + worker
+    // processes silently overruns managed-Postgres connection caps; the
+    // perf pass standardised on an explicit connection_limit (10).
+    if (!/[?&]connection_limit=\d+/.test(val.DATABASE_URL)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["DATABASE_URL"],
+        message:
+          "DATABASE_URL must set an explicit connection_limit in production (e.g. ?connection_limit=10)",
+      });
+    }
+
     if (!val.RESEND_API_KEY && !val.SMTP_HOST) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

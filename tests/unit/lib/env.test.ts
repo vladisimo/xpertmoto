@@ -114,6 +114,7 @@ describe("env schema", () => {
   test("requires Stripe keys in production unless ALLOW_STUB_STRIPE=1", async () => {
     const prodBase = {
       ...REQUIRED_MIN,
+      DATABASE_URL: "postgres://user:pass@localhost:5432/db?connection_limit=10",
       NODE_ENV: "production",
       AUTH_URL: "https://x.example",
       APP_URL: "https://y.example",
@@ -131,5 +132,33 @@ describe("env schema", () => {
 
     const stubbed = await loadEnv({ ...prodBase, ALLOW_STUB_STRIPE: "1" });
     expect(stubbed.ok).toBe(true);
+  });
+
+  test("requires an explicit connection_limit on DATABASE_URL in production", async () => {
+    const prodBase = {
+      ...REQUIRED_MIN,
+      NODE_ENV: "production",
+      AUTH_URL: "https://x.example",
+      APP_URL: "https://y.example",
+      IP_HASH_SALT: "a".repeat(32),
+      SMTP_HOST: "smtp.example",
+      ALLOW_STUB_STRIPE: "1",
+    };
+
+    const missing = await loadEnv(prodBase); // REQUIRED_MIN URL has no params
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) {
+      expect(missing.err.message).toMatch(/connection_limit/);
+    }
+
+    const sized = await loadEnv({
+      ...prodBase,
+      DATABASE_URL: "postgres://user:pass@localhost:5432/db?connection_limit=10",
+    });
+    expect(sized.ok).toBe(true);
+
+    // Dev/test stay unaffected — the bare URL is fine outside production.
+    const dev = await loadEnv({ ...REQUIRED_MIN });
+    expect(dev.ok).toBe(true);
   });
 });

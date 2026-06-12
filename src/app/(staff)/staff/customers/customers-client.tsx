@@ -8,7 +8,14 @@ import {
   DEFAULT_STATUS_PRESETS,
   type StatusPreset,
 } from "@/components/staff/customer-filter-bar";
-import { CustomerStats } from "@/components/staff/customer-stats";
+import dynamic from "next/dynamic";
+import { LoadingBlock } from "@/components/ui/stat-shell";
+
+// recharts panel — keep it out of the initial bundle until it mounts.
+const CustomerStats = dynamic(
+  () => import("@/components/staff/customer-stats").then((m) => m.CustomerStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
 import { CustomersTable, type CustomerRow } from "@/components/staff/customers-table";
 import { DataTablePagination } from "@/components/ui/data-table-pagination";
 import type { DataTableSortState } from "@/components/ui/data-table";

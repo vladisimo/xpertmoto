@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { cacheLife, cacheTag } from "next/cache";
 import { getSettings } from "@/lib/settings";
 import { BRAND } from "@/lib/constants";
@@ -58,7 +59,7 @@ const blankToNull = (value: unknown): string | null => {
 const asString = (value: unknown, fallback: string): string =>
   typeof value === "string" && value.trim().length ? value : fallback;
 
-export async function getBranding(): Promise<Branding> {
+async function readBranding(): Promise<Branding> {
   "use cache";
   // cacheLife/cacheTag throw outside a Next "use cache" runtime (Vitest,
   // tsx-run BullMQ workers). The directive above is still a valid no-op in
@@ -95,3 +96,12 @@ export async function getBranding(): Promise<Branding> {
     },
   };
 }
+
+/**
+ * React cache() on top of the "use cache" data cache: generateMetadata and
+ * the RootLayout body (and any nested layout) each call getBranding() in
+ * the same request — cache() collapses them to a single read even when the
+ * Next data cache isn't warm or the directive is a no-op (jobs, tests,
+ * where cache() simply invokes the function).
+ */
+export const getBranding = cache(readBranding);

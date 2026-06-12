@@ -161,6 +161,32 @@ describe("customer-import classifyRows", () => {
     }
   });
 
+  it("restores leading zeros eaten by numeric Excel cells (phone + NT postcode)", async () => {
+    const { db } = mkDb();
+    const summary = await classifyRows(
+      [
+        {
+          email: "nt@example.com",
+          firstName: "En",
+          lastName: "Tee",
+          // sheet_to_json raw:true delivers numeric cells as numbers:
+          // 0412 345 678 → 412345678, postcode 0800 → 800.
+          phone: 412345678,
+          postcode: 800,
+        },
+      ],
+      db,
+    );
+    expect(summary.errorRows).toBe(0);
+    expect(summary.validRows).toBe(1);
+    const row = summary.rows[0]!;
+    expect(row.status).toBe("valid");
+    if (row.status === "valid") {
+      expect(row.data.phone).toBe("0412345678");
+      expect(row.data.postcode).toBe("0800");
+    }
+  });
+
   it("rejects malformed dates", async () => {
     const { db } = mkDb();
     const summary = await classifyRows(

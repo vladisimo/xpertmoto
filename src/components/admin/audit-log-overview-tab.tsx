@@ -1,15 +1,15 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { AlertTriangle, CalendarRange, ChevronLeft, ChevronRight } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
-import { AuditLogStats } from "./audit-log-stats";
 import { AuditLogSecurityStats } from "./audit-log-security-stats";
 import {
-  AuditActivityChart,
   AUDIT_ACTIVITY_RANGES,
   type AuditActivityRange,
 } from "./audit-activity-chart";
+import { LoadingBlock } from "@/components/ui/stat-shell";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import {
   Select,
@@ -21,6 +21,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { formatDateTime } from "@/lib/utils";
+
+// recharts panels — keep them out of the SSR/mobile bundle until they mount.
+const AuditLogStats = dynamic(
+  () => import("./audit-log-stats").then((m) => m.AuditLogStats),
+  { ssr: false, loading: () => <LoadingBlock className="h-40 w-full" /> },
+);
+const AuditActivityChart = dynamic(
+  () => import("./audit-activity-chart").then((m) => m.AuditActivityChart),
+  { ssr: false, loading: () => <LoadingBlock className="h-48 w-full" /> },
+);
 
 const FAILURES_PAGE_SIZE = 20;
 
