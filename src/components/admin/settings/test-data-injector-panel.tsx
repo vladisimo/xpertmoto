@@ -298,7 +298,7 @@ function InfringementInjector(): React.ReactNode {
       dueDate: values.dueDate ? new Date(values.dueDate) : undefined,
     });
     setLastInjected(
-      `Infringement ${inf.referenceNumber} created${inf.bookingId ? ` (linked to booking)` : " (no active booking — vehicle only)"}. View on /staff/fleet?tab=infringements.`,
+      `Infringement ${inf.referenceNumber} created${inf.bookingId ? ` (linked to booking)` : " (no active booking — vehicle only)"}. View on /staff/fleet/infringements.`,
     );
   }
 

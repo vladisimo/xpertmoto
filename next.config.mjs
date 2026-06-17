@@ -1,4 +1,9 @@
 import { withSentryConfig } from "@sentry/nextjs";
+import bundleAnalyzer from "@next/bundle-analyzer";
+
+// Bundle analyzer — opt-in via ANALYZE=true (e.g. `ANALYZE=true npm run build`).
+// Composed outside the Sentry HOF so it wraps the final config.
+const withBundleAnalyzer = bundleAnalyzer({ enabled: process.env.ANALYZE === "true" });
 
 /** @type {import('next').NextConfig} */
 const isDev = process.env.NODE_ENV !== "production";
@@ -177,6 +182,11 @@ const nextConfig = {
     "pdfjs-dist",
   ],
   images: {
+    // Prefer AVIF (smallest), fall back to WebP, then the original. The
+    // optimiser holds derived sizes for ~31 days — safe because stored
+    // objects use immutable random-UUID keys, so a URL never changes content.
+    formats: ["image/avif", "image/webp"],
+    minimumCacheTTL: 2_678_400,
     // Narrowly scoped to our S3 region — prevents Next's image optimiser
     // from acting as an open proxy against any AWS-hosted content. Update
     // the region pattern if the primary bucket moves.
@@ -242,6 +252,8 @@ const sentryBuildOptions = {
   },
 };
 
-export default process.env.SENTRY_DSN
+const configWithSentry = process.env.SENTRY_DSN
   ? withSentryConfig(nextConfig, sentryBuildOptions)
   : nextConfig;
+
+export default withBundleAnalyzer(configWithSentry);

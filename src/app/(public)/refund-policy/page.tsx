@@ -2,6 +2,17 @@ import { getBranding } from "@/lib/branding";
 import { getSettings } from "@/lib/settings";
 import { CANCELLATION_POLICY } from "@/lib/constants";
 import { formatCurrency } from "@/lib/utils";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Refund & Cancellation Policy",
+    description:
+      "How refunds and cancellations work — notice windows, admin fees, no-show charges and how credits are applied.",
+    path: "/refund-policy",
+  });
+}
 
 export default async function RefundPolicyPage() {
   const { siteName } = await getBranding();

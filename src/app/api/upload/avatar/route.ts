@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { uploadFile } from "@/lib/storage";
+import { uploadImage } from "@/lib/image-processing";
 import { withAudit } from "@/lib/with-audit";
 import { scanForMalware } from "@/lib/file-scan";
 
@@ -45,11 +45,13 @@ async function handlePost(req: Request) {
     );
   }
 
-  const result = await uploadFile({
+  // Avatars are only ever rendered small, so cap them tight and recompress
+  // before storage rather than holding a multi-MB original. sharp also
+  // strips EXIF and re-encodes away anything the scanner missed.
+  const result = await uploadImage(body, {
     folder: `avatars/${session.user.id}`,
-    filename: file.name,
-    contentType: file.type,
-    body,
+    originalName: file.name,
+    processOpts: { maxWidth: 512, maxHeight: 512, quality: 82 },
   });
 
   return NextResponse.json({ url: result.url, key: result.key });

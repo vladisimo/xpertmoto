@@ -4,6 +4,21 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { getForecast, isRidingUnsafe } from "@/lib/weather";
 import { PublicDepotMap } from "@/components/maps/public-depot-map";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+import { getBranding } from "@/lib/branding";
+import { getSiteUrl, absoluteUrl } from "@/lib/seo/site-url";
+import { organizationLd, localBusinessLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
+
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Depot Locations",
+    description:
+      "Find your nearest pickup depot for scooter & motorbike hire — addresses, opening hours and live availability across our locations.",
+    path: "/locations",
+  });
+}
 
 export default async function LocationsPage() {
   const depots = await prisma.depot.findMany({
@@ -39,8 +54,39 @@ export default async function LocationsPage() {
   );
   const forecastByDepot = new Map(forecasts.map((f) => [f.depotId, f.forecast]));
 
+  const branding = await getBranding();
+  const siteUrl = getSiteUrl();
+  const jsonLd = [
+    organizationLd({
+      branding,
+      url: siteUrl,
+      logoUrl: branding.logoWideUrl ? absoluteUrl(branding.logoWideUrl) : null,
+    }),
+    ...depots.map((d) =>
+      localBusinessLd({
+        depot: {
+          name: d.name,
+          slug: d.slug,
+          addressLine1: d.addressLine1,
+          addressLine2: d.addressLine2,
+          suburb: d.suburb,
+          state: d.state,
+          postcode: d.postcode,
+          country: d.country,
+          latitude: d.latitude,
+          longitude: d.longitude,
+          phone: d.phone,
+          email: d.email,
+        },
+        siteName: branding.siteName,
+        url: siteUrl,
+      }),
+    ),
+  ];
+
   return (
     <div className="container py-12">
+      <JsonLd data={jsonLd} />
       <h1 className="h-display">Locations</h1>
       <p className="mt-2 text-muted-foreground">Hire from any of our three Australian depots.</p>
 

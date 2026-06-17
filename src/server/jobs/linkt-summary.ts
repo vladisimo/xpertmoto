@@ -79,7 +79,7 @@ export async function runWeeklyTollSummary(): Promise<number> {
       status: STATUS_LABEL[r.status],
       booking: r.matchedBooking,
     })),
-    portalUrl: `${appUrl()}/staff/fleet?tab=tolls`,
+    portalUrl: `${appUrl()}/staff/fleet/tolls`,
   };
 
   const subject = `${siteName} — weekly toll summary`;

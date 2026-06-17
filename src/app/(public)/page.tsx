@@ -16,6 +16,25 @@ import {
 import { prisma } from "@/lib/prisma";
 import { getBranding } from "@/lib/branding";
 import { RENTABLE_MODEL_WHERE } from "@/lib/fleet/consumer-visibility";
+import { getSiteUrl, absoluteUrl } from "@/lib/seo/site-url";
+import { organizationLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
+import type { Metadata } from "next";
+
+// The home page keeps the root layout's full descriptive title/description
+// (best for the brand landing page); we only add the canonical + og:url here.
+export function generateMetadata(): Metadata {
+  return {
+    alternates: { canonical: "/" },
+    openGraph: {
+      url: "/",
+      type: "website",
+      locale: "en_AU",
+      images: ["/opengraph-image"],
+    },
+    twitter: { card: "summary_large_image", images: ["/opengraph-image"] },
+  };
+}
 
 const HERO_SLIDES = [
   { imageSrc: "/landing_hero_sllides/xpert-motorcycle-tours-desktop-homepage.webp",   imageAlt: "Riders on a guided motorcycle tour" },
@@ -118,8 +137,15 @@ export default async function HomePage() {
       availableVehicles: d._count.vehicles,
     }));
 
+  const orgJsonLd = organizationLd({
+    branding,
+    url: getSiteUrl(),
+    logoUrl: branding.logoWideUrl ? absoluteUrl(branding.logoWideUrl) : null,
+  });
+
   return (
     <>
+      <JsonLd data={orgJsonLd} />
       <div className="-mt-20">
         <HeroSection
           slides={HERO_SLIDES}

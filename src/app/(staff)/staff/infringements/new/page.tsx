@@ -66,14 +66,14 @@ export default function NewInfringementPage() {
       amount: values.amount,
       dueDate: values.dueDate ? new Date(values.dueDate) : undefined,
     });
-    router.push("/staff/fleet?tab=infringements");
+    router.push("/staff/fleet/infringements");
   }
 
   return (
     <PageShell className="max-w-2xl">
       <PageHeader
         breadcrumbs={[
-          { label: "Infringements", href: "/staff/fleet?tab=infringements" },
+          { label: "Infringements", href: "/staff/fleet/infringements" },
           { label: "Record infringement" },
         ]}
         title="Record infringement"

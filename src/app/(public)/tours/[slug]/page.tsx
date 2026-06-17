@@ -7,6 +7,10 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DividedTitle } from "@/components/marketing/divided-title";
 import { TOURS, getTour, whatsappUrl } from "@/content/tours";
+import { buildMetadata } from "@/lib/seo/metadata";
+import { absoluteUrl } from "@/lib/seo/site-url";
+import { breadcrumbLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
@@ -19,11 +23,21 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
   const tour = getTour(slug);
-  if (!tour) return {};
-  return {
-    title: `${tour.name} — XPERT Moto Tours`,
+  if (!tour) {
+    return buildMetadata({
+      title: "Tours",
+      description: "Guided motorcycle tours.",
+      path: "/tours",
+      noindex: true,
+    });
+  }
+  // The root title template appends the brand ("· {siteName}") — no hardcoded
+  // trading name here (multi-tenant rule).
+  return buildMetadata({
+    title: tour.name,
     description: tour.description,
-  };
+    path: `/tours/${slug}`,
+  });
 }
 
 export default async function TourDetailPage({ params }: PageProps) {
@@ -33,9 +47,14 @@ export default async function TourDetailPage({ params }: PageProps) {
 
   const hero = tour.gallery[0];
   const rest = tour.gallery.slice(1);
+  const breadcrumb = breadcrumbLd([
+    { name: "Tours", url: absoluteUrl("/tours") },
+    { name: tour.name, url: absoluteUrl(`/tours/${slug}`) },
+  ]);
 
   return (
     <>
+      <JsonLd data={breadcrumb} />
       {/* Hero */}
       <section className="relative isolate">
         <div className="relative h-[60vh] min-h-[420px] w-full overflow-hidden">

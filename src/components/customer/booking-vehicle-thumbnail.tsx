@@ -1,5 +1,7 @@
 "use client";
 
+import Image from "next/image";
+
 import {
   Dialog,
   DialogContent,
@@ -22,21 +24,29 @@ export function BookingVehicleThumbnail({ src, alt }: Props) {
         aria-label={`Preview ${alt}`}
         className="relative z-10 shrink-0 self-start overflow-hidden rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
+        {/* Unknown intrinsic dimensions (vehicle photos vary): width/height 0
+            + sizes lets the optimiser pick a resolution while CSS drives the
+            rendered size. Fixed 6rem height, auto width. */}
+        <Image
           src={src}
           alt={alt}
-          loading="lazy"
+          width={0}
+          height={0}
+          sizes="120px"
           className="block h-24 w-auto rounded-md transition hover:scale-[1.02]"
+          style={{ width: "auto", height: "6rem" }}
         />
       </DialogTrigger>
       <DialogContent className="max-w-3xl overflow-hidden p-0 sm:rounded-lg">
         <DialogTitle className="sr-only">{alt}</DialogTitle>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
+        <Image
           src={src}
           alt={alt}
+          width={0}
+          height={0}
+          sizes="(max-width: 768px) 100vw, 768px"
           className="max-h-[80vh] w-full bg-muted object-contain"
+          style={{ height: "auto" }}
         />
       </DialogContent>
     </Dialog>

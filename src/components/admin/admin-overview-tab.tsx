@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { connection } from "next/server";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +10,7 @@ import {
 } from "./admin-revenue-trend-chart";
 
 export async function AdminOverviewTab() {
+  await connection();
   const now = new Date();
   const startOfDay = new Date(now);
   startOfDay.setHours(0, 0, 0, 0);
@@ -66,7 +68,7 @@ export async function AdminOverviewTab() {
           label="New customers (MTD)"
           value={String(newCustomers)}
           hint="Joined this month"
-          href="/staff/customers?tab=users"
+          href="/staff/customers/users"
         />
         <Kpi
           label="Today's bookings"

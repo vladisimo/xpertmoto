@@ -9,6 +9,18 @@ import { SpecTable, type SpecRow } from "@/components/marketing/spec-table";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { googleCalendarUrl } from "@/lib/calendar";
 import { ConfirmationResetGuard } from "@/components/booking/confirmation-reset-guard";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+
+export function generateMetadata(): Promise<Metadata> {
+  // Transactional, per-booking page — keep it out of the index.
+  return buildMetadata({
+    title: "Booking Confirmed",
+    description: "Your booking is confirmed.",
+    path: "/booking/confirmation",
+    noindex: true,
+  });
+}
 
 const DOCUMENT_TYPE_LABEL: Record<string, string> = {
   OWNERS_MANUAL: "Owner's manual",

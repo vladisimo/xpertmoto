@@ -6,6 +6,7 @@ import { TRPCProvider } from "@/lib/trpc/provider";
 import { SilenceExtensionHydrationWarning } from "@/components/shared/silence-extension-hydration-warning";
 import { PostHogProvider } from "@/components/shared/posthog-provider";
 import { PostHogIdentify } from "@/components/shared/posthog-identify";
+import { WebVitalsReporter } from "@/components/shared/web-vitals-reporter";
 import { SentryIdentify } from "@/components/shared/sentry-identify";
 import { getPostHogPublic } from "@/lib/analytics";
 import { SupportWidgetGate } from "@/components/support/support-widget-gate";
@@ -13,6 +14,8 @@ import { ImpersonationBannerGate } from "@/components/layout/impersonation-banne
 import { BrandingProvider } from "@/components/shared/branding-provider";
 import { MobileDebug } from "@/components/shared/mobile-debug";
 import { getBranding } from "@/lib/branding";
+import { getSiteUrl } from "@/lib/seo/site-url";
+import { env } from "@/lib/env";
 
 const dmSansBody = DM_Sans({
   subsets: ["latin"],
@@ -39,6 +42,9 @@ export async function generateMetadata(): Promise<Metadata> {
     ? `${branding.tagline}. Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent GST-inclusive pricing, and flexible pickup across our depots.`
     : `Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent pricing, and flexible pickup.`;
   return {
+    // metadataBase resolves every page's relative canonical / og:url / og:image
+    // (set via buildMetadata) to an absolute URL. Single source: getSiteUrl().
+    metadataBase: new URL(getSiteUrl()),
     // M-11: `template` lets each page set just its own short title and have
     // the brand appended automatically (e.g. "Fleet · XPERT Moto"), while the
     // home page keeps the full descriptive default.
@@ -47,7 +53,17 @@ export async function generateMetadata(): Promise<Metadata> {
       template: `%s · ${branding.siteName}`,
     },
     description,
-    icons: branding.faviconUrl ? { icon: branding.faviconUrl } : undefined,
+    icons: branding.faviconUrl
+      ? {
+          icon: branding.faviconUrl,
+          shortcut: branding.faviconUrl,
+          apple: branding.logoSquareUrl ?? branding.faviconUrl,
+        }
+      : undefined,
+    // Search Console verification meta tag (only when configured).
+    verification: env.GOOGLE_SITE_VERIFICATION
+      ? { google: env.GOOGLE_SITE_VERIFICATION }
+      : undefined,
   };
 }
 
@@ -85,6 +101,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         {posthog.browserKey ? (
           <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
         ) : null}
+        {posthog.browserKey ? <WebVitalsReporter /> : null}
         <TRPCProvider>
           {posthog.browserKey ? <PostHogIdentify /> : null}
           <SentryIdentify />

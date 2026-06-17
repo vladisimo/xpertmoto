@@ -51,7 +51,7 @@ export async function AdminRiskTab() {
                 {thefts.incidents.map((i) => (
                   <Link
                     key={i.id}
-                    href={`/staff/fleet?tab=incidents`}
+                    href={`/staff/fleet/incidents`}
                     className="flex items-start justify-between gap-2 rounded-md border border-border bg-background px-3 py-2 hover:bg-muted/50"
                   >
                     <div className="min-w-0">
@@ -78,7 +78,7 @@ export async function AdminRiskTab() {
                 {thefts.stolenVehicles.map((v) => (
                   <Link
                     key={v.id}
-                    href={`/staff/fleet?tab=vehicles`}
+                    href={`/staff/fleet/vehicles`}
                     className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-3 py-2 hover:bg-muted/50"
                   >
                     <div className="min-w-0 truncate">

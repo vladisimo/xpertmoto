@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import { Star } from "lucide-react";
 import { getBranding } from "@/lib/branding";
+import { getSiteUrl } from "@/lib/seo/site-url";
+import { reviewsLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
 
 type Review = {
   name: string;
@@ -70,6 +73,11 @@ const REVIEWS: Review[] = [
 
 const AVERAGE = REVIEWS.reduce((s, r) => s + r.rating, 0) / REVIEWS.length;
 
+const toIsoDate = (value: string): string | undefined => {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString().slice(0, 10);
+};
+
 function Stars({ rating }: { rating: number }) {
   return (
     <div className="flex gap-0.5" aria-label={`${rating} out of 5 stars`}>
@@ -93,8 +101,21 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function ReviewsPage() {
   const { siteName } = await getBranding();
+  const reviewsJsonLd = reviewsLd({
+    siteName,
+    url: getSiteUrl(),
+    reviews: REVIEWS.map((r) => ({
+      author: r.name,
+      rating: r.rating,
+      body: r.body,
+      datePublished: toIsoDate(r.date),
+    })),
+    ratingValue: AVERAGE,
+    reviewCount: REVIEWS.length,
+  });
   return (
     <div className="container max-w-5xl py-12">
+      <JsonLd data={reviewsJsonLd} />
       <div className="max-w-2xl">
         <h1 className="h-display">Rental reviews</h1>
         <p className="mt-3 text-muted-foreground">

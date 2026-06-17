@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { uploadFile } from "@/lib/storage";
+import { uploadImage } from "@/lib/image-processing";
 import { withAudit } from "@/lib/with-audit";
 
 /**
@@ -54,12 +55,24 @@ async function handlePost(req: Request) {
   const folder = `drivers/${session.user.id}/${yyyyMm}`;
 
   try {
-    const result = await uploadFile({
-      folder,
-      filename: file.name,
-      contentType: file.type,
-      body,
-    });
+    // Images are resized + recompressed before storage (caps a multi-MB
+    // phone photo and, per APP 11, strips EXIF/GPS from the licence shot)
+    // while staying high enough resolution for downstream OCR/licence
+    // verification. PDFs are passed through untouched — sharp can't process
+    // them. The mutation only checks the folder prefix, so the extension
+    // change a JPEG/WebP re-encode produces is harmless.
+    const result = file.type === "application/pdf"
+      ? await uploadFile({
+          folder,
+          filename: file.name,
+          contentType: file.type,
+          body,
+        })
+      : await uploadImage(body, {
+          folder,
+          originalName: file.name,
+          processOpts: { maxWidth: 2400, maxHeight: 2400, quality: 88 },
+        });
     // Intentionally return only the key — not the direct public URL.
     // Identity documents are PII (APP 11 §I); viewers must go through a
     // server-side authorised endpoint that mints a short-TTL signed URL

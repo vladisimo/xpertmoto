@@ -9,6 +9,10 @@ import { ModelSpecs, type ModelSpecsInput } from "@/components/fleet/model-specs
 import { RelatedModels, type RelatedModelEntry } from "@/components/fleet/related-models";
 import { Button } from "@/components/ui/button";
 import { DividedTitle } from "@/components/marketing/divided-title";
+import { buildMetadata } from "@/lib/seo/metadata";
+import { absoluteUrl } from "@/lib/seo/site-url";
+import { productLd, breadcrumbLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
 
 async function getModel(slug: string) {
   const model = await prisma.vehicleModel.findUnique({
@@ -178,14 +182,21 @@ export async function generateMetadata({
     select: { make: true, model: true, year: true, tagline: true, isRentable: true },
   });
   // Non-rentable service vehicles must not leak a title/description either.
-  if (!model || !model.isRentable) return { title: "Fleet" };
-  const title = `${model.year} ${model.make} ${model.model} rental`;
-  return {
-    title,
+  if (!model || !model.isRentable) {
+    return buildMetadata({
+      title: "Fleet",
+      description: "Browse the scooter & motorbike hire fleet.",
+      path: "/fleet",
+      noindex: true,
+    });
+  }
+  return buildMetadata({
+    title: `${model.year} ${model.make} ${model.model} rental`,
     description:
       model.tagline ??
       `Hire the ${model.year} ${model.make} ${model.model}. Fully maintained, ready to ride.`,
-  };
+    path: `/fleet/${slug}`,
+  });
 }
 
 export default async function ModelDetailPage({
@@ -205,8 +216,28 @@ export default async function ModelDetailPage({
     "Pick-up and drop-off at any depot",
   ];
 
+  const fleetUrl = absoluteUrl(`/fleet/${model.slug}`);
+  const jsonLd = [
+    productLd({
+      name: `${model.year} ${model.make} ${model.model}`,
+      description:
+        model.tagline ??
+        `Hire the ${model.year} ${model.make} ${model.model} — fully maintained and ready to ride.`,
+      url: fleetUrl,
+      images: model.images.map((img) => img.url).slice(0, 6),
+      brand: model.make,
+      dailyRate: model.category.baseDailyRate,
+      inStock: model.availableCount > 0,
+    }),
+    breadcrumbLd([
+      { name: "Our fleet", url: absoluteUrl("/fleet") },
+      { name: `${model.year} ${model.make} ${model.model}`, url: fleetUrl },
+    ]),
+  ];
+
   return (
     <div className="container space-y-12 py-12">
+      <JsonLd data={jsonLd} />
       <nav aria-label="Breadcrumb" className="caption uppercase tracking-[0.08em]">
         <Link href="/fleet" className="hover:text-foreground">
           Our fleet

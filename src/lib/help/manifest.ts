@@ -337,7 +337,7 @@ export const HELP_ARTICLES: readonly HelpArticle[] = [
     category: "administration",
     audience: "Admin",
     keywords: ["depots", "locations", "branches", "sites", "hours"],
-    relatedNav: ["/staff/fleet?tab=depots"],
+    relatedNav: ["/staff/fleet/depots"],
     file: "administration/depots.md",
   },
   {

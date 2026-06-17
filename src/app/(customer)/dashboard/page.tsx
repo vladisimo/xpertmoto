@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { Calendar, CalendarPlus, Download, FileText, MapPin, Plus } from "lucide-react";
 import type { PaymentType } from "@prisma/client";
 import { auth } from "@/lib/auth";
@@ -342,11 +343,13 @@ function NextTripHero({ booking, siteName }: { booking: NextTripBooking; siteNam
       <div className="grid gap-0 md:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
         <div className="relative flex aspect-[4/3] items-center justify-center bg-muted md:aspect-auto">
           {imageUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
+            <Image
               src={imageUrl}
               alt={title}
-              className="h-full w-full object-cover"
+              fill
+              sizes="(min-width: 768px) 40vw, 100vw"
+              priority
+              className="object-cover"
             />
           ) : (
             <div className="text-xs uppercase tracking-wide text-muted-foreground">No image</div>

@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { connection } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { FleetStats, type FleetStatsData } from "./fleet-stats";
 import { FleetBreakdownRow, type FleetBreakdownData } from "./fleet-breakdown-row";
@@ -14,6 +15,7 @@ type AttentionCounts = {
 };
 
 export async function FleetOverviewTab() {
+  await connection();
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 86400000);
   const in14 = new Date(now.getTime() + 14 * 86400000);

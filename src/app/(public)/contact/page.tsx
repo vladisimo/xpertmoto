@@ -4,6 +4,20 @@ import { prisma } from "@/lib/prisma";
 import { getBranding } from "@/lib/branding";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+import { getSiteUrl, absoluteUrl } from "@/lib/seo/site-url";
+import { organizationLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
+
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Contact Us",
+    description:
+      "Get in touch for booking help, depot enquiries and support — phone, email and addresses for every location.",
+    path: "/contact",
+  });
+}
 
 const telHref = (value: string) => `tel:${value.replace(/[^+\d]/g, "")}`;
 
@@ -27,8 +41,15 @@ export default async function ContactPage() {
     }),
   ]);
 
+  const orgJsonLd = organizationLd({
+    branding,
+    url: getSiteUrl(),
+    logoUrl: branding.logoWideUrl ? absoluteUrl(branding.logoWideUrl) : null,
+  });
+
   return (
     <div className="container max-w-5xl py-12">
+      <JsonLd data={orgJsonLd} />
       <h1 className="h-display">Contact us</h1>
       <p className="mt-2 text-muted-foreground">
         We&apos;re here to help seven days a week.

@@ -18,8 +18,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import * as TabsPrimitive from "@radix-ui/react-tabs";
+import { usePathname } from "next/navigation";
 import {
   Activity,
   AlertTriangle,
@@ -90,27 +89,26 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { Tabs, TabsTrigger } from "@/components/ui/tabs";
-import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import { cn } from "@/lib/utils";
 
 export type SectionNavItem = {
-  /** Stable id. For query sections this is the `?tab=` value; for route
-   *  sections it doubles as the href. */
+  /** Stable id; doubles as the href for the route. */
   key: string;
   label: string;
   icon: LucideIcon;
-  /** Route sections only — the destination. */
+  /** The destination route. */
   href?: string;
-  /** Route sections only — match the pathname exactly (section root). */
+  /** Match the pathname exactly (use for the section root / default tab). */
   exact?: boolean;
   /** Hidden unless the viewer is ADMIN / SUPER_ADMIN. */
   adminOnly?: boolean;
 };
 
-export type SectionNavMode =
-  | { kind: "query"; basePath: string; clearParams?: string[] }
-  | { kind: "route" };
+/**
+ * Every back-office section now navigates via real routes. (The legacy
+ * `?tab=` query mode was removed once all sections were split into pages.)
+ */
+export type SectionNavMode = { kind: "route" };
 
 export type SectionKey =
   | "fleet"
@@ -138,79 +136,79 @@ const SECTIONS: Record<SectionKey, SectionDef> = {
   fleet: {
     heading: "Fleet",
     ariaLabel: "Fleet sections",
-    mode: { kind: "query", basePath: "/staff/fleet" },
+    mode: { kind: "route" },
     items: [
-      { key: "overview", label: "Overview", icon: Gauge },
-      { key: "vehicles", label: "Vehicles", icon: Bike },
-      { key: "live", label: "Live map", icon: Satellite },
-      { key: "makes-models", label: "Makes & Models", icon: BookOpen },
-      { key: "maintenance", label: "Maintenance", icon: Wrench },
-      { key: "inspections", label: "Inspections", icon: ClipboardCheck },
-      { key: "incidents", label: "Incidents", icon: AlertTriangle },
-      { key: "infringements", label: "Infringements", icon: Receipt },
-      { key: "nominations", label: "Nominations", icon: Gavel },
-      { key: "tolls", label: "Tolls", icon: Route },
-      { key: "depots", label: "Depots", icon: MapPin, adminOnly: true },
-      { key: "settings", label: "Settings", icon: Settings },
+      { key: "/staff/fleet", label: "Overview", icon: Gauge, href: "/staff/fleet", exact: true },
+      { key: "/staff/fleet/vehicles", label: "Vehicles", icon: Bike, href: "/staff/fleet/vehicles" },
+      { key: "/staff/fleet/live", label: "Live map", icon: Satellite, href: "/staff/fleet/live" },
+      { key: "/staff/fleet/makes-models", label: "Makes & Models", icon: BookOpen, href: "/staff/fleet/makes-models" },
+      { key: "/staff/fleet/maintenance", label: "Maintenance", icon: Wrench, href: "/staff/fleet/maintenance" },
+      { key: "/staff/fleet/inspections", label: "Inspections", icon: ClipboardCheck, href: "/staff/fleet/inspections" },
+      { key: "/staff/fleet/incidents", label: "Incidents", icon: AlertTriangle, href: "/staff/fleet/incidents" },
+      { key: "/staff/fleet/infringements", label: "Infringements", icon: Receipt, href: "/staff/fleet/infringements" },
+      { key: "/staff/fleet/nominations", label: "Nominations", icon: Gavel, href: "/staff/fleet/nominations" },
+      { key: "/staff/fleet/tolls", label: "Tolls", icon: Route, href: "/staff/fleet/tolls" },
+      { key: "/staff/fleet/depots", label: "Depots", icon: MapPin, href: "/staff/fleet/depots", adminOnly: true },
+      { key: "/staff/fleet/settings", label: "Settings", icon: Settings, href: "/staff/fleet/settings" },
     ],
   },
   customers: {
     heading: "Customers",
     ariaLabel: "Customer sections",
-    mode: { kind: "query", basePath: "/staff/customers" },
+    mode: { kind: "route" },
     items: [
-      { key: "overview", label: "Overview", icon: Gauge },
-      { key: "directory", label: "Directory", icon: Users },
-      { key: "verification", label: "Verification", icon: IdCard },
-      { key: "risk", label: "Risk & Compliance", icon: ShieldAlert },
-      { key: "loyalty", label: "Loyalty & Referrals", icon: Award },
-      { key: "communications", label: "Communications", icon: MessageSquare },
-      { key: "documents", label: "Documents", icon: FileText },
-      { key: "settings", label: "Settings", icon: Settings },
-      { key: "users", label: "Users & Roles", icon: UserCog, adminOnly: true },
+      { key: "/staff/customers", label: "Overview", icon: Gauge, href: "/staff/customers", exact: true },
+      { key: "/staff/customers/directory", label: "Directory", icon: Users, href: "/staff/customers/directory" },
+      { key: "/staff/customers/verification", label: "Verification", icon: IdCard, href: "/staff/customers/verification" },
+      { key: "/staff/customers/risk", label: "Risk & Compliance", icon: ShieldAlert, href: "/staff/customers/risk" },
+      { key: "/staff/customers/loyalty", label: "Loyalty & Referrals", icon: Award, href: "/staff/customers/loyalty" },
+      { key: "/staff/customers/communications", label: "Communications", icon: MessageSquare, href: "/staff/customers/communications" },
+      { key: "/staff/customers/documents", label: "Documents", icon: FileText, href: "/staff/customers/documents" },
+      { key: "/staff/customers/settings", label: "Settings", icon: Settings, href: "/staff/customers/settings" },
+      { key: "/staff/customers/users", label: "Users & Roles", icon: UserCog, href: "/staff/customers/users", adminOnly: true },
     ],
   },
   audit: {
     heading: "Audit log",
     ariaLabel: "Audit log sections",
-    // Drop tab-scoped cursor state when switching tabs so stale pagination
-    // doesn't leak into the next view.
-    mode: { kind: "query", basePath: "/admin/audit-log", clearParams: ["cursor"] },
+    // Each tab is its own route now, so pagination cursors no longer leak
+    // across tabs (the old query-mode clearParams:['cursor'] is unnecessary).
+    mode: { kind: "route" },
     items: [
-      { key: "overview", label: "Overview", icon: Gauge },
-      { key: "security", label: "Security", icon: ShieldAlert },
-      { key: "authentication", label: "Authentication", icon: KeyRound },
-      { key: "mutations", label: "Mutations", icon: Pencil },
-      { key: "webhooks", label: "Webhooks & Jobs", icon: Webhook },
-      { key: "impersonation", label: "Impersonation", icon: UserCheck },
-      { key: "activity", label: "Activity", icon: Activity },
-      { key: "all", label: "All events", icon: ListOrdered },
+      { key: "/admin/audit-log", label: "Overview", icon: Gauge, href: "/admin/audit-log", exact: true },
+      { key: "/admin/audit-log/security", label: "Security", icon: ShieldAlert, href: "/admin/audit-log/security" },
+      { key: "/admin/audit-log/authentication", label: "Authentication", icon: KeyRound, href: "/admin/audit-log/authentication" },
+      { key: "/admin/audit-log/mutations", label: "Mutations", icon: Pencil, href: "/admin/audit-log/mutations" },
+      { key: "/admin/audit-log/webhooks", label: "Webhooks & Jobs", icon: Webhook, href: "/admin/audit-log/webhooks" },
+      { key: "/admin/audit-log/impersonation", label: "Impersonation", icon: UserCheck, href: "/admin/audit-log/impersonation" },
+      { key: "/admin/audit-log/activity", label: "Activity", icon: Activity, href: "/admin/audit-log/activity" },
+      { key: "/admin/audit-log/all", label: "All events", icon: ListOrdered, href: "/admin/audit-log/all" },
     ],
   },
   platform: {
     heading: "Platform",
     ariaLabel: "Platform sections",
-    mode: { kind: "query", basePath: "/admin/platform" },
+    mode: { kind: "route" },
     items: [
-      { key: "database", label: "Database", icon: Database },
-      { key: "server", label: "Server", icon: Server },
-      { key: "storage", label: "Storage", icon: HardDrive },
-      { key: "llm", label: "LLM", icon: Brain },
-      { key: "email", label: "Email", icon: Mail },
-      { key: "sms", label: "SMS", icon: MessageSquare },
-      { key: "payments", label: "Payments", icon: CreditCard },
-      { key: "observability", label: "Observability", icon: Activity },
+      { key: "/admin/platform", label: "Database", icon: Database, href: "/admin/platform", exact: true },
+      { key: "/admin/platform/server", label: "Server", icon: Server, href: "/admin/platform/server" },
+      { key: "/admin/platform/storage", label: "Storage", icon: HardDrive, href: "/admin/platform/storage" },
+      { key: "/admin/platform/llm", label: "LLM", icon: Brain, href: "/admin/platform/llm" },
+      { key: "/admin/platform/email", label: "Email", icon: Mail, href: "/admin/platform/email" },
+      { key: "/admin/platform/sms", label: "SMS", icon: MessageSquare, href: "/admin/platform/sms" },
+      { key: "/admin/platform/payments", label: "Payments", icon: CreditCard, href: "/admin/platform/payments" },
+      { key: "/admin/platform/observability", label: "Observability", icon: Activity, href: "/admin/platform/observability" },
     ],
   },
   "admin-dashboard": {
     heading: "Dashboard",
     ariaLabel: "Dashboard sections",
-    mode: { kind: "query", basePath: "/admin/dashboard" },
+    mode: { kind: "route" },
     items: [
-      { key: "overview", label: "Overview", icon: LayoutDashboard },
-      { key: "risk", label: "Risk", icon: ShieldAlert },
-      { key: "debt", label: "Debt", icon: DollarSign },
-      { key: "support", label: "Support", icon: LifeBuoy },
+      { key: "/admin/dashboard", label: "Overview", icon: LayoutDashboard, href: "/admin/dashboard", exact: true },
+      { key: "/admin/dashboard/risk", label: "Risk", icon: ShieldAlert, href: "/admin/dashboard/risk" },
+      { key: "/admin/dashboard/debt", label: "Debt", icon: DollarSign, href: "/admin/dashboard/debt" },
+      { key: "/admin/dashboard/support", label: "Support", icon: LifeBuoy, href: "/admin/dashboard/support" },
     ],
   },
   finance: {
@@ -245,86 +243,86 @@ const SECTIONS: Record<SectionKey, SectionDef> = {
   support: {
     heading: "Support",
     ariaLabel: "Support sections",
-    mode: { kind: "query", basePath: "/staff/support" },
+    mode: { kind: "route" },
     items: [
-      { key: "tickets", label: "Tickets", icon: Ticket },
-      { key: "insights", label: "Insights", icon: Lightbulb },
+      { key: "/staff/support", label: "Tickets", icon: Ticket, href: "/staff/support", exact: true },
+      { key: "/staff/support/insights", label: "Insights", icon: Lightbulb, href: "/staff/support/insights" },
     ],
   },
   live: {
     heading: "Live Visitors",
     ariaLabel: "Live visitor sections",
-    mode: { kind: "query", basePath: "/staff/live" },
+    mode: { kind: "route" },
     items: [
-      { key: "live", label: "Live", icon: Radio },
-      { key: "sessions", label: "Sessions", icon: Users },
-      { key: "interactions", label: "Interactions", icon: MousePointerClick },
-      { key: "sales", label: "Sales performance", icon: TrendingUp },
-      { key: "overview", label: "Overview", icon: Gauge },
-      { key: "acquisition", label: "Acquisition", icon: Megaphone },
-      { key: "behaviour", label: "Behaviour", icon: Activity },
-      { key: "conversion", label: "Conversion", icon: Filter },
-      { key: "retention", label: "Retention", icon: Repeat },
-      { key: "alerts", label: "Alerts", icon: Bell },
+      { key: "/staff/live", label: "Live", icon: Radio, href: "/staff/live", exact: true },
+      { key: "/staff/live/sessions", label: "Sessions", icon: Users, href: "/staff/live/sessions" },
+      { key: "/staff/live/interactions", label: "Interactions", icon: MousePointerClick, href: "/staff/live/interactions" },
+      { key: "/staff/live/sales", label: "Sales performance", icon: TrendingUp, href: "/staff/live/sales" },
+      { key: "/staff/live/overview", label: "Overview", icon: Gauge, href: "/staff/live/overview" },
+      { key: "/staff/live/acquisition", label: "Acquisition", icon: Megaphone, href: "/staff/live/acquisition" },
+      { key: "/staff/live/behaviour", label: "Behaviour", icon: Activity, href: "/staff/live/behaviour" },
+      { key: "/staff/live/conversion", label: "Conversion", icon: Filter, href: "/staff/live/conversion" },
+      { key: "/staff/live/retention", label: "Retention", icon: Repeat, href: "/staff/live/retention" },
+      { key: "/staff/live/alerts", label: "Alerts", icon: Bell, href: "/staff/live/alerts" },
     ],
   },
   pricing: {
     heading: "Pricing",
     ariaLabel: "Pricing sections",
-    mode: { kind: "query", basePath: "/admin/pricing" },
+    mode: { kind: "route" },
     items: [
-      { key: "rates", label: "Rates", icon: DollarSign },
-      { key: "categories", label: "Categories", icon: Shapes },
-      { key: "models", label: "Models", icon: Bike },
-      { key: "addons", label: "Add-ons", icon: PlusCircle },
-      { key: "insurance", label: "Insurance", icon: Umbrella },
-      { key: "discounts", label: "Discounts", icon: Percent },
-      { key: "seasons", label: "Seasons", icon: CalendarRange },
+      { key: "/admin/pricing", label: "Rates", icon: DollarSign, href: "/admin/pricing", exact: true },
+      { key: "/admin/pricing/categories", label: "Categories", icon: Shapes, href: "/admin/pricing/categories" },
+      { key: "/admin/pricing/models", label: "Models", icon: Bike, href: "/admin/pricing/models" },
+      { key: "/admin/pricing/addons", label: "Add-ons", icon: PlusCircle, href: "/admin/pricing/addons" },
+      { key: "/admin/pricing/insurance", label: "Insurance", icon: Umbrella, href: "/admin/pricing/insurance" },
+      { key: "/admin/pricing/discounts", label: "Discounts", icon: Percent, href: "/admin/pricing/discounts" },
+      { key: "/admin/pricing/seasons", label: "Seasons", icon: CalendarRange, href: "/admin/pricing/seasons" },
     ],
   },
   reports: {
     heading: "Reports",
     ariaLabel: "Report sections",
-    mode: { kind: "query", basePath: "/admin/reports" },
+    mode: { kind: "route" },
     items: [
-      { key: "bookings", label: "Bookings", icon: ArrowLeftRight },
-      { key: "fleet", label: "Fleet", icon: Bike },
-      { key: "customers", label: "Customers", icon: Users },
-      { key: "financial", label: "Financial", icon: Banknote },
-      { key: "operational", label: "Operational", icon: AlertTriangle },
+      { key: "/admin/reports", label: "Bookings", icon: ArrowLeftRight, href: "/admin/reports", exact: true },
+      { key: "/admin/reports/fleet", label: "Fleet", icon: Bike, href: "/admin/reports/fleet" },
+      { key: "/admin/reports/customers", label: "Customers", icon: Users, href: "/admin/reports/customers" },
+      { key: "/admin/reports/financial", label: "Financial", icon: Banknote, href: "/admin/reports/financial" },
+      { key: "/admin/reports/operational", label: "Operational", icon: AlertTriangle, href: "/admin/reports/operational" },
     ],
   },
   integrations: {
     heading: "Integrations",
     ariaLabel: "Integration sections",
-    mode: { kind: "query", basePath: "/admin/integrations" },
+    mode: { kind: "route" },
     items: [
-      { key: "overview", label: "Overview", icon: LayoutGrid },
-      { key: "payments", label: "Payments & ID", icon: CreditCard },
-      { key: "messaging", label: "Messaging", icon: MessagesSquare },
-      { key: "accounting", label: "Accounting", icon: Receipt },
-      { key: "tolls", label: "Tolls", icon: Car },
-      { key: "customer", label: "Customer CX", icon: Sparkles },
-      { key: "operations", label: "Operations", icon: Satellite },
-      { key: "api-keys", label: "API keys", icon: KeyRound },
+      { key: "/admin/integrations", label: "Overview", icon: LayoutGrid, href: "/admin/integrations", exact: true },
+      { key: "/admin/integrations/payments", label: "Payments & ID", icon: CreditCard, href: "/admin/integrations/payments" },
+      { key: "/admin/integrations/messaging", label: "Messaging", icon: MessagesSquare, href: "/admin/integrations/messaging" },
+      { key: "/admin/integrations/accounting", label: "Accounting", icon: Receipt, href: "/admin/integrations/accounting" },
+      { key: "/admin/integrations/tolls", label: "Tolls", icon: Car, href: "/admin/integrations/tolls" },
+      { key: "/admin/integrations/customer", label: "Customer CX", icon: Sparkles, href: "/admin/integrations/customer" },
+      { key: "/admin/integrations/operations", label: "Operations", icon: Satellite, href: "/admin/integrations/operations" },
+      { key: "/admin/integrations/api-keys", label: "API keys", icon: KeyRound, href: "/admin/integrations/api-keys" },
     ],
   },
   settings: {
     heading: "System Settings",
     ariaLabel: "System settings sections",
-    mode: { kind: "query", basePath: "/admin/settings" },
+    mode: { kind: "route" },
     items: [
-      { key: "organisation", label: "Organisation", icon: Building2 },
-      { key: "booking", label: "Booking", icon: CalendarCheck },
-      { key: "checkout", label: "Checkout", icon: ShoppingCart },
-      { key: "cancellation", label: "Cancellation", icon: CalendarX },
-      { key: "payment", label: "Payment & tax", icon: CreditCard },
-      { key: "pricing", label: "Pricing", icon: Tags },
-      { key: "loyalty", label: "Loyalty", icon: Award },
-      { key: "notifications", label: "Notifications", icon: Bell },
-      { key: "authentication", label: "Authentication", icon: KeyRound },
-      { key: "audit", label: "Audit & retention", icon: Archive },
-      { key: "security", label: "Security", icon: ShieldCheck },
+      { key: "/admin/settings", label: "Organisation", icon: Building2, href: "/admin/settings", exact: true },
+      { key: "/admin/settings/booking", label: "Booking", icon: CalendarCheck, href: "/admin/settings/booking" },
+      { key: "/admin/settings/checkout", label: "Checkout", icon: ShoppingCart, href: "/admin/settings/checkout" },
+      { key: "/admin/settings/cancellation", label: "Cancellation", icon: CalendarX, href: "/admin/settings/cancellation" },
+      { key: "/admin/settings/payment", label: "Payment & tax", icon: CreditCard, href: "/admin/settings/payment" },
+      { key: "/admin/settings/pricing", label: "Pricing", icon: Tags, href: "/admin/settings/pricing" },
+      { key: "/admin/settings/loyalty", label: "Loyalty", icon: Award, href: "/admin/settings/loyalty" },
+      { key: "/admin/settings/notifications", label: "Notifications", icon: Bell, href: "/admin/settings/notifications" },
+      { key: "/admin/settings/authentication", label: "Authentication", icon: KeyRound, href: "/admin/settings/authentication" },
+      { key: "/admin/settings/audit", label: "Audit & retention", icon: Archive, href: "/admin/settings/audit" },
+      { key: "/admin/settings/security", label: "Security", icon: ShieldCheck, href: "/admin/settings/security" },
     ],
   },
 };
@@ -332,9 +330,7 @@ const SECTIONS: Record<SectionKey, SectionDef> = {
 /** Shared per-render state derived from the section def + current URL. */
 function useSectionState(section: SectionKey, isAdmin: boolean) {
   const def = SECTIONS[section];
-  const router = useRouter();
   const pathname = usePathname() ?? "";
-  const searchParams = useSearchParams();
 
   const items = React.useMemo(
     () => def.items.filter((i) => isAdmin || !i.adminOnly),
@@ -344,22 +340,6 @@ function useSectionState(section: SectionKey, isAdmin: boolean) {
   // Admin route groups carry the indigo accent; staff carry green. The active
   // icon colour mirrors the primary sidebar's ACCENT map.
   const accentIcon = pathname.startsWith("/admin") ? "text-admin" : "text-staff";
-
-  const isQuery = def.mode.kind === "query";
-  const activeTab = isQuery
-    ? (searchParams.get("tab") ?? items[0]?.key ?? "")
-    : "";
-
-  const onSelectTab = React.useCallback(
-    (key: string) => {
-      if (def.mode.kind !== "query") return;
-      const params = new URLSearchParams(searchParams.toString());
-      params.set("tab", key);
-      def.mode.clearParams?.forEach((p) => params.delete(p));
-      router.replace(`${def.mode.basePath}?${params.toString()}`, { scroll: false });
-    },
-    [def, router, searchParams],
-  );
 
   const isRouteActive = React.useCallback(
     (item: SectionNavItem) => {
@@ -371,7 +351,7 @@ function useSectionState(section: SectionKey, isAdmin: boolean) {
     [pathname],
   );
 
-  return { def, items, accentIcon, isQuery, activeTab, onSelectTab, isRouteActive };
+  return { def, items, accentIcon, isRouteActive };
 }
 
 const BAR_ITEM =
@@ -393,39 +373,7 @@ export function SectionTopBar({
   section: SectionKey;
   isAdmin?: boolean;
 }) {
-  const { def, items, accentIcon, isQuery, activeTab, onSelectTab, isRouteActive } =
-    useSectionState(section, isAdmin);
-
-  if (isQuery) {
-    return (
-      <TabsPrimitive.Root value={activeTab} onValueChange={onSelectTab}>
-        <TabsPrimitive.List
-          aria-label={def.ariaLabel}
-          className="flex items-center gap-1"
-        >
-          {items.map((item) => {
-            const Icon = item.icon;
-            const on = item.key === activeTab;
-            return (
-              <TabsPrimitive.Trigger
-                key={item.key}
-                value={item.key}
-                className={cn(BAR_ITEM, on ? BAR_ACTIVE : BAR_INACTIVE)}
-              >
-                <Icon
-                  className={cn(
-                    "h-[18px] w-[18px] shrink-0",
-                    on ? accentIcon : BAR_ICON_INACTIVE,
-                  )}
-                />
-                <span>{item.label}</span>
-              </TabsPrimitive.Trigger>
-            );
-          })}
-        </TabsPrimitive.List>
-      </TabsPrimitive.Root>
-    );
-  }
+  const { def, items, accentIcon, isRouteActive } = useSectionState(section, isAdmin);
 
   return (
     <nav aria-label={def.ariaLabel} className="flex items-center gap-1">
@@ -472,28 +420,7 @@ export function SectionNav({
   section: SectionKey;
   isAdmin?: boolean;
 }) {
-  const { def, items, isQuery, activeTab, onSelectTab, isRouteActive } =
-    useSectionState(section, isAdmin);
-
-  if (isQuery) {
-    return (
-      <div className="lg:hidden">
-        <Tabs value={activeTab} onValueChange={onSelectTab}>
-          <MobileScrollTabs className="w-full justify-start sm:w-full">
-            {items.map((item) => {
-              const Icon = item.icon;
-              return (
-                <TabsTrigger key={item.key} value={item.key} className="gap-1.5">
-                  <Icon className="h-3.5 w-3.5" />
-                  <span>{item.label}</span>
-                </TabsTrigger>
-              );
-            })}
-          </MobileScrollTabs>
-        </Tabs>
-      </div>
-    );
-  }
+  const { def, items, isRouteActive } = useSectionState(section, isAdmin);
 
   return (
     <nav

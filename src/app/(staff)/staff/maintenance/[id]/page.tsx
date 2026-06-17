@@ -33,7 +33,7 @@ export default function WorkOrderDetailPage(props: { params: Promise<{ id: strin
     <PageShell className="max-w-4xl">
       <PageHeader
         breadcrumbs={[
-          { label: "Maintenance", href: "/staff/fleet?tab=maintenance" },
+          { label: "Maintenance", href: "/staff/fleet/maintenance" },
           { label: wo.workOrderNumber },
         ]}
         title={wo.workOrderNumber}

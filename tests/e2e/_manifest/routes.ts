@@ -52,7 +52,7 @@ export const CUSTOMER_ROUTES: readonly string[] = [
 
 /** Back-office routes that exist but are not BACK_OFFICE_NAV entries. */
 const EXTRA_STAFF_ROUTES: readonly string[] = [
-  "/staff/fleet/vehicles",
+  // /staff/fleet/vehicles is now a nav child (Fleet → Vehicles route), swept from the nav.
   "/staff/fleet/new",
   "/staff/incidents",
   "/staff/inspections",

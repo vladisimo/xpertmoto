@@ -48,3 +48,9 @@ dist
 
 # Playwright MCP browser-session artefacts (console logs, page snapshots)
 /.playwright-mcp/
+
+# Local working artefacts: generated hosting deliverables + ad-hoc preview
+# renders kept at repo root. Not source — regenerated locally as needed.
+/XPERT-Moto-AU-Hosting-Roadmap.pdf
+/XPERT-Moto-Hosting-Decision-Sheet.pdf
+/linkt-toll-summary-preview.png

@@ -32,7 +32,7 @@ export default function IncidentDetailPage(props: { params: Promise<{ id: string
     <PageShell className="max-w-4xl">
       <PageHeader
         breadcrumbs={[
-          { label: "Incidents", href: "/staff/fleet?tab=incidents" },
+          { label: "Incidents", href: "/staff/fleet/incidents" },
           { label: inc.incidentNumber },
         ]}
         title={inc.incidentNumber}

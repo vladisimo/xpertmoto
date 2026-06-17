@@ -1,4 +1,17 @@
 import { ChevronDown } from "lucide-react";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+import { faqPageLd } from "@/lib/seo/json-ld";
+import { JsonLd } from "@/components/seo/json-ld";
+
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "FAQ",
+    description:
+      "Answers to common questions about scooter & motorbike hire — licences, insurance, bonds, age limits, pickup and returns.",
+    path: "/faq",
+  });
+}
 
 type FAQ = { q: string; a: string };
 type FAQSection = { heading: string; intro?: string; items: FAQ[] };
@@ -177,6 +190,14 @@ const SECTIONS: FAQSection[] = [
 export default function FAQPage() {
   return (
     <div className="container max-w-3xl py-12">
+      <JsonLd
+        data={faqPageLd(
+          SECTIONS.flatMap((s) => s.items).map((i) => ({
+            question: i.q,
+            answer: i.a,
+          })),
+        )}
+      />
       <h1 className="h-display">Frequently asked questions</h1>
       <p className="mt-3 text-muted-foreground">
         Answers to the most common questions about hiring a bike or scooter with us.

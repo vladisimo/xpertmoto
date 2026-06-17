@@ -101,6 +101,14 @@ const envSchema = z
     APP_URL: z.string().url().optional(),
     NEXT_PUBLIC_APP_URL: z.string().url().optional(),
 
+    // SEO. GOOGLE_SITE_VERIFICATION renders the Search Console verification
+    // meta tag (server-side, so non-public to keep it out of the client
+    // bundle). SEO_INDEXABLE gates robots.ts: when unset, indexing follows
+    // NODE_ENV (only production is crawlable) so staging/preview deploys are
+    // never indexed; set "1" to force-allow or "0" to force-block.
+    GOOGLE_SITE_VERIFICATION: z.string().optional(),
+    SEO_INDEXABLE: z.enum(["0", "1"]).optional(),
+
     // Live-visitor analytics — `IP_HASH_SALT` is used by the heartbeat
     // mutation to hash incoming IPs before persisting (raw IP is never
     // stored). `MAXMIND_DB_PATH` points to the bundled GeoLite2-City.mmdb;

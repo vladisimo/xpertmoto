@@ -1,5 +1,16 @@
 import { CURRENT_TERMS, interpolateTerms } from "@/lib/agreement/terms";
 import { getBranding } from "@/lib/branding";
+import type { Metadata } from "next";
+import { buildMetadata } from "@/lib/seo/metadata";
+
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Terms & Conditions",
+    description:
+      "The rental terms and conditions for hiring a scooter or motorbike — eligibility, bonds, insurance, liability and your obligations.",
+    path: "/terms",
+  });
+}
 
 export default async function TermsPage() {
   const branding = await getBranding();

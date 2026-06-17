@@ -9,6 +9,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "analyze": "ANALYZE=true next build",
+    "lhci": "lhci autorun",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -139,6 +141,8 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "@lhci/cli": "^0.15.1",
+    "@next/bundle-analyzer": "^16.2.9",
     "@next/eslint-plugin-next": "^16.2.6",
     "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.9.1",

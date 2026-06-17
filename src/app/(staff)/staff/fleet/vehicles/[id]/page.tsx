@@ -105,7 +105,7 @@ export default function VehicleDetailPage(props: { params: Promise<{ id: string 
           <div className="min-w-0 flex-1">
             <PageHeader
               breadcrumbs={[
-                { label: "Fleet", href: "/staff/fleet?tab=vehicles" },
+                { label: "Fleet", href: "/staff/fleet/vehicles" },
                 { label: v.internalCode },
               ]}
               title={`${v.year} ${v.make} ${v.model}`}
