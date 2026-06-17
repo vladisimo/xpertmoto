@@ -19,11 +19,15 @@ import {
   registerInputSchema,
   resetPasswordInputSchema,
   setPasswordInputSchema,
+  verifyEmailInputSchema,
+  resendVerificationInputSchema,
 } from "@/lib/validators/auth";
 import { TERMS_VERSION, PRIVACY_VERSION } from "@/lib/consent-versions";
 import { trackServer, trackServerIdentify } from "@/lib/analytics";
 import { sendEmail } from "@/lib/email";
 import PasswordResetEmail from "../../../../emails/password-reset";
+import VerifyEmail from "../../../../emails/verify-email";
+import type { PrismaClient } from "@prisma/client";
 import {
   captureCustomerId,
   readCapturedCustomerId,
@@ -38,6 +42,48 @@ const RESET_PREFIX = "password-reset:";
 
 function buildResetIdentifier(email: string): string {
   return `${RESET_PREFIX}${email.toLowerCase()}`;
+}
+
+/** Email-verification links (R2-M4) share the VerificationToken table. The
+ *  prefix namespaces them apart from reset / magic-link rows. */
+const EMAIL_VERIFY_PREFIX = "email-verify:";
+const EMAIL_VERIFY_TTL_HOURS = 24;
+
+function buildEmailVerifyIdentifier(email: string): string {
+  return `${EMAIL_VERIFY_PREFIX}${email.toLowerCase()}`;
+}
+
+/** Mint a fresh single-active verification token and email the confirm link.
+ *  Best-effort caller responsibility — never let a mail failure fail the
+ *  surrounding mutation (registration must still succeed). */
+async function issueAndSendEmailVerification(
+  prisma: PrismaClient,
+  email: string,
+): Promise<void> {
+  const token = crypto.randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + EMAIL_VERIFY_TTL_HOURS * 60 * 60 * 1000);
+  // One active verification token per address at a time.
+  await prisma.verificationToken.deleteMany({
+    where: { identifier: buildEmailVerifyIdentifier(email) },
+  });
+  await prisma.verificationToken.create({
+    data: { identifier: buildEmailVerifyIdentifier(email), token, expires },
+  });
+  const baseUrl =
+    process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "http://localhost:3000";
+  const url = `${baseUrl}/verify-email?token=${encodeURIComponent(token)}`;
+  const { getBranding } = await import("@/lib/branding");
+  const { siteName } = await getBranding();
+  await sendEmail({
+    to: email,
+    subject: `Confirm your ${siteName} email`,
+    react: VerifyEmail({
+      url,
+      expiresInHours: EMAIL_VERIFY_TTL_HOURS,
+      email,
+      siteName,
+    }),
+  });
 }
 
 export const authRouter = createTRPCRouter({
@@ -106,7 +152,89 @@ export const authRouter = createTRPCRouter({
         },
       });
 
+      // R2-M4: send the email-verification link. Best-effort — a mail
+      // failure must not fail registration (the user can resend later, and
+      // the booking-confirm gate is what actually enforces verification).
+      await issueAndSendEmailVerification(ctx.prisma, user.email).catch(() => undefined);
+
       return { id: user.id, email: user.email };
+    }),
+
+  /**
+   * Consume an email-verification link (R2-M4). Single-use: the token and any
+   * siblings are burned on success. Idempotent — re-verifying keeps the
+   * original emailVerified timestamp.
+   */
+  verifyEmail: publicProcedure
+    .use(
+      trpcRateLimit<z.infer<typeof verifyEmailInputSchema>>({
+        bucket: "auth:verify-email",
+        limit: 10,
+        windowSec: 15 * 60,
+        identifier: (_ctx, input) => input?.token?.slice(0, 16),
+      }),
+    )
+    .input(verifyEmailInputSchema)
+    .meta({ audit: { customerIdPath: readCapturedCustomerId } })
+    .mutation(async ({ ctx, input }) => {
+      const record = await ctx.prisma.verificationToken.findUnique({
+        where: { token: input.token },
+      });
+      if (!record || !record.identifier.startsWith(EMAIL_VERIFY_PREFIX)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid or expired link" });
+      }
+      if (record.expires < new Date()) {
+        await ctx.prisma.verificationToken
+          .delete({ where: { token: input.token } })
+          .catch(() => undefined);
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Link expired — request a new one" });
+      }
+      const email = record.identifier.slice(EMAIL_VERIFY_PREFIX.length);
+      const user = await ctx.prisma.user.findFirst({
+        where: { email: { equals: email, mode: "insensitive" } },
+        select: { id: true, emailVerified: true, status: true, deletedAt: true },
+      });
+      if (!user || user.deletedAt || user.status !== "ACTIVE") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Account unavailable" });
+      }
+      captureCustomerId(ctx, user.id);
+      await ctx.prisma.$transaction([
+        ctx.prisma.user.update({
+          where: { id: user.id },
+          // Idempotent: keep the first-verified timestamp on a repeat click.
+          data: { emailVerified: user.emailVerified ?? new Date() },
+        }),
+        ctx.prisma.verificationToken.deleteMany({
+          where: { identifier: record.identifier },
+        }),
+      ]);
+      return { ok: true };
+    }),
+
+  /**
+   * Request a fresh email-verification link. Non-enumerating — always returns
+   * success; only actually sends when the account exists, is active, and is
+   * still unverified. Rate-limited per email.
+   */
+  resendVerification: publicProcedure
+    .use(
+      trpcRateLimit<z.infer<typeof resendVerificationInputSchema>>({
+        bucket: "auth:resend-verify",
+        limit: 5,
+        windowSec: 60 * 60,
+        identifier: (_ctx, input) => input?.email,
+      }),
+    )
+    .input(resendVerificationInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      const user = await ctx.prisma.user.findFirst({
+        where: { email: { equals: input.email, mode: "insensitive" } },
+        select: { id: true, emailVerified: true, status: true, deletedAt: true },
+      });
+      if (user && !user.deletedAt && user.status === "ACTIVE" && !user.emailVerified) {
+        await issueAndSendEmailVerification(ctx.prisma, input.email).catch(() => undefined);
+      }
+      return { ok: true };
     }),
 
   /**

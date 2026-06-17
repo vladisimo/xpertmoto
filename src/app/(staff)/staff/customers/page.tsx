@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { getSSRHelpers } from "@/lib/trpc/ssr";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import { CustomersHeaderActions } from "@/components/staff/customers-header-actions";
 import { CustomersTabsBar } from "@/components/staff/customers-tabs-bar";
 import {
@@ -100,30 +101,32 @@ export default async function CustomersPage({
   }
 
   return (
-    <PageShell full>
-      <PageHeader
-        eyebrow="Operations"
-        title="Customers"
-        description="Browse, filter, and triage customers across depots."
-        actions={<CustomersHeaderActions />}
-      />
-      <CustomersTabsBar activeTab={activeTab} isAdmin={isAdmin} />
+    <SectionShell section="customers" isAdmin={isAdmin}>
+      <PageShell full>
+        <PageHeader
+          eyebrow="Operations"
+          title="Customers"
+          description="Browse, filter, and triage customers across depots."
+          actions={<CustomersHeaderActions />}
+        />
+        <CustomersTabsBar isAdmin={isAdmin} />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {activeTab === "overview" && <CustomerOverviewTab />}
-        {activeTab === "directory" && prefetched && (
-          <HydrationBoundary state={dehydrate(prefetched.queryClient)}>
-            <CustomersClient />
-          </HydrationBoundary>
-        )}
-        {activeTab === "verification" && <CustomerVerificationTab />}
-        {activeTab === "risk" && <CustomerRiskTab />}
-        {activeTab === "loyalty" && <CustomerLoyaltyTab />}
-        {activeTab === "communications" && <CustomerCommunicationsTab />}
-        {activeTab === "documents" && <CustomerDocumentsTab />}
-        {activeTab === "settings" && <CustomerSettingsTab />}
-        {activeTab === "users" && isAdmin && <CustomerUsersTab />}
-      </div>
-    </PageShell>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {activeTab === "overview" && <CustomerOverviewTab />}
+          {activeTab === "directory" && prefetched && (
+            <HydrationBoundary state={dehydrate(prefetched.queryClient)}>
+              <CustomersClient />
+            </HydrationBoundary>
+          )}
+          {activeTab === "verification" && <CustomerVerificationTab />}
+          {activeTab === "risk" && <CustomerRiskTab />}
+          {activeTab === "loyalty" && <CustomerLoyaltyTab />}
+          {activeTab === "communications" && <CustomerCommunicationsTab />}
+          {activeTab === "documents" && <CustomerDocumentsTab />}
+          {activeTab === "settings" && <CustomerSettingsTab />}
+          {activeTab === "users" && isAdmin && <CustomerUsersTab />}
+        </div>
+      </PageShell>
+    </SectionShell>
   );
 }

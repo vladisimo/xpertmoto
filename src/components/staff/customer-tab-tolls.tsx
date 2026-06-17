@@ -9,7 +9,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
  * Tolls tab on the staff customer detail page.
  *
  * Tolls are stored as `Infringement` rows with `type = TOLL` (the
- * platform has no separate `ETollCharge` model). This tab joins each
+ * platform has no separate toll-charge model). This tab joins each
  * toll to its `INFRINGEMENT_RECOVERY` Payment so the displayed status
  * reflects whether the customer has actually paid — not just the
  * intermediate "CUSTOMER_CHARGED" lifecycle flag on the Infringement.
@@ -67,7 +67,7 @@ export function CustomerTabTolls({ customerId }: { customerId: string }) {
         <h2 className="text-xl font-semibold">Tolls</h2>
         <div className="py-8 text-center text-muted-foreground">
           No toll charges found for this customer. Toll charges are synced
-          automatically from linked e-toll accounts and matched to bookings.
+          automatically from linked toll accounts and matched to bookings.
         </div>
       </div>
     );

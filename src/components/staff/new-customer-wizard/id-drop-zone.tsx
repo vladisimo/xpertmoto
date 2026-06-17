@@ -183,7 +183,7 @@ function OcrStatusChip({ status }: { status: OcrStatus }) {
   return (
     <span className={cn(base, "bg-destructive/10 text-destructive")}>
       <AlertTriangle className="h-3 w-3" />
-      Detection failed
+      {status.message ?? "Detection failed"}
     </span>
   );
 }

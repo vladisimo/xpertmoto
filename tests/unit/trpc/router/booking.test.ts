@@ -25,6 +25,12 @@ vi.mock("@/server/services/booking-confirmation", async (importActual) => {
   const actual = await importActual<typeof import("@/server/services/booking-confirmation")>();
   return { ...actual, confirmBookingPayment: vi.fn() };
 });
+// change/quoteChange delegate to the booking-change service; the guard error
+// class stays real (importActual) for the instanceof → BAD_REQUEST mapping.
+vi.mock("@/server/services/booking-change", async (importActual) => {
+  const actual = await importActual<typeof import("@/server/services/booking-change")>();
+  return { ...actual, previewBookingChange: vi.fn(), applyBookingChange: vi.fn() };
+});
 
 import { bookingRouter } from "../../../../src/server/trpc/router/booking";
 import { buildOnboardingVersion } from "../../../../src/lib/onboarding-status";
@@ -38,6 +44,11 @@ import {
   PaymentNotSucceededError,
   BookingNotConfirmableError,
 } from "../../../../src/server/services/booking-confirmation";
+import {
+  previewBookingChange,
+  applyBookingChange,
+  BookingChangeNotAllowedError,
+} from "../../../../src/server/services/booking-change";
 
 const ONBOARDED = { onboardedAt: new Date(), onboardingVersion: buildOnboardingVersion() };
 const BARE = { onboardedAt: null, onboardingVersion: null };
@@ -121,6 +132,84 @@ describe("booking.byId", () => {
     const ctx = makeCtx({ booking: null });
     const c = bookingRouter.createCaller(ctx as never);
     await expect(c.byId({ id: "missing" })).rejects.toBeInstanceOf(TRPCError);
+  });
+});
+
+describe("booking.checkEligibility — H-3 early licence/age gate", () => {
+  function makeEligibilityCtx(opts: {
+    licenceClass: string | null;
+    licenceRequired: string;
+    minAge?: number;
+    dateOfBirth?: Date;
+    category?: { name: string; licenceRequired: string; minAge: number } | null;
+    userId?: string;
+  }) {
+    const prisma = {
+      user: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          dateOfBirth: opts.dateOfBirth ?? new Date("1990-01-01"),
+          customerProfile: {
+            licenceClass: opts.licenceClass,
+            licenceExpiry: new Date("2999-01-01"),
+            passportNumber: null,
+            passportExpiry: null,
+          },
+        }),
+      },
+      vehicleCategory: {
+        findUnique: vi.fn().mockResolvedValue(
+          opts.category === undefined
+            ? {
+                name: "LAMS Motorcycle",
+                licenceRequired: opts.licenceRequired,
+                minAge: opts.minAge ?? 18,
+              }
+            : opts.category,
+        ),
+      },
+    };
+    return {
+      prisma,
+      session: { user: { id: opts.userId ?? "cust1", role: "CUSTOMER" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["checkEligibility"]>[0];
+  }
+
+  const input = { categoryId: "cat1", pickupDateTime: new Date("2026-07-01T10:00:00Z") };
+
+  it("returns eligible for a covering licence class", async () => {
+    const ctx = makeEligibilityCtx({ licenceClass: "R", licenceRequired: "R" });
+    const c = bookingRouter.createCaller(ctx as never);
+    const out = await c.checkEligibility(input);
+    expect(out.eligible).toBe(true);
+    expect(out.failure).toBeNull();
+  });
+
+  it("fails with LICENCE_CLASS for a car-only licence on a motorcycle category", async () => {
+    const ctx = makeEligibilityCtx({ licenceClass: "C", licenceRequired: "R" });
+    const c = bookingRouter.createCaller(ctx as never);
+    const out = await c.checkEligibility(input);
+    expect(out.eligible).toBe(false);
+    expect(out.failure?.code).toBe("LICENCE_CLASS");
+  });
+
+  it("does not block when the category is unknown", async () => {
+    const ctx = makeEligibilityCtx({ licenceClass: "C", licenceRequired: "R", category: null });
+    const c = bookingRouter.createCaller(ctx as never);
+    const out = await c.checkEligibility(input);
+    expect(out.eligible).toBe(true);
+  });
+
+  it("rejects an anonymous caller (UNAUTHORIZED)", async () => {
+    const ctx = {
+      prisma: {},
+      session: null,
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["checkEligibility"]>[0];
+    const c = bookingRouter.createCaller(ctx as never);
+    await expect(c.checkEligibility(input)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 });
 
@@ -232,10 +321,15 @@ describe("booking.quote — validation errors map to BAD_REQUEST", () => {
 describe("booking.confirmPayment — delegation + error mapping", () => {
   const confirmMock = confirmBookingPayment as unknown as ReturnType<typeof vi.fn>;
 
-  function makeConfirmCtx(ownerId = "cust1") {
+  function makeConfirmCtx(
+    ownerId = "cust1",
+    emailVerified: Date | null = new Date(),
+  ) {
     const prisma = {
       booking: {
-        findUniqueOrThrow: vi.fn().mockResolvedValue({ customerId: ownerId }),
+        findUniqueOrThrow: vi
+          .fn()
+          .mockResolvedValue({ customerId: ownerId, customer: { emailVerified } }),
       },
     };
     return {
@@ -274,6 +368,16 @@ describe("booking.confirmPayment — delegation + error mapping", () => {
     expect(confirmMock).not.toHaveBeenCalled();
   });
 
+  it("rejects an unverified customer with FORBIDDEN before touching the service (R2-M4)", async () => {
+    confirmMock.mockClear();
+    // owner is the caller (cust1) but their email is unconfirmed.
+    const caller = bookingRouter.createCaller(makeConfirmCtx("cust1", null));
+    await expect(
+      caller.confirmPayment({ bookingId: "b1", paymentIntentId: "pi_1" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
   it("maps PaymentNotSucceededError to BAD_REQUEST", async () => {
     confirmMock.mockRejectedValueOnce(new PaymentNotSucceededError("processing"));
     const caller = bookingRouter.createCaller(makeConfirmCtx());
@@ -288,5 +392,49 @@ describe("booking.confirmPayment — delegation + error mapping", () => {
     await expect(
       caller.confirmPayment({ bookingId: "b1" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+describe("booking.change / quoteChange — auth + delegation (M-5)", () => {
+  const previewMock = previewBookingChange as unknown as ReturnType<typeof vi.fn>;
+  const applyMock = applyBookingChange as unknown as ReturnType<typeof vi.fn>;
+
+  function makeChangeCtx(callerId = "cust1", ownerId = "cust1", role = "CUSTOMER") {
+    const prisma = {
+      booking: { findUniqueOrThrow: vi.fn().mockResolvedValue({ customerId: ownerId }) },
+    };
+    return {
+      prisma,
+      session: { user: { id: callerId, role } },
+      user: { id: callerId, role },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as never;
+  }
+
+  const NEW_WINDOW = {
+    bookingId: "b1",
+    newPickupDateTime: new Date("2027-07-06T09:00:00Z"),
+    newReturnDateTime: new Date("2027-07-13T09:00:00Z"),
+  };
+
+  it("quoteChange rejects a non-owner with FORBIDDEN", async () => {
+    previewMock.mockClear();
+    const caller = bookingRouter.createCaller(makeChangeCtx("intruder", "cust1"));
+    await expect(caller.quoteChange(NEW_WINDOW)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(previewMock).not.toHaveBeenCalled();
+  });
+
+  it("quoteChange returns the preview for the owner", async () => {
+    previewMock.mockResolvedValueOnce({ preview: { direction: "INCREASE", delta: 162 } });
+    const caller = bookingRouter.createCaller(makeChangeCtx());
+    const res = await caller.quoteChange(NEW_WINDOW);
+    expect(res).toMatchObject({ direction: "INCREASE", delta: 162 });
+  });
+
+  it("change maps BookingChangeNotAllowedError to BAD_REQUEST", async () => {
+    applyMock.mockRejectedValueOnce(new BookingChangeNotAllowedError("nope"));
+    const caller = bookingRouter.createCaller(makeChangeCtx());
+    await expect(caller.change(NEW_WINDOW)).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 });

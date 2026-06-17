@@ -9,11 +9,13 @@
 export const FLEET_TAB_VALUES = [
   "overview",
   "vehicles",
+  "live",
   "makes-models",
   "maintenance",
   "inspections",
   "incidents",
   "infringements",
+  "nominations",
   "tolls",
   "depots",
   "settings",

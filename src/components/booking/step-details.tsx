@@ -108,6 +108,27 @@ function isProfileReviewable(
  * we bounce a logged-in-but-not-onboarded customer through /onboarding. */
 const STEP4_RETURN_PATH = "/booking/4";
 
+/**
+ * H-3: which `booking.checkEligibility` failures hard-block at step 4.
+ * Only the licence-class and age gates — a class-C licence on a motorcycle
+ * category, or an under-age rider — must stop the customer before payment.
+ * Missing-ID / no-valid-ID / DOB-missing failures are onboarding concerns
+ * owned by the upload guard and the onboarding redirect, so they're not
+ * surfaced here (the customer is still mid-entering them).
+ */
+const HARD_ELIGIBILITY_BLOCK_CODES = ["LICENCE_CLASS", "AGE"];
+function eligibilityBlockMessage(
+  result:
+    | { eligible: boolean; failure: { code: string; message: string } | null }
+    | null
+    | undefined,
+): string | null {
+  if (!result || result.eligible || !result.failure) return null;
+  return HARD_ELIGIBILITY_BLOCK_CODES.includes(result.failure.code)
+    ? result.failure.message
+    : null;
+}
+
 export function StepDetails() {
   const w = useBookingWizard();
   const flags = useBookingFlags();
@@ -141,6 +162,26 @@ export function StepDetails() {
     staleTime: 60_000,
   });
   const updateProfile = trpc.customer.updateProfile.useMutation();
+  // H-3: check licence/age eligibility for the chosen category against the
+  // signed-in customer's profile, so a class-C rider who picked a motorcycle
+  // category is stopped here at step 4 rather than at payment (step 6).
+  const { data: eligibility, refetch: refetchEligibility } =
+    trpc.booking.checkEligibility.useQuery(
+      {
+        categoryId: w.categoryId ?? "",
+        pickupDateTime: w.pickupDateTime ? new Date(w.pickupDateTime) : new Date(),
+      },
+      {
+        enabled:
+          !!session?.user &&
+          session?.pending2fa !== true &&
+          session?.requiresOnboarding !== true &&
+          !!w.categoryId &&
+          !!w.pickupDateTime,
+        staleTime: 30_000,
+      },
+    );
+  const eligibilityBlock = eligibilityBlockMessage(eligibility);
   // Legacy passport toggle — only used when wizard_intl_licence_flow is OFF.
   // With the flag ON the binary AU-vs-IDP gate drives the UI, so this
   // state is ignored.
@@ -298,6 +339,12 @@ export function StepDetails() {
 
   function handleContinue() {
     if (isUnauthedOrLoading) return;
+    // H-3: a licence-class / age block stops the customer here, before they
+    // can enter card details on step 6.
+    if (eligibilityBlock) {
+      setSaveError(eligibilityBlock);
+      return;
+    }
     if (missingImagesMessage) {
       setSaveError(missingImagesMessage);
       if (mode !== "edit") setMode("edit");
@@ -414,6 +461,15 @@ export function StepDetails() {
         emergencyContactPhone: values.emergencyContactPhone || undefined,
       });
       await refetchMe().catch(() => undefined);
+      // H-3: re-check eligibility against the just-saved licence before
+      // advancing — the customer may have entered a class that doesn't cover
+      // the chosen category.
+      const fresh = await refetchEligibility().catch(() => null);
+      const block = eligibilityBlockMessage(fresh?.data);
+      if (block) {
+        setSaveError(block);
+        return;
+      }
       w.next();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Could not save your details.");
@@ -424,6 +480,13 @@ export function StepDetails() {
     return (
       <div className="space-y-6">
         <h2 className="h2 hidden md:block">Review your details</h2>
+
+        {eligibilityBlock && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <span>{eligibilityBlock}</span>
+          </div>
+        )}
 
         <div className="relative rounded-lg border border-border bg-card px-5 pb-5 pt-3 space-y-5">
           <Button
@@ -559,6 +622,12 @@ export function StepDetails() {
         </div>
 
         <div className="space-y-4" ref={uploadSectionRef}>
+          {eligibilityBlock && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              <Info className="mr-1 -mt-0.5 inline-block h-4 w-4" />
+              {eligibilityBlock}
+            </div>
+          )}
           {missingImagesMessage && (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
               <Info className="mr-1 -mt-0.5 inline-block h-4 w-4" />

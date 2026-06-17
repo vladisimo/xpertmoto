@@ -99,7 +99,7 @@ export function LiveClient() {
         onValueChange={(next) => setParams({ tab: next === "live" ? null : next })}
         className="flex min-h-0 flex-1 flex-col gap-4"
       >
-        <MobileScrollTabs className="w-max sm:w-max">
+        <MobileScrollTabs className="w-max sm:w-max lg:hidden">
           {TABS.map((value) => {
             const meta = TAB_META[value];
             const Icon = meta.icon;

@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -16,7 +16,6 @@ import {
 import {
   BACK_OFFICE_NAV,
   canAccess,
-  type BackOfficeNavItem,
   type PortalSection,
   type UserRole,
 } from "@/lib/nav";
@@ -37,11 +36,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "@/components/ui/hover-card";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { useBranding } from "@/components/shared/branding-provider";
@@ -63,12 +57,27 @@ const SECTION_META: Record<PortalSection, { label: string }> = {
 
 const SECTIONS_ORDER: PortalSection[] = ["staff", "admin"];
 
+/** Sidebar width bounds (px) for drag-to-resize, plus persistence keys. */
+const SIDEBAR_MIN_WIDTH = 208;
+const SIDEBAR_MAX_WIDTH = 384;
+const SIDEBAR_DEFAULT_WIDTH = 256; // matches the previous w-64
+const SIDEBAR_COLLAPSED_WIDTH = 68; // matches the previous w-[68px]
+/** Drag the handle left of this viewport-x to snap the sidebar collapsed. */
+const SIDEBAR_COLLAPSE_THRESHOLD = 150;
+const SIDEBAR_WIDTH_KEY = "backoffice.sidebar.width";
+const SIDEBAR_COLLAPSED_KEY = "backoffice.sidebar.collapsed";
+
+const clampSidebarWidth = (w: number) =>
+  Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, w));
+
 /**
  * Role-accent palette for the sidebar chrome. Keyed by `accent`, not role,
  * because a SUPER_ADMIN viewing `/staff/*` should see the staff accent.
  */
 const ACCENT: Record<ShellAccent, {
   gradient: string;
+  /** Accent hue (HSL triplet var) used to tint the misty sidebar glow. */
+  glowVar: string;
   logoBg: string;
   activeIcon: string;
   chipLabel: string;
@@ -76,6 +85,7 @@ const ACCENT: Record<ShellAccent, {
 }> = {
   staff: {
     gradient: "bg-black",
+    glowVar: "var(--staff-accent)",
     logoBg: "bg-staff text-staff-foreground",
     activeIcon: "text-staff",
     chipLabel: "Operations",
@@ -83,12 +93,47 @@ const ACCENT: Record<ShellAccent, {
   },
   admin: {
     gradient: "bg-black",
+    glowVar: "var(--admin-accent)",
     logoBg: "bg-admin text-admin-foreground",
     activeIcon: "text-admin",
     chipLabel: "Admin",
     chipClasses: "bg-admin/15 text-admin ring-1 ring-inset ring-admin/30",
   },
 };
+
+/**
+ * Subtle "misty wavey glow" backdrop for the sidebar. A few soft, accent-tinted
+ * radial blooms layered low and blurred — reads as professional ambient depth
+ * against the near-black chrome rather than a flat panel. Sits behind content
+ * via a negative z-index (parent is `isolate`), and is purely decorative.
+ */
+function SidebarGlow({ glowVar }: { glowVar: string }) {
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-0 -z-10 overflow-hidden"
+    >
+      <div
+        className="absolute inset-x-[-30%] top-[-8%] h-[55%] blur-2xl opacity-50"
+        style={{
+          background: `radial-gradient(60% 80% at 25% 18%, hsl(${glowVar} / 0.9), transparent 68%)`,
+        }}
+      />
+      <div
+        className="absolute inset-x-[-35%] top-[32%] h-[50%] blur-2xl opacity-40"
+        style={{
+          background: `radial-gradient(70% 70% at 80% 50%, hsl(${glowVar} / 0.8), transparent 70%)`,
+        }}
+      />
+      <div
+        className="absolute inset-x-[-25%] bottom-[-10%] h-[50%] blur-2xl opacity-45"
+        style={{
+          background: `radial-gradient(65% 75% at 30% 88%, hsl(${glowVar} / 0.85), transparent 68%)`,
+        }}
+      />
+    </div>
+  );
+}
 
 function getInitials(name?: string | null, email?: string | null): string {
   if (name) {
@@ -116,36 +161,73 @@ function UserMenu({
   accent,
   onSignOut,
   variant = "bar",
+  collapsed = false,
 }: {
   user: BackOfficeUser;
   accent: ShellAccent;
   onSignOut: () => void;
   /** `bar` = inside the dark mobile top bar. `floating` = standalone button
-   *  on the light page surface (desktop top-right corner). */
-  variant?: "bar" | "floating";
+   *  on the light page surface (desktop top-right corner). `sidebar` = footer
+   *  row anchored at the bottom of the dark side nav. */
+  variant?: "bar" | "floating" | "sidebar";
+  /** Sidebar variant only — render avatar-only when the rail is collapsed. */
+  collapsed?: boolean;
 }) {
   const initials = getInitials(user.name, user.email);
+  const avatar = (
+    <Avatar className="h-8 w-8">
+      {user.avatarUrl && <AvatarImage src={user.avatarUrl} alt="" />}
+      <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
+        {initials}
+      </AvatarFallback>
+    </Avatar>
+  );
+
+  let trigger: React.ReactNode;
+  if (variant === "sidebar") {
+    trigger = (
+      <button
+        aria-label="Account menu"
+        className={cn(
+          "flex items-center rounded-md text-left text-slate-300 transition-colors hover:bg-white/10 hover:text-white",
+          collapsed ? "h-9 w-9 justify-center" : "w-full gap-2.5 px-2 py-1.5",
+        )}
+      >
+        {avatar}
+        {!collapsed && (
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-white">
+              {user.name}
+            </p>
+            <p className="truncate text-xs text-slate-400">{user.email}</p>
+          </div>
+        )}
+      </button>
+    );
+  } else {
+    trigger = (
+      <button
+        aria-label="Account menu"
+        className={cn(
+          "flex items-center gap-2 rounded-full p-1 transition-colors",
+          variant === "bar"
+            ? "hover:bg-white/10"
+            : "bg-background shadow-sm ring-1 ring-border hover:bg-muted",
+        )}
+      >
+        {avatar}
+      </button>
+    );
+  }
+
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          aria-label="Account menu"
-          className={cn(
-            "flex items-center gap-2 rounded-full p-1 transition-colors",
-            variant === "bar"
-              ? "hover:bg-white/10"
-              : "bg-background shadow-sm ring-1 ring-border hover:bg-muted",
-          )}
-        >
-          <Avatar className="h-8 w-8">
-            {user.avatarUrl && <AvatarImage src={user.avatarUrl} alt="" />}
-            <AvatarFallback className="bg-slate-700 text-xs text-slate-200">
-              {initials}
-            </AvatarFallback>
-          </Avatar>
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent
+        align={variant === "sidebar" ? "start" : "end"}
+        side={variant === "sidebar" ? "top" : "bottom"}
+        className="w-56"
+      >
         <DropdownMenuLabel className="font-normal">
           <div className="flex flex-col space-y-1">
             <p className="text-sm font-medium">{user.name}</p>
@@ -178,100 +260,6 @@ function UserMenu({
   );
 }
 
-/**
- * Picks the child whose href best matches the current location. Tab children
- * (`?tab=…`) win on an exact tab match; sibling-route children win by longest
- * matching path prefix. Returns `null` when nothing matches.
- */
-function activeChildHref(
-  item: BackOfficeNavItem,
-  pathname: string,
-  currentTab: string | null,
-): string | null {
-  let best = -1;
-  let href: string | null = null;
-  for (const child of item.children ?? []) {
-    const [path = child.href, query] = child.href.split("?");
-    const childTab = query ? new URLSearchParams(query).get("tab") : null;
-    const matchesPath = pathname === path || pathname.startsWith(path + "/");
-    if (!matchesPath) continue;
-    const score = childTab
-      ? currentTab === childTab
-        ? path.length + 1000
-        : -1
-      : path.length;
-    if (score > best) {
-      best = score;
-      href = child.href;
-    }
-  }
-  return href;
-}
-
-/**
- * A nav item whose destination page has tabs. Hovering reveals a flyout that
- * deep-links to each tab; clicking the item itself still navigates to the
- * default tab. HoverCard is hover-only, so a tap on touch follows the link.
- */
-function FlyoutNavItem({
-  item,
-  link,
-  collapsed,
-  pathname,
-  currentTab,
-}: {
-  item: BackOfficeNavItem;
-  link: React.ReactNode;
-  collapsed: boolean;
-  pathname: string;
-  currentTab: string | null;
-}) {
-  const activeHref = activeChildHref(item, pathname, currentTab);
-
-  return (
-    <HoverCard openDelay={80} closeDelay={120}>
-      <HoverCardTrigger asChild>{link}</HoverCardTrigger>
-      <HoverCardContent
-        side="right"
-        align="start"
-        sideOffset={collapsed ? 12 : 8}
-        className="w-56 max-h-[70vh] overflow-y-auto border-slate-700 bg-slate-800 p-1.5 text-white"
-      >
-        <p className="px-2 py-1.5 text-[11px] font-semibold uppercase tracking-widest text-slate-400">
-          {item.label}
-        </p>
-        <ul className="space-y-0.5">
-          {item.children?.map((child) => {
-            const childActive = child.href === activeHref;
-            const ChildIcon = child.icon;
-            return (
-              <li key={child.href}>
-                <Link
-                  href={child.href}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm transition-colors",
-                    childActive
-                      ? "bg-white/10 font-medium text-white"
-                      : "text-slate-300 hover:bg-white/5 hover:text-white",
-                  )}
-                >
-                  <ChildIcon
-                    className={cn(
-                      "h-4 w-4 shrink-0",
-                      childActive ? "text-white" : "text-slate-400",
-                    )}
-                  />
-                  <span className="truncate">{child.label}</span>
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      </HoverCardContent>
-    </HoverCard>
-  );
-}
-
 function SidebarNav({
   role,
   collapsed,
@@ -282,8 +270,6 @@ function SidebarNav({
   accent: ShellAccent;
 }) {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
-  const currentTab = searchParams.get("tab");
 
   return (
     <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-2 lg:py-3 lg:space-y-3">
@@ -317,6 +303,7 @@ function SidebarNav({
                 const link = (
                   <Link
                     href={item.href}
+                    data-primary-nav-active={active || undefined}
                     className={cn(
                       "group flex items-center gap-3 rounded-lg px-3 py-1.5 text-sm font-medium transition-all duration-150 lg:py-1.5",
                       active
@@ -336,25 +323,8 @@ function SidebarNav({
                     {!collapsed && (
                       <span className="truncate">{item.label}</span>
                     )}
-                    {!collapsed && item.children && item.children.length > 0 && (
-                      <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-500 transition-colors group-hover:text-slate-300" />
-                    )}
                   </Link>
                 );
-
-                if (item.children && item.children.length > 0) {
-                  return (
-                    <li key={item.href}>
-                      <FlyoutNavItem
-                        item={item}
-                        link={link}
-                        collapsed={collapsed}
-                        pathname={pathname}
-                        currentTab={currentTab}
-                      />
-                    </li>
-                  );
-                }
 
                 if (collapsed) {
                   return (
@@ -387,12 +357,14 @@ function SidebarContent({
   collapsed,
   onToggle,
   onOpenSearch,
+  onSignOut,
   accent,
 }: {
   user: BackOfficeUser;
   collapsed: boolean;
   onToggle: () => void;
   onOpenSearch: () => void;
+  onSignOut: () => void;
   accent: ShellAccent;
 }) {
   const accentStyle = ACCENT[accent];
@@ -401,7 +373,13 @@ function SidebarContent({
   const squareLogoSrc = branding.logoSquareUrl ?? "/brand/xpert-logo-white-square.png";
 
   return (
-    <div className={cn("flex h-full flex-col", accentStyle.gradient)}>
+    <div
+      className={cn(
+        "relative isolate flex h-full flex-col overflow-hidden",
+        accentStyle.gradient,
+      )}
+    >
+      <SidebarGlow glowVar={accentStyle.glowVar} />
       {/* Header */}
       <div
         className={cn(
@@ -474,7 +452,7 @@ function SidebarContent({
         accent={accent}
       />
 
-      {/* Collapse toggle — desktop only, anchored at the very bottom */}
+      {/* Collapse toggle — desktop only */}
       <div
         className={cn(
           "hidden border-t border-white/5 p-2 lg:block",
@@ -496,6 +474,22 @@ function SidebarContent({
           )}
         </button>
       </div>
+
+      {/* Account menu — anchored at the very bottom of the rail */}
+      <div
+        className={cn(
+          "border-t border-white/5 py-2",
+          collapsed ? "flex justify-center px-2" : "px-3",
+        )}
+      >
+        <UserMenu
+          user={user}
+          accent={accent}
+          onSignOut={onSignOut}
+          variant="sidebar"
+          collapsed={collapsed}
+        />
+      </div>
     </div>
   );
 }
@@ -514,9 +508,80 @@ export function BackOfficeShell({
   notificationsPaused?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [resizing, setResizing] = useState(false);
+  // Gate persistence writes until after we've hydrated from localStorage, so
+  // the initial default doesn't clobber a stored preference on first paint.
+  const [hydrated, setHydrated] = useState(false);
+  const resizingRef = useRef(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const pathname = usePathname();
+
+  // Restore the user's saved sidebar position once, on mount. Done in an
+  // effect (not a lazy initializer) to keep SSR markup and the first client
+  // render identical — avoids a hydration mismatch.
+  useEffect(() => {
+    try {
+      const c = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+      if (c !== null) setCollapsed(c === "1");
+      const w = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+      if (w !== null) {
+        const n = Number.parseInt(w, 10);
+        if (Number.isFinite(n)) setSidebarWidth(clampSidebarWidth(n));
+      }
+    } catch {
+      /* localStorage unavailable (private mode / SSR) — use defaults */
+    }
+    setHydrated(true);
+  }, []);
+
+  // Persist position whenever it changes (post-hydration only).
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      /* ignore write failures */
+    }
+  }, [collapsed, sidebarWidth, hydrated]);
+
+  // Drag-to-resize. The sidebar's left edge is the viewport's left edge, so
+  // the pointer's clientX is the desired width. Listeners live on window so
+  // the drag keeps tracking even when the cursor leaves the handle.
+  const startResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    setResizing(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!resizingRef.current) return;
+      if (e.clientX < SIDEBAR_COLLAPSE_THRESHOLD) {
+        setCollapsed(true);
+      } else {
+        setCollapsed(false);
+        setSidebarWidth(clampSidebarWidth(e.clientX));
+      }
+    };
+    const onUp = () => {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      setResizing(false);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, []);
 
   // ⌘K / Ctrl+K opens the global search palette from anywhere in the shell.
   React.useEffect(() => {
@@ -565,9 +630,14 @@ export function BackOfficeShell({
       <div className="flex h-screen overflow-hidden bg-background">
         {/* Desktop sidebar */}
         <aside
+          style={{
+            width: collapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth,
+          }}
           className={cn(
-            "hidden lg:flex flex-col shrink-0 transition-all duration-300 ease-in-out",
-            collapsed ? "w-[68px]" : "w-64",
+            "relative hidden lg:flex flex-col shrink-0 ease-in-out",
+            // Suppress the width transition while actively dragging so the
+            // edge tracks the cursor 1:1 instead of lagging behind.
+            !resizing && "transition-[width] duration-300",
           )}
         >
           <SidebarContent
@@ -575,8 +645,31 @@ export function BackOfficeShell({
             collapsed={collapsed}
             onToggle={() => setCollapsed((c) => !c)}
             onOpenSearch={() => setSearchOpen(true)}
+            onSignOut={handleSignOut}
             accent={accent}
           />
+          {/* Drag-to-resize handle on the right edge. Double-click resets to
+              the default width. Hidden while collapsed (use the toggle to
+              expand). */}
+          {!collapsed && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize sidebar"
+              onPointerDown={startResize}
+              onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+              className="group absolute inset-y-0 right-0 z-20 w-1.5 translate-x-1/2 cursor-col-resize"
+            >
+              <div
+                className={cn(
+                  "h-full w-px translate-x-1/2 transition-colors",
+                  resizing
+                    ? "bg-white/40"
+                    : "bg-transparent group-hover:bg-white/25",
+                )}
+              />
+            </div>
+          )}
         </aside>
 
         {/* Mobile sidebar sheet */}
@@ -591,6 +684,7 @@ export function BackOfficeShell({
                 setMobileOpen(false);
                 setSearchOpen(true);
               }}
+              onSignOut={handleSignOut}
               accent={accent}
             />
           </SheetContent>
@@ -624,19 +718,6 @@ export function BackOfficeShell({
               <span className="sr-only">Search</span>
             </Button>
             <UserMenu user={user} accent={accent} onSignOut={handleSignOut} />
-          </div>
-
-          {/* Desktop account menu — floats in the top-right corner of the
-              page (no top bar). */}
-          <div className="pointer-events-none absolute right-4 top-3 z-30 hidden lg:block">
-            <div className="pointer-events-auto">
-              <UserMenu
-                user={user}
-                accent={accent}
-                onSignOut={handleSignOut}
-                variant="floating"
-              />
-            </div>
           </div>
 
           {/* Page content */}

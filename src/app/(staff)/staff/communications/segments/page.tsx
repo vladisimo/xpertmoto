@@ -5,7 +5,7 @@ import { Archive, Eye, Plus } from "lucide-react";
 
 import { CommsTabs } from "@/components/communications/comms-tabs";
 import { PageHeader } from "@/components/layout/page-header";
-import { PageSection, PageShell } from "@/components/layout/page-section";
+import { PageShell } from "@/components/layout/page-section";
 import { Button } from "@/components/ui/button";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { trpc } from "@/lib/trpc/client";
@@ -59,7 +59,7 @@ export default function SegmentsPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full>
       <PageHeader
         eyebrow="Operations"
         title="Communications"
@@ -76,13 +76,18 @@ export default function SegmentsPage() {
 
       <CommsTabs />
 
-      <PageSection flush>
+      <div className="flex min-h-0 flex-1 flex-col">
         <DataTable<SegmentRow>
           columns={columns}
           data={isLoading ? undefined : rows}
+          isLoading={isLoading}
           getRowId={(r) => r.id}
           getRowHref={(r) => `/staff/communications/segments/${r.id}`}
           empty="No segments yet. Create one to start targeting campaigns."
+          fillHeight
+          pageSize={25}
+          pageSizeOptions={[25, 50, 100]}
+          paginationEmptyLabel="No segments"
           rowActions={(r) => (
             <div className="flex gap-1">
               <Button asChild size="sm" variant="ghost">
@@ -103,7 +108,7 @@ export default function SegmentsPage() {
             </div>
           )}
         />
-      </PageSection>
+      </div>
     </PageShell>
   );
 }

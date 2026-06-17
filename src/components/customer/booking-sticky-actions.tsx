@@ -8,6 +8,7 @@ import { formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { BookingCancelDialog } from "./booking-cancel-dialog";
 import { BookingExtendDialog } from "./booking-extend-dialog";
+import { BookingChangeDialog } from "./booking-change-dialog";
 
 const CANCELLABLE = new Set(["QUOTE", "PENDING_PAYMENT", "CONFIRMED"]);
 const EXTENDABLE = new Set(["CONFIRMED", "CHECKED_OUT", "ACTIVE"]);
@@ -16,6 +17,7 @@ export function BookingStickyActions({
   bookingId,
   bookingReference,
   status,
+  pickupDateTime,
   returnDateTime,
   isExtensionChild,
   hasSubscription,
@@ -24,6 +26,7 @@ export function BookingStickyActions({
   bookingId: string;
   bookingReference: string;
   status: string;
+  pickupDateTime: Date;
   returnDateTime: Date;
   isExtensionChild: boolean;
   hasSubscription: boolean;
@@ -31,10 +34,16 @@ export function BookingStickyActions({
 }) {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [extendOpen, setExtendOpen] = useState(false);
+  const [changeOpen, setChangeOpen] = useState(false);
 
   const canCancel =
     CANCELLABLE.has(status) && !isExtensionChild && !hasSubscription;
-  const canExtend = EXTENDABLE.has(status) && !isExtensionChild;
+  // M-5: date/time change is pre-pickup only (CONFIRMED). It supersedes the
+  // return-only "Extend" button while pre-pickup; Extend stays for mid-rental
+  // (CHECKED_OUT / ACTIVE) where a full reprice doesn't apply.
+  const canChange =
+    status === "CONFIRMED" && !isExtensionChild && !hasSubscription;
+  const canExtend = EXTENDABLE.has(status) && !isExtensionChild && !canChange;
 
   // H1: surface the refund tier that applies RIGHT NOW next to the cancel
   // button, so the customer knows the consequence before they open the
@@ -73,11 +82,20 @@ export function BookingStickyActions({
     );
   }
 
-  if (!canCancel && !canExtend) return null;
+  if (!canCancel && !canExtend && !canChange) return null;
 
   return (
     <div className="sticky top-[calc(3.5rem+env(safe-area-inset-top))] z-10 -mx-3 border-b border-border bg-background/95 px-3 py-3 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:-mx-6 sm:px-6 lg:top-0 lg:-mx-8 lg:px-8">
       <div className="flex gap-2 sm:justify-end">
+        {canChange && (
+          <Button
+            variant="secondary"
+            className="flex-1 sm:flex-none"
+            onClick={() => setChangeOpen(true)}
+          >
+            Change dates
+          </Button>
+        )}
         {canExtend && (
           <Button
             variant="secondary"
@@ -124,6 +142,16 @@ export function BookingStickyActions({
           currentReturnDateTime={returnDateTime}
           open={extendOpen}
           onOpenChange={setExtendOpen}
+        />
+      )}
+      {canChange && (
+        <BookingChangeDialog
+          bookingId={bookingId}
+          bookingReference={bookingReference}
+          currentPickupDateTime={pickupDateTime}
+          currentReturnDateTime={returnDateTime}
+          open={changeOpen}
+          onOpenChange={setChangeOpen}
         />
       )}
     </div>

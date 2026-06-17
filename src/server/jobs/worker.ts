@@ -34,10 +34,11 @@ import { startSwapDraftCleanupScheduler } from "./swap-draft-cleanup";
 import { startMaintenanceAlertScheduler } from "./maintenance-alert";
 import { startDepreciationScheduler } from "./depreciation-calc";
 import { startOpsSummaryScheduler } from "./ops-summary";
-import { startEtollScheduler } from "./etoll-sync";
+import { startLinktSummaryScheduler } from "./linkt-summary";
 import { startRegoSyncScheduler } from "./rego-sync";
 import { startXeroSyncScheduler } from "./xero-sync";
 import { startLinktSyncScheduler } from "./linkt-sync";
+import { startNominationDeadlineScheduler } from "./nomination-deadline";
 import { startAuditRetentionScheduler } from "./audit-retention";
 import { startPendingPaymentTtlScheduler } from "./pending-payment-ttl";
 import { startSupportNotifyWorker } from "./support-notify";
@@ -56,6 +57,8 @@ import { startCartRecoveryScheduler } from "./cart-recovery";
 import { startPrePickupUpsellScheduler } from "./pre-pickup-upsell";
 import { startPostTripReviewScheduler } from "./post-trip-review";
 import { startTelemetryProcessorScheduler } from "./telemetry-processor";
+import { startGps51SyncScheduler } from "./gps51-sync";
+import { startGps51DailySyncScheduler } from "./gps51-daily-sync";
 import { startPriceRecommenderScheduler } from "./price-recommender";
 import { startSubscriptionBillingScheduler } from "./subscription-billing";
 import { startCapturePendingPaymentsScheduler } from "./capture-pending-payments";
@@ -65,7 +68,6 @@ import { startDunningLadderScheduler } from "./dunning-ladder";
 import { startInvoiceGenerateScheduler } from "./invoice-generate";
 import { startNoShowDetectorScheduler } from "./no-show-detector";
 import { startNoShowReminderScheduler } from "./no-show-reminder";
-import { startEtollHealthScheduler } from "./etoll-health";
 import { startBookingBillingScheduler } from "./booking-billing";
 import { startInsightsRefreshScheduler } from "./insights-refresh";
 import { startEnrichVehicleModelWorker } from "./enrich-vehicle-model";
@@ -160,10 +162,13 @@ async function main() {
   startMaintenanceAlertScheduler();
   startDepreciationScheduler();
   startOpsSummaryScheduler();
-  await startEtollScheduler();
+  startLinktSummaryScheduler();
   startRegoSyncScheduler();
   startXeroSyncScheduler();
   await startLinktSyncScheduler();
+  // Daily 07:00 AEST — flag infringements approaching their 21-day Revenue
+  // NSW nomination deadline so ops can submit before the statutory cutoff.
+  startNominationDeadlineScheduler();
   startAuditRetentionScheduler();
   startPendingPaymentTtlScheduler();
   startSupportNotifyWorker();
@@ -187,6 +192,10 @@ async function main() {
   startPrePickupUpsellScheduler();
   startPostTripReviewScheduler();
   startTelemetryProcessorScheduler();
+  // GPS51 live-position poller (every minute, Brisbane TZ)
+  await startGps51SyncScheduler();
+  // GPS51 full-track history sync (daily 03:20 Brisbane — querytracks per vehicle)
+  await startGps51DailySyncScheduler();
   startPriceRecommenderScheduler();
   startSubscriptionBillingScheduler();
   // G5 — every 5 min, capture PENDING ancillary Payment rows off-session
@@ -204,8 +213,6 @@ async function main() {
   // G22 — pre-cutoff warning, fires inside the last `reminderMin` of the
   // grace window so the customer gets a final EMAIL+SMS before forfeit.
   startNoShowReminderScheduler();
-  // G21 — 2-hourly E-Toll scraper health monitor
-  startEtollHealthScheduler();
   // Phase A2 — hourly sweep that fires recurring charges on long-term
   // hires (weekly/fortnightly/monthly); hands off to capture-pending-payments.
   startBookingBillingScheduler();

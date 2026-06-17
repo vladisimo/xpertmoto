@@ -36,17 +36,24 @@ export function StepExtras() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addons]);
 
-  // Default to Standard (middle-tier) insurance when the user arrives
-  // without a prior selection.
+  // M-7: default to the free Basic tier (dailyRate 0) when the user arrives
+  // without a prior selection — never auto-opt them into paid cover. The
+  // catalogue is ordered by dailyRate ascending so the $0 tier is insurance[0].
   React.useEffect(() => {
     if (!insurance || insurance.length === 0) return;
     if (w.insuranceOptionId) return;
-    const standard =
-      insurance.find((i) => i.name.toLowerCase() === "standard") ??
-      insurance[Math.min(1, insurance.length - 1)];
-    if (standard) w.set("insuranceOptionId", standard.id);
+    const freeTier =
+      insurance.find((i) => Number(i.dailyRate) === 0) ?? insurance[0];
+    if (freeTier) w.set("insuranceOptionId", freeTier.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [insurance]);
+
+  // When the customer upgrades from the free tier to a paid one, reassure them
+  // that the included $0 cover is still one tap away (avoids accidental spend).
+  const selectedInsurance = insurance?.find((i) => i.id === w.insuranceOptionId) ?? null;
+  const freeInsurance = insurance?.find((i) => Number(i.dailyRate) === 0) ?? null;
+  const paidTierSelected =
+    !!selectedInsurance && Number(selectedInsurance.dailyRate) > 0 && !!freeInsurance;
 
   return (
     <div>
@@ -215,7 +222,16 @@ export function StepExtras() {
       </section>
 
       <section className="mt-6">
-        <h3 className="font-semibold mb-3">Insurance</h3>
+        <h3 className="font-semibold mb-1">Insurance</h3>
+        {paidTierSelected && (
+          <p className="mb-3 text-xs text-muted-foreground">
+            You&apos;ve selected{" "}
+            <span className="font-medium text-foreground">{selectedInsurance!.name}</span>{" "}
+            cover ({formatCurrency(Number(selectedInsurance!.dailyRate))}/day).
+            The <span className="font-medium text-foreground">{freeInsurance!.name}</span>{" "}
+            tier is included at no extra cost — select it below to switch back.
+          </p>
+        )}
 
         {/* Mobile: compact radio-list */}
         <ul className="md:hidden divide-y divide-border overflow-hidden rounded-md border border-border">
@@ -241,13 +257,23 @@ export function StepExtras() {
                   )}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
-                      <div className="truncate text-sm font-semibold">{i.name}</div>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-sm font-semibold">{i.name}</span>
+                        {Number(i.dailyRate) === 0 && (
+                          <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[0.6rem] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                            Free
+                          </span>
+                        )}
+                      </div>
                       <div className="whitespace-nowrap text-sm font-semibold text-primary">
                         {priceLabel}
                       </div>
                     </div>
-                    <div className="text-[0.7rem] text-muted-foreground">
-                      Excess {formatCurrency(Number(i.excessAmount))}
+                    <div className="flex items-center justify-between gap-2 text-[0.7rem] text-muted-foreground">
+                      <span>Excess {formatCurrency(Number(i.excessAmount))}</span>
+                      {selected && (
+                        <span className="font-medium text-primary">Selected</span>
+                      )}
                     </div>
                   </div>
                 </button>
@@ -265,11 +291,19 @@ export function StepExtras() {
                 key={i.id}
                 type="button"
                 onClick={() => w.set("insuranceOptionId", i.id)}
-                className={`p-4 border rounded-lg text-left transition ${
-                  selected ? "border-primary bg-primary/5" : "hover:border-primary/50"
+                aria-pressed={selected}
+                className={`relative p-4 border rounded-lg text-left transition ${
+                  selected ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:border-primary/50"
                 }`}
               >
-                <div className="font-semibold">{i.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">{i.name}</span>
+                  {Number(i.dailyRate) === 0 && (
+                    <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[0.65rem] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                      Free
+                    </span>
+                  )}
+                </div>
                 <div className="text-xs text-muted-foreground mt-1">{i.description}</div>
                 <div className="mt-3 text-lg font-bold text-primary">
                   {Number(i.dailyRate) === 0 ? "Included" : `${formatCurrency(Number(i.dailyRate))}/day`}
@@ -277,6 +311,12 @@ export function StepExtras() {
                 <div className="text-xs text-muted-foreground">
                   Excess {formatCurrency(Number(i.excessAmount))}
                 </div>
+                {selected && (
+                  <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[0.65rem] font-medium text-primary-foreground">
+                    <Check className="h-3 w-3" aria-hidden />
+                    Selected
+                  </span>
+                )}
               </button>
             );
           })}

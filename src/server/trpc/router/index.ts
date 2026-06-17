@@ -14,8 +14,8 @@ import { staffTaskRouter } from "./staff-task";
 import { inspectionRouter } from "./inspection";
 import { fleetRouter } from "./fleet";
 import { adminRouter } from "./admin";
-import { etollRouter } from "./etoll";
 import { linktRouter } from "./linkt";
+import { nominationRouter } from "./nomination";
 import { agreementRouter } from "./agreement";
 import { returnRouter } from "./return";
 import { damageTariffRouter } from "./damage-tariff";
@@ -62,8 +62,8 @@ export const appRouter = createTRPCRouter({
   inspection: inspectionRouter,
   fleet: fleetRouter,
   admin: adminRouter,
-  etoll: etollRouter,
   linkt: linktRouter,
+  nomination: nominationRouter,
   agreement: agreementRouter,
   return: returnRouter,
   damageTariff: damageTariffRouter,

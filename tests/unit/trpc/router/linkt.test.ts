@@ -80,4 +80,14 @@ describe("linkt router auth", () => {
     const caller = linktRouter.createCaller(anonCtx());
     await expect(caller.listAccounts()).rejects.toThrow();
   });
+
+  test("scrapeNow (manager) rejects without a session", async () => {
+    const caller = linktRouter.createCaller(anonCtx());
+    await expect(caller.scrapeNow({ id: "acc_1" })).rejects.toThrow();
+  });
+
+  test("setScrapeEnabled (admin) rejects without a session", async () => {
+    const caller = linktRouter.createCaller(anonCtx());
+    await expect(caller.setScrapeEnabled({ id: "acc_1", enabled: true })).rejects.toThrow();
+  });
 });

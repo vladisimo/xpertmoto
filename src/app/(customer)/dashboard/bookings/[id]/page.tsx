@@ -93,6 +93,7 @@ export default async function BookingDetailPage({
         bookingId={booking.id}
         bookingReference={booking.bookingReference}
         status={booking.status}
+        pickupDateTime={booking.pickupDateTime}
         returnDateTime={booking.returnDateTime}
         isExtensionChild={Boolean(booking.extensionOfId)}
         hasSubscription={Boolean(booking.subscriptionId)}

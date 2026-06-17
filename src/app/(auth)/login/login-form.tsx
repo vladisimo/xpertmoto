@@ -75,11 +75,23 @@ export function LoginForm({
   const [needTotp, setNeedTotp] = useState(false);
   const [totpCode, setTotpCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Gates the submit button until React has hydrated. Before hydration the
+  // form's onSubmit handler isn't attached, so a native submit would fall
+  // back to a GET that leaks email + password into the URL (C-1). The
+  // form also carries method="post" as the second line of defence.
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    const urlError = new URLSearchParams(window.location.search).get("error");
-    const friendly = errorMessage(urlError);
-    if (friendly) setError(friendly);
+    setMounted(true);
+    const params = new URLSearchParams(window.location.search);
+    const friendly = errorMessage(params.get("error"));
+    if (friendly) {
+      setError(friendly);
+    } else if (params.get("reason") === "expired") {
+      // Set by the global tRPC auth-error handler when a protected call 401s
+      // (H-2). Shown as a notice so the user knows why they're back here.
+      setError("Your session expired — please sign in again.");
+    }
   }, []);
 
   const preauth = trpc.auth.preauth.useMutation();
@@ -247,7 +259,11 @@ export function LoginForm({
       )}
 
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <form
+          method="post"
+          onSubmit={form.handleSubmit(onSubmit)}
+          className="space-y-4"
+        >
           <FormField
             control={form.control}
             name="email"
@@ -315,7 +331,12 @@ export function LoginForm({
               </p>
             </div>
           )}
-          <Button type="submit" className="w-full" size="lg" disabled={submitting}>
+          <Button
+            type="submit"
+            className="w-full"
+            size="lg"
+            disabled={submitting || !mounted}
+          >
             {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />}
             {submitting
               ? needTotp

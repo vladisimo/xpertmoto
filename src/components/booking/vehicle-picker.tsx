@@ -52,6 +52,8 @@ export function VehiclePicker() {
       currentOdometerKm: v.currentOdometerKm,
       internalCode: v.internalCode,
       category: { name: v.category.name, engineCapacity: v.category.engineCapacity },
+      // M-6: prefer the catalogue model's real cc; the card hides Engine when null.
+      engineCapacityCc: v.catalogueModel?.engineCapacityCc ?? null,
       depot: { name: v.depot.name },
       images: v.images,
     }));

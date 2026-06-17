@@ -322,6 +322,62 @@ type NominatimResult = {
   address?: NominatimAddress;
 };
 
+/**
+ * Build a concise single-line label from Nominatim address components, e.g.
+ * "12 Smith Street, Lewisham NSW 2049". AU states are abbreviated. Returns
+ * null when there isn't enough to form a meaningful line.
+ */
+function formatReverseLabel(a: NominatimAddress): string | null {
+  const street = [a.house_number, a.road].filter(Boolean).join(" ").trim();
+  const suburb =
+    a.suburb ?? a.city ?? a.town ?? a.village ?? a.municipality ?? a.county;
+  const state = a.state
+    ? AU_STATE_FULL_TO_ABBREV[a.state.toLowerCase()] ?? a.state
+    : undefined;
+  const locality = [suburb, [state, a.postcode].filter(Boolean).join(" ").trim()]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const label = [street, locality].filter(Boolean).join(", ").trim();
+  return label || null;
+}
+
+/**
+ * Reverse-geocode a coordinate to a human-readable address via OpenStreetMap
+ * Nominatim (free, no API key). Returns null on failure (no result, network
+ * error) — callers must handle the null path. Must be called server-side:
+ * Nominatim's usage policy requires a descriptive User-Agent and rate limits
+ * to ~1 req/s, neither of which is safe from the browser.
+ */
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+): Promise<string | null> {
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lng),
+    format: "json",
+    addressdetails: "1",
+    zoom: "18",
+  });
+  const url = `https://nominatim.openstreetmap.org/reverse?${params.toString()}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "XPERT Moto/1.0" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as NominatimResult & { error?: string };
+    if (!data || data.error) return null;
+    if (data.address) {
+      const label = formatReverseLabel(data.address);
+      if (label) return label;
+    }
+    return data.display_name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 const COUNTRY_NAME_NORMALISE: Record<string, string> = {
   "éire / ireland": "Ireland",
   "éire": "Ireland",

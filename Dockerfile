@@ -67,6 +67,13 @@ CMD ["sh", "-c", "npx prisma migrate deploy && exec npm run start"]
 # -------- worker: BullMQ background process --------
 FROM base AS worker
 ENV NODE_ENV=production
+# Chromium for the Linkt toll scraper. Playwright's npm package ships no browser
+# binary on alpine, so install the system Chromium and point Playwright at it
+# (the scraper reads PLAYWRIGHT_CHROMIUM_PATH). nss/freetype/harfbuzz/ttf are the
+# runtime libs headless Chromium needs to start.
+RUN apk add --no-cache chromium nss freetype harfbuzz ca-certificates ttf-freefont
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium-browser
 RUN addgroup --system --gid 1001 nodejs \
  && adduser  --system --uid 1001 nextjs
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules

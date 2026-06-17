@@ -43,9 +43,15 @@ import {
 import {
   confirmBookingPayment,
   PaymentNotSucceededError,
+  PaymentIntentInvalidError,
   BondNotHeldError,
   BookingNotConfirmableError,
 } from "@/server/services/booking-confirmation";
+import {
+  previewBookingChange,
+  applyBookingChange,
+  BookingChangeNotAllowedError,
+} from "@/server/services/booking-change";
 import {
   skipAutoAudit,
   writeAudit,
@@ -57,6 +63,8 @@ import { gstFromInclusive } from "@/lib/money";
 import { generateBookingReference, withUniqueRetry } from "@/lib/id-gen";
 import { applyReferral } from "@/server/services/referral";
 import { attachByTrackingCode } from "@/server/services/partner";
+import { supersedePriorDraft } from "@/server/services/booking-draft";
+import { logger } from "@/lib/logger";
 import { render as renderEmail } from "@react-email/render";
 import { createElement } from "react";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
@@ -511,6 +519,65 @@ export const bookingRouter = createTRPCRouter({
     }
   }),
 
+  // H-3: licence/age eligibility for a category against the signed-in
+  // customer's profile, exposed as a query so the wizard can gate at step 4
+  // (Details) instead of letting an ineligible customer reach payment
+  // (step 6). Reuses the exact `checkEligibility` service the `create`
+  // mutation enforces — the create-side check stays the authority. The image
+  // gate is deliberately not evaluated here (licenceType omitted): on-file ID
+  // photos are the `useRequiredIdImagesGuard`'s job, so this returns a clean
+  // age/identity/licence-class verdict the wizard can act on.
+  checkEligibility: protectedProcedure
+    .input(
+      z.object({
+        categoryId: z.string(),
+        pickupDateTime: z.coerce.date(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const [customer, category] = await Promise.all([
+        ctx.prisma.user.findUniqueOrThrow({
+          where: { id: ctx.user.id },
+          select: {
+            dateOfBirth: true,
+            customerProfile: {
+              select: {
+                licenceClass: true,
+                licenceExpiry: true,
+                passportNumber: true,
+                passportExpiry: true,
+              },
+            },
+          },
+        }),
+        ctx.prisma.vehicleCategory.findUnique({
+          where: { id: input.categoryId },
+          select: { name: true, licenceRequired: true, minAge: true },
+        }),
+      ]);
+      // Unknown category — don't block here; the later steps resolve it.
+      if (!category) {
+        return { eligible: true, failure: null, warnings: [] as const };
+      }
+      const result = checkEligibility({
+        customer: {
+          dateOfBirth: customer.dateOfBirth,
+          licenceClass: customer.customerProfile?.licenceClass ?? null,
+          licenceExpiry: customer.customerProfile?.licenceExpiry ?? null,
+          passportNumber: customer.customerProfile?.passportNumber ?? null,
+          passportExpiry: customer.customerProfile?.passportExpiry ?? null,
+          // licenceType omitted → image gate skipped (see comment above).
+        },
+        category,
+        pickupDate: input.pickupDateTime,
+      });
+      return {
+        eligible: result.failure === null,
+        failure: result.failure,
+        warnings: result.warnings,
+      };
+    }),
+
   create: protectedProcedure
     // Money path: every call writes a booking row and creates up to two
     // Stripe PaymentIntents. The read endpoints above run at 60/min — this
@@ -530,6 +597,11 @@ export const bookingRouter = createTRPCRouter({
         termsVersion: z.string().default("v1.0"),
         notes: z.string().optional(),
         signatureDataUrl: z.string().optional(),
+        // H-4: the wizard's previously-created PENDING_PAYMENT draft, if any.
+        // When the cart changed (or the client couldn't reuse it), we cancel
+        // that prior draft instead of leaving an orphaned "Pending payment"
+        // row behind. Optional + best-effort; see supersedePriorDraft.
+        draftBookingId: z.string().optional(),
         // Lever 5: attach a referral code the customer arrived with.
         referralCode: z.string().optional(),
         // Lever 4: attach a partner tracking code (?ref= on public site).
@@ -685,6 +757,27 @@ export const bookingRouter = createTRPCRouter({
             }),
           )
         : undefined;
+
+      // H-4: all validation has passed and we're about to insert a fresh
+      // draft — retire the customer's previous PENDING_PAYMENT draft (if the
+      // client passed one) so refreshes / cart changes don't accumulate
+      // orphaned rows. Best-effort: the nightly TTL sweep is the backstop.
+      if (input.draftBookingId) {
+        try {
+          await supersedePriorDraft(ctx.prisma, {
+            draftBookingId: input.draftBookingId,
+            customerId: ctx.user.id,
+          });
+        } catch (err) {
+          logger.warn(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              draftBookingId: input.draftBookingId,
+            },
+            "booking.create: failed to supersede prior draft",
+          );
+        }
+      }
 
       const booking = await withUniqueRetry(
         () =>
@@ -898,10 +991,21 @@ export const bookingRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const owner = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
-        select: { customerId: true },
+        select: { customerId: true, customer: { select: { emailVerified: true } } },
       });
       if (owner.customerId !== ctx.user.id)
         throw new TRPCError({ code: "FORBIDDEN" });
+
+      // R2-M4: a public customer account must confirm its email before it can
+      // confirm (and pay for) a booking — the unbypassable money-side gate.
+      // Back-office roles are internally provisioned, so they're exempt.
+      if (ctx.user.role === "CUSTOMER" && !owner.customer?.emailVerified) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            "Please confirm your email address before paying. Check your inbox for the confirmation link, or resend it from your account, then try again.",
+        });
+      }
 
       try {
         const { booking } = await confirmBookingPayment(ctx.prisma, {
@@ -920,6 +1024,7 @@ export const bookingRouter = createTRPCRouter({
       } catch (err) {
         if (
           err instanceof PaymentNotSucceededError ||
+          err instanceof PaymentIntentInvalidError ||
           err instanceof BondNotHeldError
         ) {
           throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
@@ -1202,6 +1307,90 @@ export const bookingRouter = createTRPCRouter({
       });
 
       return { booking: updated, extensionQuote };
+    }),
+
+  /**
+   * M-5: read-only preview of a date/time change (new pickup AND/OR return).
+   * Same availability + depot-hours + repricing rules as `change`, returned
+   * without committing so the dialog can show the new total and the delta
+   * (extra charge, reduction, or retained credit) before Confirm.
+   */
+  quoteChange: protectedProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        newPickupDateTime: z.coerce.date(),
+        newReturnDateTime: z.coerce.date(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const owner = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: { customerId: true },
+      });
+      const isStaff = ["STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"].includes(
+        ctx.user.role,
+      );
+      if (owner.customerId !== ctx.user.id && !isStaff) {
+        throw new TRPCError({ code: "FORBIDDEN" });
+      }
+      try {
+        const { preview } = await previewBookingChange(ctx.prisma, {
+          bookingId: input.bookingId,
+          newPickupDateTime: input.newPickupDateTime,
+          newReturnDateTime: input.newReturnDateTime,
+        });
+        return preview;
+      } catch (err) {
+        if (err instanceof BookingChangeNotAllowedError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        throw err;
+      }
+    }),
+
+  /**
+   * M-5: commit a date/time change. Reprices for the new window and settles
+   * the delta — an INCREASE raises a PENDING charge captured off-session; a
+   * DECREASE writes the invoice down and retains any surplus as account credit
+   * (never auto-refunds). Date/time only; the service guards discounted,
+   * subscription, and extension bookings out to staff.
+   */
+  change: protectedProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        newPickupDateTime: z.coerce.date(),
+        newReturnDateTime: z.coerce.date(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      const owner = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: { customerId: true },
+      });
+      const isStaff = ["STAFF", "MANAGER", "ADMIN", "SUPER_ADMIN"].includes(
+        ctx.user.role,
+      );
+      if (owner.customerId !== ctx.user.id && !isStaff) {
+        throw new TRPCError({ code: "FORBIDDEN" });
+      }
+      try {
+        const { booking, preview } = await applyBookingChange(ctx.prisma, {
+          bookingId: input.bookingId,
+          newPickupDateTime: input.newPickupDateTime,
+          newReturnDateTime: input.newReturnDateTime,
+          actorUserId: ctx.user.id,
+          reqId: ctx.reqId,
+        });
+        return { booking, preview };
+      } catch (err) {
+        if (err instanceof BookingChangeNotAllowedError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        throw err;
+      }
     }),
 
   /**

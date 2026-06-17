@@ -25,7 +25,16 @@ import {
 } from "@/components/ui/select";
 import { FormGrid, FormGridRow } from "@/components/forms/form-grid";
 
-const TYPES = ["SPEEDING", "PARKING", "TOLL", "RED_LIGHT", "OTHER"] as const;
+const TYPES = [
+  "SPEEDING",
+  "PARKING",
+  "TOLL",
+  "RED_LIGHT",
+  "MOBILE_PHONE",
+  "SEATBELT",
+  "UNREGISTERED",
+  "OTHER",
+] as const;
 
 const schema = z.object({
   vehicleId: z.string().min(1, "Required"),
@@ -35,6 +44,11 @@ const schema = z.object({
   offenceDate: z.string().min(1, "Required"),
   amount: z.coerce.number().min(0),
   dueDate: z.string().optional(),
+  issueDate: z.string().optional(),
+  offenceCode: z.string().optional(),
+  offenceDescription: z.string().optional(),
+  offenceLocation: z.string().optional(),
+  demeritPoints: z.coerce.number().int().min(0).optional(),
 });
 type Values = z.infer<typeof schema>;
 
@@ -42,11 +56,16 @@ function defaults(): Values {
   return {
     vehicleId: "",
     type: "SPEEDING",
-    issuer: "",
+    issuer: "Revenue NSW",
     referenceNumber: "",
     offenceDate: new Date().toISOString().slice(0, 10),
     amount: 0,
     dueDate: "",
+    issueDate: "",
+    offenceCode: "",
+    offenceDescription: "",
+    offenceLocation: "",
+    demeritPoints: 0,
   };
 }
 
@@ -79,6 +98,11 @@ export function InfringementSheet({
       offenceDate: new Date(values.offenceDate),
       amount: values.amount,
       dueDate: values.dueDate ? new Date(values.dueDate) : undefined,
+      issueDate: values.issueDate ? new Date(values.issueDate) : undefined,
+      offenceCode: values.offenceCode || undefined,
+      offenceDescription: values.offenceDescription || undefined,
+      offenceLocation: values.offenceLocation || undefined,
+      demeritPoints: values.demeritPoints ?? 0,
     });
     form.reset(initial());
     onOpenChange(false);
@@ -212,6 +236,71 @@ export function InfringementSheet({
                       <FormLabel>Due date</FormLabel>
                       <FormControl>
                         <Input type="date" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="issueDate"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Notice issue date</FormLabel>
+                      <FormControl>
+                        <Input type="date" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="demeritPoints"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Demerit points</FormLabel>
+                      <FormControl>
+                        <Input type="number" min={0} {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="offenceCode"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Offence code</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="offenceLocation"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Offence location</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="offenceDescription"
+                  render={({ field }) => (
+                    <FormItem className="md:col-span-2">
+                      <FormLabel>Offence description</FormLabel>
+                      <FormControl>
+                        <Input placeholder="Exceed speed limit by 10 km/h" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>

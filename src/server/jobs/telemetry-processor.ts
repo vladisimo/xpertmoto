@@ -77,24 +77,48 @@ export async function runTelemetryProcessor(): Promise<TelemetryProcessorResult>
       ),
     );
 
-    const telemetry = await prisma.vehicleTelemetry.findMany({
-      where: {
-        vehicleId: booking.vehicleId,
-        timestamp: { gt: cursor, lte: booking.returnDateTime },
-      },
-      orderBy: { timestamp: "asc" },
-      take: 500,
-    });
-    if (telemetry.length === 0) continue;
-
-    const samples: TelemetrySample[] = telemetry.map((t) => ({
-      timestamp: t.timestamp,
-      latitude: t.latitude,
-      longitude: t.longitude,
-      speedKph: t.speedKph,
-      odometerKm: t.odometerKm,
-      ignitionOn: t.ignitionOn,
-    }));
+    // Drain the whole unprocessed window in bounded batches. A single fixed
+    // page would stall: the cross-run cursor only advances when a zone/speed
+    // event is emitted, so a 500-row page that yields no event would be
+    // re-read forever and later rows never reached. Now that the nightly
+    // full-track sync lands thousands of backdated fixes per active vehicle at
+    // once, that page is easily exceeded — so we page forward by timestamp
+    // until the window is drained (or a generous per-run cap is hit; the
+    // remainder is picked up next run once events advance the cursor).
+    const BATCH = 500;
+    const MAX_SAMPLES_PER_RUN = 5000;
+    const samples: TelemetrySample[] = [];
+    let lowerBound = cursor;
+    while (samples.length < MAX_SAMPLES_PER_RUN) {
+      const page = await prisma.vehicleTelemetry.findMany({
+        where: {
+          vehicleId: booking.vehicleId,
+          timestamp: { gt: lowerBound, lte: booking.returnDateTime },
+        },
+        orderBy: { timestamp: "asc" },
+        take: BATCH,
+      });
+      if (page.length === 0) break;
+      for (const t of page) {
+        samples.push({
+          timestamp: t.timestamp,
+          latitude: t.latitude,
+          longitude: t.longitude,
+          speedKph: t.speedKph,
+          odometerKm: t.odometerKm,
+          ignitionOn: t.ignitionOn,
+        });
+      }
+      lowerBound = page[page.length - 1]!.timestamp;
+      if (page.length < BATCH) break;
+    }
+    if (samples.length === 0) continue;
+    if (samples.length >= MAX_SAMPLES_PER_RUN) {
+      logger.warn(
+        { bookingId: booking.id, samples: samples.length },
+        "telemetry-processor: hit per-run sample cap; remainder picked up next run",
+      );
+    }
 
     // Zone transitions.
     let prev: TelemetrySample | null = null;

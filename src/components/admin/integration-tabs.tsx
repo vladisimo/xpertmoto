@@ -8,7 +8,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDateTime } from "@/lib/utils";
-import { IntegrationTabEtoll } from "@/components/staff/integration-tab-etoll";
 import { IntegrationTabLinkt } from "@/components/staff/integration-tab-linkt";
 import {
   CreditCard,
@@ -139,7 +138,6 @@ export function IntegrationsTabOverview({ overview }: { overview: Overview }) {
     { label: "Resend email", level: resendLevel(overview), detail: overview.resend.webhookConfigured ? "Bounce/complaint webhook active" : overview.resend.configured ? "Webhook secret missing" : "Not configured" },
     { label: "Xero accounting", level: xeroLevel(overview), detail: overview.xero.connected ? `Tenant ${overview.xero.tenantId?.slice(0, 8)}…` : overview.xero.configured ? "Not connected" : "Not configured" },
     { label: "NSW rego check", level: "ok", detail: "Weekly scraper active" },
-    { label: "NSW E-Toll (legacy)", level: overview.etoll.configured ? "ok" : "off", detail: `${overview.etoll.accountCount} account${overview.etoll.accountCount === 1 ? "" : "s"}` },
     { label: "Linkt tolls", level: overview.linkt.configured ? "ok" : "off", detail: `${overview.linkt.accountCount} account${overview.linkt.accountCount === 1 ? "" : "s"}` },
     { label: "Calendar (.ics)", level: "ok", detail: "Active on all bookings" },
     { label: "Weather (Open-Meteo)", level: "ok", detail: "3-day forecasts on depot cards" },
@@ -284,10 +282,6 @@ export function IntegrationsTabTolls({ overview }: { overview: Overview }) {
   return (
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2">
-        <IntegrationCard icon={Receipt} title="NSW E-Toll" subtitle={`${overview.etoll.accountCount} connected account${overview.etoll.accountCount === 1 ? "" : "s"}`} level={overview.etoll.configured ? "ok" : "off"}>
-          <KV label="Last sync" value={overview.etoll.lastSyncAt ? formatDateTime(overview.etoll.lastSyncAt) : "never"} />
-          <KV label="Last status" value={overview.etoll.lastSyncStatus ?? "—"} muted={!overview.etoll.lastSyncStatus} />
-        </IntegrationCard>
         <IntegrationCard
           icon={Receipt}
           title="Linkt (Transurban)"
@@ -299,7 +293,6 @@ export function IntegrationsTabTolls({ overview }: { overview: Overview }) {
         </IntegrationCard>
       </div>
       <IntegrationTabLinkt canManage />
-      <IntegrationTabEtoll canManage />
     </div>
   );
 }
@@ -419,6 +412,140 @@ export function IntegrationsTabApiKeys() {
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+export function IntegrationsTabTracking() {
+  const util = trpc.useUtils();
+  const { data, isLoading } = trpc.fleet.gps51SyncStatus.useQuery();
+  const sync = trpc.fleet.gps51SyncNow.useMutation({
+    onSettled: () => util.fleet.gps51SyncStatus.invalidate(),
+  });
+  const dailySync = trpc.fleet.gps51DailySyncNow.useMutation({
+    onSettled: () => util.fleet.gps51SyncStatus.invalidate(),
+  });
+  const latest = data?.runs[0];
+  const daily = data?.dailyTrackSync as
+    | {
+        status?: string;
+        startedAt?: string;
+        finishedAt?: string;
+        recordsWritten?: number;
+        devicesSucceeded?: number;
+        devicesTotal?: number;
+      }
+    | null
+    | undefined;
+  const statusLevel = (s: string): StatusLevel =>
+    s === "SUCCESS" ? "ok" : s === "FAILED" ? "off" : "partial";
+
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <p className="text-muted-foreground text-sm">
+        GPS51 vehicle tracking. The poller runs every minute (Australia/Brisbane) and updates the
+        live fleet map (latest fix per device). Full-fidelity position history is captured by the
+        nightly full-track sync (03:20 Brisbane), which pulls the last 24h per vehicle into the
+        VehicleTelemetry hypertable. Credentials are env-only (GPS51_USERNAME / GPS51_PASSWORD).
+      </p>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Satellite className="h-4 w-4" /> GPS51 tracking
+          </CardTitle>
+          <Button size="sm" disabled={sync.isPending} onClick={() => sync.mutate()}>
+            {sync.isPending ? "Syncing…" : "Sync now"}
+          </Button>
+        </CardHeader>
+        <CardContent className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <div className="text-muted-foreground text-xs">Tracked devices</div>
+            <div className="text-lg font-semibold">{data?.trackedDevices ?? (isLoading ? "…" : 0)}</div>
+          </div>
+          <div>
+            <div className="text-muted-foreground text-xs">Last sync</div>
+            <div className="text-lg font-semibold">
+              {latest?.startedAt ? formatDateTime(latest.startedAt) : "—"}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground text-xs">Status</div>
+            <div className="flex items-center gap-1.5">
+              {latest ? <StatusDot level={statusLevel(latest.status)} /> : null}
+              <span className="font-medium">{latest?.status ?? "—"}</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      {sync.error && <p className="text-sm text-destructive">{sync.error.message}</p>}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Satellite className="h-4 w-4" /> Daily full-track history sync
+          </CardTitle>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={dailySync.isPending}
+            onClick={() => dailySync.mutate({})}
+          >
+            {dailySync.isPending ? "Running…" : "Run full-track sync now"}
+          </Button>
+        </CardHeader>
+        <CardContent className="grid grid-cols-3 gap-4 text-sm">
+          <div>
+            <div className="text-muted-foreground text-xs">Last run</div>
+            <div className="text-lg font-semibold">
+              {daily?.startedAt ? formatDateTime(daily.startedAt) : "—"}
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground text-xs">Status</div>
+            <div className="flex items-center gap-1.5">
+              {daily?.status ? <StatusDot level={statusLevel(daily.status)} /> : null}
+              <span className="font-medium">{daily?.status ?? "—"}</span>
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground text-xs">Points stored (last run)</div>
+            <div className="text-lg font-semibold">
+              {daily?.recordsWritten ?? "—"}
+              {daily?.devicesSucceeded != null && daily?.devicesTotal != null ? (
+                <span className="text-muted-foreground text-xs font-normal">
+                  {" "}
+                  · {daily.devicesSucceeded}/{daily.devicesTotal} devices
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      {dailySync.data?.mode === "queued" && (
+        <p className="text-sm text-muted-foreground">
+          Full-track sync queued — it runs in the background; refresh in a moment to see the result.
+        </p>
+      )}
+      {dailySync.error && <p className="text-sm text-destructive">{dailySync.error.message}</p>}
+      <Card>
+        <CardHeader><CardTitle className="text-base">Recent runs</CardTitle></CardHeader>
+        <CardContent className="space-y-2">
+          {(!data || data.runs.length === 0) && (
+            <p className="text-muted-foreground text-sm">{isLoading ? "Loading…" : "No sync runs yet."}</p>
+          )}
+          {data?.runs.map((r) => (
+            <div key={r.id} className="flex items-center justify-between border-b pb-2 text-sm last:border-0">
+              <div className="flex items-center gap-2">
+                <StatusDot level={statusLevel(r.status)} />
+                <span>{formatDateTime(r.startedAt)}</span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {r.devicesSeen} device{r.devicesSeen === 1 ? "" : "s"} · {r.recordsWritten} point
+                {r.recordsWritten === 1 ? "" : "s"} stored{r.error ? ` · ${r.error}` : ""}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
     </div>
   );
 }

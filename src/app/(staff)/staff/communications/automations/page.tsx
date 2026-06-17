@@ -2,7 +2,7 @@
 
 import { CommsTabs } from "@/components/communications/comms-tabs";
 import { PageHeader } from "@/components/layout/page-header";
-import { PageSection, PageShell } from "@/components/layout/page-section";
+import { PageShell } from "@/components/layout/page-section";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { trpc } from "@/lib/trpc/client";
@@ -92,7 +92,7 @@ export default function AutomationsPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full>
       <PageHeader
         eyebrow="Operations"
         title="Communications"
@@ -101,14 +101,19 @@ export default function AutomationsPage() {
 
       <CommsTabs />
 
-      <PageSection flush>
+      <div className="flex min-h-0 flex-1 flex-col">
         <DataTable<Row>
           columns={columns}
           data={isLoading ? undefined : rows}
+          isLoading={isLoading}
           getRowId={(r) => r.id}
           empty="No automations configured."
+          fillHeight
+          pageSize={25}
+          pageSizeOptions={[25, 50, 100]}
+          paginationEmptyLabel="No automations"
         />
-      </PageSection>
+      </div>
     </PageShell>
   );
 }

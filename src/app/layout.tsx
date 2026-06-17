@@ -30,12 +30,23 @@ const dmSansDisplay = DM_Sans({
 
 export async function generateMetadata(): Promise<Metadata> {
   const branding = await getBranding();
-  const title = branding.tagline
+  const defaultTitle = branding.tagline
     ? `${branding.siteName} — ${branding.tagline}`
     : branding.siteName;
+  // M-11: a longer, descriptive default (the bare tagline was ~43 chars).
+  // Derived from branding so it stays correct per tenant — no hardcoded names.
+  const description = branding.tagline
+    ? `${branding.tagline}. Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent GST-inclusive pricing, and flexible pickup across our depots.`
+    : `Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent pricing, and flexible pickup.`;
   return {
-    title,
-    description: branding.tagline,
+    // M-11: `template` lets each page set just its own short title and have
+    // the brand appended automatically (e.g. "Fleet · XPERT Moto"), while the
+    // home page keeps the full descriptive default.
+    title: {
+      default: defaultTitle,
+      template: `%s · ${branding.siteName}`,
+    },
+    description,
     icons: branding.faviconUrl ? { icon: branding.faviconUrl } : undefined,
   };
 }
@@ -67,7 +78,13 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="min-h-screen bg-background font-sans antialiased">
         <SilenceExtensionHydrationWarning />
         <MobileDebug />
-        <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
+        {/* M-8: only inject the PostHog snippet when a browser key is
+         *  configured. With an empty key the snippet still loaded array.js +
+         *  /array//config.js and 404'd on every page. Mirrors the existing
+         *  <PostHogIdentify> gating below. */}
+        {posthog.browserKey ? (
+          <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
+        ) : null}
         <TRPCProvider>
           {posthog.browserKey ? <PostHogIdentify /> : null}
           <SentryIdentify />

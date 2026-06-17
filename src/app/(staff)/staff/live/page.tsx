@@ -1,5 +1,6 @@
 import { HydrationBoundary, dehydrate } from "@tanstack/react-query";
 import { getSSRHelpers } from "@/lib/trpc/ssr";
+import { SectionShell } from "@/components/layout/section-shell";
 import { LiveClient } from "./live-client";
 
 const TABS = [
@@ -80,8 +81,10 @@ export default async function StaffLivePage({
   }
 
   return (
-    <HydrationBoundary state={dehydrate(helpers.queryClient)}>
-      <LiveClient />
-    </HydrationBoundary>
+    <SectionShell section="live">
+      <HydrationBoundary state={dehydrate(helpers.queryClient)}>
+        <LiveClient />
+      </HydrationBoundary>
+    </SectionShell>
   );
 }

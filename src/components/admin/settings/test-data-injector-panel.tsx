@@ -156,7 +156,7 @@ const tollSchema = z.object({
   vehicleId: z.string().min(1, "Required"),
   eventAt: z.string().min(1, "Required"),
   amount: z.coerce.number().min(0.01),
-  gantryCode: z.string().optional(),
+  tollpoint: z.string().optional(),
 });
 type TollValues = z.infer<typeof tollSchema>;
 
@@ -169,7 +169,7 @@ function TollInjector(): React.ReactNode {
       vehicleId: "",
       eventAt: toLocalDatetimeValue(new Date()),
       amount: 4.5,
-      gantryCode: "",
+      tollpoint: "",
     },
   });
 
@@ -178,7 +178,7 @@ function TollInjector(): React.ReactNode {
       vehicleId: values.vehicleId,
       eventAt: new Date(values.eventAt),
       amountCents: Math.round(values.amount * 100),
-      gantryCode: values.gantryCode || undefined,
+      tollpoint: values.tollpoint || undefined,
     });
     const tail = `(${row.externalHash.slice(0, 16)}…)`;
     const message =
@@ -227,12 +227,12 @@ function TollInjector(): React.ReactNode {
             />
             <FormField
               control={form.control}
-              name="gantryCode"
+              name="tollpoint"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Gantry code (optional)</FormLabel>
+                  <FormLabel>Toll point (optional)</FormLabel>
                   <FormControl>
-                    <Input placeholder="M1-GC-042" {...field} />
+                    <Input placeholder="Eastern Distributor" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

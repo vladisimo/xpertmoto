@@ -537,11 +537,12 @@ function buildPayOnlineBreakdown(args: {
           : args.recurringFrequency === "MONTHLY"
             ? "monthly"
             : "first";
+    const periodNoun = word === "first" ? "billing period" : word.replace(/ly$/, "");
     return [
       {
         label: `First ${word.replace(/ly$/, "")} period`,
         amount,
-        detail: "Covers rental, per-day add-ons, and any one-time fees (delivery, one-way). Recurring charges follow on the saved card.",
+        detail: `Covers rental, per-day add-ons, and any one-time fees (delivery, one-way). Each following ${periodNoun} is then charged automatically to your saved card until the hire ends.`,
       },
     ];
   }

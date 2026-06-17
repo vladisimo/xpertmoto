@@ -108,7 +108,7 @@ function ReviewTile({ review }: { review: ReviewCard }) {
         </div>
         <GoogleBadge />
       </div>
-      <div aria-label={`Rated ${review.rating} out of 5`} className="mt-4 flex items-center gap-0.5">
+      <div role="img" aria-label={`Rated ${review.rating} out of 5`} className="mt-4 flex items-center gap-0.5">
         {Array.from({ length: 5 }).map((_, i) => (
           <Star key={i} filled={i < review.rating} />
         ))}
@@ -157,6 +157,7 @@ function Star({ filled }: { filled: boolean }) {
 function GoogleBadge() {
   return (
     <span
+      role="img"
       aria-label="Google review"
       title="Google review"
       className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-background text-[11px] font-semibold text-muted-foreground"

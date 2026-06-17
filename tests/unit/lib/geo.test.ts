@@ -4,6 +4,7 @@ import {
   parseAuAddressString,
   parseInternationalAddressTail,
   resolveAddressComponents,
+  reverseGeocode,
 } from "@/lib/geo";
 
 type FetchMock = ReturnType<typeof vi.fn>;
@@ -532,5 +533,68 @@ describe("parseInternationalAddressTail", () => {
     expect(
       parseInternationalAddressTail("124 Darley Street, Newtown, NSW 2042"),
     ).toBeNull();
+  });
+});
+
+describe("reverseGeocode", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("formats a concise single-line AU label and abbreviates the state", async () => {
+    const fetchMock = mockFetchOnce({
+      lat: "-33.90973",
+      lon: "151.15559",
+      display_name: "12, Smith Street, Lewisham, NSW, 2049, Australia",
+      address: {
+        house_number: "12",
+        road: "Smith Street",
+        suburb: "Lewisham",
+        state: "New South Wales",
+        postcode: "2049",
+        country: "Australia",
+      },
+    });
+
+    const out = await reverseGeocode(-33.90973, 151.15559);
+    expect(out).toBe("12 Smith Street, Lewisham NSW 2049");
+    // Hits the reverse endpoint with the supplied coordinate.
+    const url = fetchMock.mock.calls[0]![0] as string;
+    expect(url).toContain("/reverse?");
+    expect(url).toContain("lat=-33.90973");
+    expect(url).toContain("lon=151.15559");
+  });
+
+  it("falls back to display_name when components are too sparse", async () => {
+    mockFetchOnce({
+      lat: "-27.4",
+      lon: "153.0",
+      display_name: "Some Remote Track, Queensland, Australia",
+      address: { country: "Australia" },
+    });
+
+    const out = await reverseGeocode(-27.4, 153.0);
+    expect(out).toBe("Some Remote Track, Queensland, Australia");
+  });
+
+  it("returns null on an HTTP error", async () => {
+    mockFetchOnce({}, false);
+    expect(await reverseGeocode(0, 0)).toBeNull();
+  });
+
+  it("returns null when Nominatim reports an error body", async () => {
+    mockFetchOnce({ error: "Unable to geocode" });
+    expect(await reverseGeocode(0, 0)).toBeNull();
+  });
+
+  it("returns null when the fetch throws", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("network down")),
+    );
+    expect(await reverseGeocode(1, 2)).toBeNull();
   });
 });

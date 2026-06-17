@@ -344,16 +344,46 @@ enum InfringementType {
   PARKING
   TOLL
   RED_LIGHT
+  MOBILE_PHONE
+  SEATBELT
+  UNREGISTERED
   OTHER
 }
 
 enum InfringementStatus {
   RECEIVED
+  PENDING_REVIEW
   NOMINATED
+  NOMINATION_SUBMITTED
   CUSTOMER_CHARGED
   PAID
   DISPUTED
   WRITTEN_OFF
+}
+
+/// How the cost/liability of an infringement is borne by the renter.
+/// Demerit-point offences MUST be NOMINATE_DRIVER (points can't transfer to
+/// the renter without a formal Revenue NSW nomination); non-demerit fines
+/// (parking/toll) can use PAY_AND_RECOVER.
+enum NominationHandling {
+  NOMINATE_DRIVER
+  PAY_AND_RECOVER
+}
+
+/// Lifecycle of one formal nomination lodgement attempt with Revenue NSW.
+enum NominationSubmissionStatus {
+  DRAFTED
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+}
+
+/// The official channel used to lodge a nomination with Revenue NSW.
+enum NominationChannel {
+  ENOMINATIONS_CSV
+  STAT_DEC_MAIL
+  MYPENALTY_WEB
 }
 
 enum NotificationChannel {
@@ -404,6 +434,7 @@ enum NotificationType {
   PASSPORT_EXPIRING
   INCIDENT_REPORTED
   INFRINGEMENT_NOMINATED
+  INFRINGEMENT_DEADLINE
   WORK_ORDER_ASSIGNED
   VEHICLE_EXPIRY
   REGO_EXPIRING
@@ -970,6 +1001,7 @@ model Vehicle {
   maintenanceSchedules MaintenanceSchedule[]
   incidents            Incident[]
   telemetry            VehicleTelemetry[]
+  livePosition         VehicleLivePosition?
   infringements        Infringement[]
   transfers            VehicleTransfer[]
   // Mid-rental swap history: times this vehicle was swapped off / onto a booking.
@@ -2380,13 +2412,29 @@ model Infringement {
   dueDate            DateTime?          @db.Date
   documentUrl        String?
   notes              String?
+  // --- NSW formal-nomination workflow (add_nsw_nomination_workflow) ---
+  // The notice ISSUE date drives the 21-day statutory nomination deadline
+  // (Road Transport Act 2013 s.186). Distinct from `offenceDate`, which is
+  // the timestamp used to match the renter who held the vehicle.
+  issueDate          DateTime?          @db.Date
+  nominationDeadline DateTime?          @db.Date
+  demeritPoints      Int                @default(0)
+  offenceCode        String?
+  offenceDescription String?
+  offenceLocation    String?
+  // Demerit offences default to NOMINATE_DRIVER; parking/toll to
+  // PAY_AND_RECOVER. Staff-overridable at allocation.
+  handling           NominationHandling?
+  // Idempotency latch for the deadline-escalation job.
+  deadlineEscalatedAt DateTime?         @db.Timestamptz
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   deletedAt          DateTime?
 
-  vehicle   Vehicle           @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
-  booking   Booking?          @relation(fields: [bookingId], references: [id], onDelete: SetNull)
-  documents VehicleDocument[] @relation("InfringementDocuments")
+  vehicle     Vehicle              @relation(fields: [vehicleId], references: [id], onDelete: Restrict)
+  booking     Booking?             @relation(fields: [bookingId], references: [id], onDelete: SetNull)
+  documents   VehicleDocument[]    @relation("InfringementDocuments")
+  submissions NominationSubmission[]
 
   @@index([createdAt])
   @@index([status])
@@ -2394,83 +2442,53 @@ model Infringement {
   @@index([customerId])
   @@index([bookingId])
   @@index([deletedAt])
+  @@index([nominationDeadline])
+  @@index([handling])
 }
 
-// ============================================================================
-// E-TOLL INTEGRATION
-// ============================================================================
+/// One formal nomination lodgement attempt against Revenue NSW for an
+/// infringement. There is no Revenue NSW API: the system GENERATES the
+/// official artefacts (eNominations CSV / statutory-declaration PDF) and a
+/// staff member submits them (uploads to the eNominations portal or mails
+/// the stat dec), then records the receipt + outcome here. This row is the
+/// immutable legal record of WHAT was declared, by WHOM, and WHEN — the
+/// nominee snapshot is frozen at draft time because the customer's licence
+/// data may change later. Licence number is stored encrypted only.
+model NominationSubmission {
+  id             String                     @id @default(cuid())
+  infringementId String
+  channel        NominationChannel
+  status         NominationSubmissionStatus @default(DRAFTED)
 
-model EtollAccount {
-  id             String           @id @default(cuid())
-  name           String
-  loginUrl       String           @default("https://account.myetoll.transport.nsw.gov.au/login")
-  username       String
-  passwordEnc    String
-  passwordIv     String
-  passwordTag    String
-  isActive       Boolean          @default(true)
-  adminFeeCents  Int              @default(2500)
-  lastSyncAt     DateTime?
-  lastSyncStatus EtollSyncStatus?
-  lastSyncError  String?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  // Immutable nominee snapshot (frozen at draft time).
+  driverFullName        String
+  driverDob             DateTime? @db.Date
+  driverAddress         String?
+  driverLicenceState    String?
+  driverLicenceNumberEnc Json? // encrypted via writePiiField — never plaintext
 
-  syncs         EtollSync[]
-  unmatchedRows EtollUnmatchedRow[]
-}
+  // Generated-artefact references (S3/MinIO keys).
+  csvFileKey    String?
+  statDecPdfKey String?
 
-model EtollSync {
-  id            String          @id @default(cuid())
-  accountId     String
-  status        EtollSyncStatus @default(RUNNING)
-  startedAt     DateTime        @default(now())
-  finishedAt    DateTime?
-  periodFrom    DateTime
-  periodTo      DateTime
-  rowsFetched   Int             @default(0)
-  rowsCreated   Int             @default(0)
-  rowsDuplicate Int             @default(0)
-  rowsUnmatched Int             @default(0)
-  rowsSkipped   Int             @default(0)
-  error         String?
-  rawFileUrl    String?
-  unmatched     Json?
+  // Human-in-the-loop submission + outcome.
+  submittedById   String?
+  submittedAt     DateTime? @db.Timestamptz
+  receiptReference String?
+  receiptFileKey  String?
+  rejectionReason String?
 
-  account EtollAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
 
-  @@index([accountId, startedAt])
-}
+  infringement Infringement @relation(fields: [infringementId], references: [id], onDelete: Restrict)
 
-enum EtollSyncStatus {
-  RUNNING
-  SUCCESS
-  PARTIAL
-  FAILED
-}
-
-model EtollUnmatchedRow {
-  id                     String    @id @default(cuid())
-  accountId              String
-  externalHash           String    @unique
-  eventAt                DateTime
-  rego                   String
-  concession             String
-  gantryCode             String?
-  rawDetails             String?
-  amountCents            Int
-  resolvedAt             DateTime?
-  resolvedById           String?
-  resolvedAction         String?
-  resolvedInfringementId String?
-  resolutionNotes        String?
-  createdAt              DateTime  @default(now())
-  updatedAt              DateTime  @updatedAt
-
-  account EtollAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-
-  @@index([accountId, resolvedAt])
-  @@index([eventAt])
+  @@index([infringementId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([deletedAt])
 }
 
 // ============================================================================
@@ -2816,8 +2834,17 @@ model PushSubscription {
   @@index([userId])
 }
 
+/// High-volume position history. Converted to a TimescaleDB hypertable in the
+/// `add_gps51_telemetry_timescale` migration (partitioned on `timestamp`,
+/// compressed after 14 days, kept for years). Timescale requires the partition
+/// column in every unique key, so the PK is composite `(deviceId, timestamp)` —
+/// which also serves as the GPS51 ingest dedup key (`ON CONFLICT DO NOTHING`,
+/// timestamp = the device's `devicetime` fix time). `id` is retained as a plain
+/// column for logging/back-compat but is no longer the identity.
+/// NOTE: never let a generated migration drop/recreate this table — it would
+/// silently destroy the hypertable. Roll forward with raw SQL instead.
 model VehicleTelemetry {
-  id         String   @id @default(cuid())
+  id         String   @default(cuid())
   vehicleId  String?
   deviceId   String
   timestamp  DateTime
@@ -2834,8 +2861,61 @@ model VehicleTelemetry {
 
   vehicle Vehicle? @relation(fields: [vehicleId], references: [id])
 
+  @@id([deviceId, timestamp])
   @@index([vehicleId, timestamp])
-  @@index([deviceId, timestamp])
+}
+
+/// One row per tracker device — the latest known position plus the movement
+/// watermark used by the GPS51 poller. The live fleet map reads ONLY this table
+/// (never the VehicleTelemetry hypertable), so map latency is O(fleet) and
+/// independent of history size. `hist*` mark the last point persisted to
+/// history so the persist-on-movement check needs no hypertable read.
+model VehicleLivePosition {
+  deviceId   String    @id
+  vehicleId  String?   @unique
+  latitude   Float
+  longitude  Float
+  speedKph   Float?
+  headingDeg Float?
+  ignitionOn Boolean?
+  batteryPct Float?
+  moving     Boolean?
+  timestamp  DateTime
+  histLat    Float?
+  histLon    Float?
+  histAt     DateTime?
+  raw        Json?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  vehicle Vehicle? @relation(fields: [vehicleId], references: [id])
+
+  @@index([vehicleId])
+}
+
+enum Gps51SyncStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+}
+
+/// Run-log for the GPS51 poll job (mirrors LinktSync). `cursor` persists the
+/// GPS51 `lastquerypositiontime` between runs (advanced only after records
+/// commit in the same transaction → at-least-once + upsert dedup = safe replay).
+model Gps51Sync {
+  id             String          @id @default(cuid())
+  status         Gps51SyncStatus @default(RUNNING)
+  startedAt      DateTime        @default(now())
+  finishedAt     DateTime?
+  devicesSeen    Int             @default(0)
+  recordsWritten Int             @default(0)
+  cursor         BigInt?
+  error          String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([createdAt])
 }
 
 // ============================================================================
@@ -4355,6 +4435,13 @@ model LinktAccount {
   isActive       Boolean          @default(true)
   // 0 = fall back to the global configured toll admin fee (getTollAdminFee()).
   adminFeeCents  Int              @default(0)
+  // Opt-in to the automatic stealth-browser scraper (default off — existing
+  // accounts keep the manual CSV-upload flow until explicitly enabled).
+  scrapeEnabled  Boolean          @default(false)
+  // Set when the scraper is blocked (Incapsula / login). While non-null the
+  // scheduler skips scraping this account (falls back to the rematch pass) and
+  // the admin UI shows a re-auth banner; cleared on the next successful scrape.
+  reauthNeededAt DateTime?
   lastSyncAt     DateTime?
   lastSyncStatus LinktSyncStatus?
   lastSyncError  String?

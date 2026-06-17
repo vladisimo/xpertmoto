@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { createTRPCRouter, managerProcedure, adminProcedure } from "../trpc";
 import { encryptSecret } from "@/lib/crypto";
 import { runLinktSync } from "@/server/services/linkt";
+import { writeAuditAsync } from "@/server/services/audit";
 
 /**
  * Pure validation for resolve-unmatched-row inputs. Split out so we can unit
@@ -45,6 +46,8 @@ const accountSelect = {
   region: true,
   loginUrl: true,
   isActive: true,
+  scrapeEnabled: true,
+  reauthNeededAt: true,
   lastSyncAt: true,
   lastSyncStatus: true,
   lastSyncError: true,
@@ -133,6 +136,38 @@ export const linktRouter = createTRPCRouter({
         });
       }
     }),
+
+  // Trigger the stealth-browser scraper for one account on demand. Dynamically
+  // imported so Playwright never enters the main Next.js server bundle — it's
+  // only loaded when a scrape is actually requested (Node runtime).
+  scrapeNow: managerProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const { runLinktScrape } = await import("@/server/services/linkt-scrape");
+        return await runLinktScrape(ctx.prisma, input.id);
+      } catch (e) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }),
+
+  // Opt an account in/out of auto-scraping. Enabling clears any stale re-auth
+  // flag so the next scheduled run attempts a fresh scrape.
+  setScrapeEnabled: adminProcedure
+    .input(z.object({ id: z.string(), enabled: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      ctx.prisma.linktAccount.update({
+        where: { id: input.id },
+        data: {
+          scrapeEnabled: input.enabled,
+          ...(input.enabled ? { reauthNeededAt: null } : {}),
+        },
+        select: accountSelect,
+      }),
+    ),
 
   listSyncs: managerProcedure
     .input(z.object({ accountId: z.string(), limit: z.number().int().min(1).max(100).default(20) }))
@@ -325,6 +360,27 @@ export const linktRouter = createTRPCRouter({
           resolvedAction: "RESOLVED",
           resolvedInfringementId: infringement.id,
           resolutionNotes: input.notes ?? null,
+        },
+      });
+
+      // Audit the toll being added, tagged to the vehicle so it surfaces in
+      // the vehicle's audit history alongside manually-recorded tolls.
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.session.user.id,
+        category: "MUTATION",
+        action: "toll.create",
+        entity: "Vehicle",
+        entityId: input.vehicleId,
+        newData: {
+          infringementId: infringement.id,
+          type: infringement.type,
+          issuer: infringement.issuer,
+          referenceNumber: infringement.referenceNumber,
+          amount: tollAud,
+          offenceDate: row.eventAt,
+          bookingId: bookingId ?? null,
+          customerId: customerId ?? null,
+          source: "linkt-unmatched-resolution",
         },
       });
 

@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import {
   AdminDashboardTabsBar,
   type AdminDashboardTabValue,
@@ -40,20 +41,22 @@ export default async function AdminDashboard({
   const activeTab = parseTab(sp.tab);
 
   return (
-    <PageShell full>
-      <PageHeader
-        eyebrow="Administration"
-        title="Admin dashboard"
-        description="Organisation-wide overview."
-      />
-      <AdminDashboardTabsBar activeTab={activeTab} />
+    <SectionShell section="admin-dashboard">
+      <PageShell full>
+        <PageHeader
+          eyebrow="Administration"
+          title="Admin dashboard"
+          description="Organisation-wide overview."
+        />
+        <AdminDashboardTabsBar />
 
-      <Suspense fallback={<TabPlaceholder />}>
-        {activeTab === "overview" && <AdminOverviewTab />}
-        {activeTab === "risk" && <AdminRiskTab />}
-        {activeTab === "debt" && <AdminDebtTab />}
-        {activeTab === "support" && <AdminSupportTab />}
-      </Suspense>
-    </PageShell>
+        <Suspense fallback={<TabPlaceholder />}>
+          {activeTab === "overview" && <AdminOverviewTab />}
+          {activeTab === "risk" && <AdminRiskTab />}
+          {activeTab === "debt" && <AdminDebtTab />}
+          {activeTab === "support" && <AdminSupportTab />}
+        </Suspense>
+      </PageShell>
+    </SectionShell>
   );
 }

@@ -33,6 +33,12 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
   const sync = trpc.linkt.runSyncNow.useMutation({
     onSuccess: () => util.linkt.listAccounts.invalidate(),
   });
+  const scrape = trpc.linkt.scrapeNow.useMutation({
+    onSuccess: () => util.linkt.listAccounts.invalidate(),
+  });
+  const setScrape = trpc.linkt.setScrapeEnabled.useMutation({
+    onSuccess: () => util.linkt.listAccounts.invalidate(),
+  });
 
   const [form, setForm] = useState<{
     name: string;
@@ -63,16 +69,30 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
     }
   }
 
+  async function runScrape(id: string) {
+    setLastSyncMsg("Scraping the Linkt portal… this can take a minute.");
+    try {
+      const res = await scrape.mutateAsync({ id });
+      setLastSyncMsg(`Scrape ${res.syncId.slice(0, 8)} → ${res.status}`);
+    } catch (e) {
+      setLastSyncMsg(`Scrape failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   return (
     <section className="space-y-4">
       <div>
         <h2 className="text-2xl font-semibold">Linkt (Transurban) accounts</h2>
         <p className="text-muted-foreground text-sm mt-1">
-          Connect the Linkt account covering your fleet&apos;s toll roads. Download the trip activity
-          export (CSV or Excel) from your Linkt commercial account and upload it here. The system
-          matches each toll to the booking active when it was incurred and auto-creates the
-          infringement; unmatched trips are queued for staff review. &ldquo;Re-match&rdquo; re-tries
-          any queued unmatched trips against newer bookings.
+          Connect the Linkt account covering your fleet&apos;s toll roads. Either upload the trip
+          activity export (CSV or Excel) from your Linkt commercial account, or enable
+          &ldquo;Auto-scrape&rdquo; to have the system log in and pull trips automatically (daily,
+          plus &ldquo;Scrape now&rdquo; on demand). Linkt&apos;s portal has bot protection, so a
+          scrape can occasionally be blocked — when that happens the account is flagged for a manual
+          re-try and uploading the export always works as a fallback. Either way, each toll is
+          matched to the booking active when it was incurred and an infringement is auto-created;
+          unmatched trips are queued for staff review, and &ldquo;Re-match&rdquo; re-tries them
+          against newer bookings.
         </p>
       </div>
 
@@ -138,6 +158,14 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
           accounts?.map((a) => (
             <Card key={a.id}>
               <CardContent className="p-3 space-y-2">
+                {a.reauthNeededAt && (
+                  <div className="rounded-md border border-red-300 bg-red-50 p-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+                    Auto-scrape was blocked on {formatDateTime(a.reauthNeededAt)} (Linkt login /
+                    bot-check). Scheduled scraping is paused for this account. Click{" "}
+                    <span className="font-medium">Scrape now</span> to retry, or upload the CSV/Excel
+                    export manually below.
+                  </div>
+                )}
                 <div className="flex justify-between items-start text-sm">
                   <div>
                     <div className="font-medium">
@@ -145,6 +173,9 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
                       <span className="text-xs text-muted-foreground">
                         ({a.region} · {a.username})
                       </span>
+                      {a.scrapeEnabled && (
+                        <span className="ml-2 text-xs text-muted-foreground">· auto-scrape on</span>
+                      )}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {a.lastSyncAt
@@ -160,7 +191,16 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
                     <Button
                       size="sm"
                       variant="outline"
-                      title="Re-try queued unmatched trips against newer bookings. Linkt has no live feed — new trips arrive via Upload export."
+                      title="Log into the Linkt portal and pull the latest trips automatically. May be blocked by Linkt's bot protection — fall back to Upload export if so."
+                      onClick={() => runScrape(a.id)}
+                      disabled={scrape.isPending}
+                    >
+                      {scrape.isPending ? "Scraping…" : "Scrape now"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      title="Re-try queued unmatched trips against newer bookings."
                       onClick={() => runSync(a.id)}
                       disabled={sync.isPending}
                     >
@@ -174,17 +214,30 @@ export function IntegrationTabLinkt({ canManage = false }: { canManage?: boolean
                       History
                     </Button>
                     {canManage && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          if (confirm(`Delete Linkt account "${a.name}"?`)) {
-                            remove.mutate({ id: a.id });
+                      <>
+                        <Button
+                          size="sm"
+                          variant={a.scrapeEnabled ? "default" : "outline"}
+                          title="Toggle scheduled automatic scraping for this account (daily). When off, only manual upload / re-match run."
+                          onClick={() =>
+                            setScrape.mutate({ id: a.id, enabled: !a.scrapeEnabled })
                           }
-                        }}
-                      >
-                        Delete
-                      </Button>
+                          disabled={setScrape.isPending}
+                        >
+                          {a.scrapeEnabled ? "Auto-scrape: On" : "Auto-scrape: Off"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            if (confirm(`Delete Linkt account "${a.name}"?`)) {
+                              remove.mutate({ id: a.id });
+                            }
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      </>
                     )}
                   </div>
                 </div>

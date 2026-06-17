@@ -149,34 +149,53 @@ export function PassportSection({ initial }: { initial: PassportInitial }) {
         throw new Error(j.error ?? `Upload failed (${res.status})`);
       }
       const { key } = (await res.json()) as { key: string };
+
+      // Classify BEFORE storing so a genuine non-ID image is rejected without
+      // creating a CustomerDocument row. A driver's licence dropped here (the
+      // other valid ID) is accepted but not pre-filled.
+      let r: Awaited<ReturnType<typeof extractPassport.mutateAsync>> | undefined;
+      try {
+        r = await extractPassport.mutateAsync({ imageKey: key });
+      } catch {
+        // OCR/classification failure is non-fatal — store without pre-fill.
+        r = undefined;
+      }
+
+      if (r?.documentType === "OTHER") {
+        setPhase("error");
+        setError(
+          "This doesn't look like a passport. Please upload a clear photo of your passport's photo page.",
+        );
+        return;
+      }
+
       await upload.mutateAsync({ type: "PASSPORT", imageKey: key });
       setUploaded(true);
 
-      try {
-        const r = await extractPassport.mutateAsync({ imageKey: key });
-        if (r.confidence >= 0.7) {
-          const patch: Record<string, string> = {};
-          if (r.passportNumber) patch.passportNumber = r.passportNumber;
-          if (r.country) patch.passportCountry = r.country;
-          if (r.expiryDate) patch.passportExpiry = isoDate(new Date(r.expiryDate));
-          if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
-          if (Object.keys(patch).length > 0) {
-            try {
-              await updateProfile.mutateAsync(
-                patch as unknown as Parameters<typeof updateProfile.mutateAsync>[0],
-              );
-            } catch {
-              // non-fatal
-            }
+      if (r && r.documentType !== "DRIVERS_LICENCE" && r.confidence >= 0.7) {
+        const patch: Record<string, string> = {};
+        if (r.passportNumber) patch.passportNumber = r.passportNumber;
+        if (r.country) patch.passportCountry = r.country;
+        if (r.expiryDate) patch.passportExpiry = isoDate(new Date(r.expiryDate));
+        if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
+        if (Object.keys(patch).length > 0) {
+          try {
+            await updateProfile.mutateAsync(
+              patch as unknown as Parameters<typeof updateProfile.mutateAsync>[0],
+            );
+          } catch {
+            // non-fatal
           }
         }
-      } catch {
-        // OCR is non-fatal.
       }
 
       await util.customer.identityDocuments.invalidate().catch(() => undefined);
       await util.customer.me.invalidate().catch(() => undefined);
-      setToast("Passport saved.");
+      setToast(
+        r?.documentType === "DRIVERS_LICENCE"
+          ? "This looks like a driver's licence — saved here, but you'll still need to upload your passport."
+          : "Passport saved.",
+      );
       setPhase("done");
     } catch (e) {
       setPhase("error");

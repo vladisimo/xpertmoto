@@ -13,6 +13,7 @@ import {
   FileDown,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import { PageHeader } from "@/components/layout/page-header";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsTrigger } from "@/components/ui/tabs";
@@ -83,6 +84,7 @@ export default function ReportsLauncherPage() {
 
   return (
     <>
+      <SectionShell section="reports">
       <PageShell>
         <PageHeader
           eyebrow="Administration"
@@ -114,7 +116,7 @@ export default function ReportsLauncherPage() {
           />
         ) : (
           <Tabs value={tab} onValueChange={handleTabChange}>
-            <MobileScrollTabs className="w-full justify-start sm:w-full">
+            <MobileScrollTabs className="w-full justify-start sm:w-full lg:hidden">
               {CATEGORY_ORDER.map((cat) => {
                 const Icon = CATEGORY_ICONS[cat];
                 return (
@@ -137,6 +139,7 @@ export default function ReportsLauncherPage() {
           </Tabs>
         )}
       </PageShell>
+      </SectionShell>
 
       <ReportPreviewDialog reportKey={openReport} onOpenChange={handleDialogChange} />
     </>

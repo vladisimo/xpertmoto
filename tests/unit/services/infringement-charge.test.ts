@@ -54,6 +54,7 @@ vi.mock("@/lib/logger", () => ({
 }));
 
 import {
+  applyAdminFeeOnlyCharge,
   applyInfringementRecoveryCharge,
   markInfringementPaidOnCapture,
   revertInfringementOnVoid,
@@ -206,6 +207,71 @@ describe("applyInfringementRecoveryCharge", () => {
         infringement: { ...baseInf, amount: 0, adminFee: 0 },
       }),
     ).rejects.toThrow(/non-positive total/);
+  });
+});
+
+describe("applyAdminFeeOnlyCharge", () => {
+  it("charges the admin fee only (no issuer line) + increments balanceDue", async () => {
+    paymentFindUnique.mockResolvedValueOnce(null);
+    paymentCreate.mockResolvedValueOnce({ id: "pmt_af" });
+    bookingFindUnique.mockResolvedValueOnce({ balanceDue: 20 });
+    bookingUpdate.mockResolvedValueOnce({});
+
+    const result = await applyAdminFeeOnlyCharge({
+      prisma: fakePrisma,
+      infringement: { ...baseInf, type: "SPEEDING", adminFee: 55 },
+    });
+
+    expect(result).toEqual({ paymentId: "pmt_af", alreadyExisted: false, amount: 55 });
+    expect(paymentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reference: "INFR-ref-001",
+          type: "INFRINGEMENT_RECOVERY",
+          amount: 55,
+        }),
+      }),
+    );
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "bk_1" },
+      data: { balanceDue: 75 },
+    });
+    // Only the administration fee line — never the issuer fine.
+    expect(tryIssueAdjustmentForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lineItems: [
+          expect.objectContaining({ description: "Administration fee — driver nomination", unitPrice: 55 }),
+        ],
+      }),
+    );
+  });
+
+  it("is idempotent on a duplicate Payment.reference", async () => {
+    paymentFindUnique.mockResolvedValueOnce({ id: "pmt_dupe" });
+    const result = await applyAdminFeeOnlyCharge({
+      prisma: fakePrisma,
+      infringement: { ...baseInf, adminFee: 55 },
+    });
+    expect(result).toEqual({ paymentId: "pmt_dupe", alreadyExisted: true, amount: 55 });
+    expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("throws when the admin fee is non-positive", async () => {
+    await expect(
+      applyAdminFeeOnlyCharge({
+        prisma: fakePrisma,
+        infringement: { ...baseInf, adminFee: 0 },
+      }),
+    ).rejects.toThrow(/non-positive admin fee/);
+  });
+
+  it("throws when called without a customer", async () => {
+    await expect(
+      applyAdminFeeOnlyCharge({
+        prisma: fakePrisma,
+        infringement: { ...baseInf, adminFee: 55, customerId: null },
+      }),
+    ).rejects.toThrow(/no customerId/);
   });
 });
 

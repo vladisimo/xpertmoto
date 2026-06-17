@@ -1,9 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { Map, Marker, NavigationControl, type MapRef } from "react-map-gl/maplibre";
+import {
+  Map,
+  Marker,
+  NavigationControl,
+  type MapRef,
+} from "react-map-gl/maplibre";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { MAP_STYLE_URL } from "@/lib/maps/style";
+import {
+  useMapStyleStatus,
+  MapUnavailable,
+} from "@/components/maps/map-style-status";
 
 export type DepotPin = {
   id: string;
@@ -18,8 +28,6 @@ export type DepotPin = {
 
 const BRAND_GREEN = "#1B6B4A";
 const INACTIVE_ORANGE = "#E97319";
-const DEFAULT_STYLE_URL =
-  process.env.NEXT_PUBLIC_MAP_STYLE_URL ?? "https://tiles.openfreemap.org/styles/liberty";
 
 const DEFAULT_CENTER: [number, number] = [153.2, -27.5];
 const DEFAULT_ZOOM = 7;
@@ -51,9 +59,17 @@ const LABEL_POSITION: Record<
   "top" | "bottom" | "left" | "right",
   { left: string; top: string; transform: string }
 > = {
-  top: { left: "50%", top: "0", transform: "translate(-50%, calc(-100% - 8px))" },
+  top: {
+    left: "50%",
+    top: "0",
+    transform: "translate(-50%, calc(-100% - 8px))",
+  },
   bottom: { left: "50%", top: "100%", transform: "translate(-50%, 8px)" },
-  left: { left: "0", top: "50%", transform: "translate(calc(-100% - 8px), -50%)" },
+  left: {
+    left: "0",
+    top: "50%",
+    transform: "translate(calc(-100% - 8px), -50%)",
+  },
   right: { left: "100%", top: "50%", transform: "translate(8px, -50%)" },
 };
 
@@ -111,7 +127,9 @@ function DepotPinMarker({
             className="h-2 w-2 shrink-0 rounded-full"
             style={{ backgroundColor: statusColor }}
           />
-          <span className="truncate text-sm font-semibold text-gray-900">{depot.name}</span>
+          <span className="truncate text-sm font-semibold text-gray-900">
+            {depot.name}
+          </span>
         </div>
         <div className="ml-4 text-xs text-gray-500">
           {depot.suburb}, {depot.state}
@@ -134,7 +152,11 @@ function AdminDepotMap({
   onSelectDepot: (id: string) => void;
 }) {
   const mapRef = useRef<MapRef | null>(null);
-  const bubbleDirections = useMemo(() => computeBubbleDirections(depots), [depots]);
+  const bubbleDirections = useMemo(
+    () => computeBubbleDirections(depots),
+    [depots],
+  );
+  const { failed, onLoad, onError } = useMapStyleStatus();
 
   useEffect(() => {
     const map = mapRef.current;
@@ -153,34 +175,39 @@ function AdminDepotMap({
   }, [selectedDepotId, depots]);
 
   return (
-    <Map
-      ref={mapRef}
-      mapLib={maplibregl}
-      mapStyle={DEFAULT_STYLE_URL}
-      initialViewState={{
-        longitude: DEFAULT_CENTER[0],
-        latitude: DEFAULT_CENTER[1],
-        zoom: DEFAULT_ZOOM,
-      }}
-      style={{ width: "100%", height: "100%" }}
-    >
-      <NavigationControl position="top-right" showCompass={false} />
-      {depots.map((depot) => (
-        <Marker
-          key={depot.id}
-          longitude={depot.lng}
-          latitude={depot.lat}
-          anchor="bottom"
-        >
-          <DepotPinMarker
-            depot={depot}
-            isSelected={selectedDepotId === depot.id}
-            direction={bubbleDirections[depot.id] ?? "right"}
-            onClick={() => onSelectDepot(depot.id)}
-          />
-        </Marker>
-      ))}
-    </Map>
+    <div className="relative h-full w-full">
+      <Map
+        ref={mapRef}
+        mapLib={maplibregl}
+        mapStyle={MAP_STYLE_URL}
+        initialViewState={{
+          longitude: DEFAULT_CENTER[0],
+          latitude: DEFAULT_CENTER[1],
+          zoom: DEFAULT_ZOOM,
+        }}
+        style={{ width: "100%", height: "100%" }}
+        onLoad={onLoad}
+        onError={onError}
+      >
+        <NavigationControl position="top-right" showCompass={false} />
+        {depots.map((depot) => (
+          <Marker
+            key={depot.id}
+            longitude={depot.lng}
+            latitude={depot.lat}
+            anchor="bottom"
+          >
+            <DepotPinMarker
+              depot={depot}
+              isSelected={selectedDepotId === depot.id}
+              direction={bubbleDirections[depot.id] ?? "right"}
+              onClick={() => onSelectDepot(depot.id)}
+            />
+          </Marker>
+        ))}
+      </Map>
+      {failed && <MapUnavailable />}
+    </div>
   );
 }
 

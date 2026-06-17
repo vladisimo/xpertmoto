@@ -43,10 +43,25 @@ import {
 } from "@/lib/consent-versions";
 import { buildOnboardingVersion, needsOnboarding } from "@/lib/onboarding-status";
 import { renderConsentDocumentPdf } from "@/lib/pdf/consent-document";
-import { uploadFile } from "@/lib/storage";
+import { uploadFile, downloadFile } from "@/lib/storage";
 import { writePiiField, readPiiField } from "@/lib/customer-pii";
 import { writeAudit } from "@/server/services/audit";
 import { getBranding } from "@/lib/branding";
+import { extractLicenceData, extractPassportData } from "@/server/services/document-extract";
+
+/**
+ * Onboarding identity uploads are posted under `drivers/<userId>/` by
+ * `/api/upload/identity-document`. Re-check ownership here so a caller can't
+ * point the OCR at another user's stored document and read back its PII.
+ */
+function assertOwnIdentityKey(userId: string, imageKey: string): void {
+  if (!imageKey.startsWith(`drivers/${userId}/`)) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Uploaded file key isn't in your folder.",
+    });
+  }
+}
 
 /**
  * Wizard expects the bootstrap response to be enough to render every
@@ -225,6 +240,58 @@ export const onboardingRouter = createTRPCRouter({
       });
 
       return { ok: true as const };
+    }),
+
+  /**
+   * OCR + classify a driver's-licence / IDP image during onboarding. Mirrors
+   * `customer.extractLicenceFromImage`, but on `onboardingProcedure` so a
+   * mid-onboarding user (who is blocked from every `protectedProcedure`) can
+   * still get pre-fill + the document-type check. Returns the full extraction
+   * including `documentType`; the uploader uses that to reject a non-ID before
+   * it's carried into the wizard submit, and to pre-fill the typed fields.
+   */
+  extractLicenceFromImage: onboardingProcedure
+    .use(
+      trpcRateLimit<{ imageKey: string }>({
+        bucket: "onboarding:ocr-licence",
+        limit: 20,
+        windowSec: 60 * 60,
+        identifier: (ctx) => ctx.session?.user?.id,
+      }),
+    )
+    .input(z.object({ imageKey: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      assertOwnIdentityKey(ctx.user.id, input.imageKey);
+      const buffer = await downloadFile(input.imageKey);
+      return extractLicenceData(buffer, {
+        log: {
+          prisma: ctx.prisma,
+          customerId: ctx.user.id,
+          triggeredById: ctx.user.id,
+        },
+      });
+    }),
+
+  extractPassportFromImage: onboardingProcedure
+    .use(
+      trpcRateLimit<{ imageKey: string }>({
+        bucket: "onboarding:ocr-passport",
+        limit: 20,
+        windowSec: 60 * 60,
+        identifier: (ctx) => ctx.session?.user?.id,
+      }),
+    )
+    .input(z.object({ imageKey: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      assertOwnIdentityKey(ctx.user.id, input.imageKey);
+      const buffer = await downloadFile(input.imageKey);
+      return extractPassportData(buffer, {
+        log: {
+          prisma: ctx.prisma,
+          customerId: ctx.user.id,
+          triggeredById: ctx.user.id,
+        },
+      });
     }),
 
   /**

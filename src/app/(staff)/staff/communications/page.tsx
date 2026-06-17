@@ -7,7 +7,7 @@ import { CommsLogTable, type CommsLogRow } from "@/components/communications/com
 import { CommsTabs } from "@/components/communications/comms-tabs";
 import { CommunicationsStats } from "@/components/staff/communications-stats";
 import { PageHeader } from "@/components/layout/page-header";
-import { PageSection, PageShell } from "@/components/layout/page-section";
+import { PageShell } from "@/components/layout/page-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -17,7 +17,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { LoadingBlock } from "@/components/ui/spinner";
 import { trpc } from "@/lib/trpc/client";
 
 const CHANNELS = ["EMAIL", "SMS", "IN_APP", "PUSH"] as const;
@@ -40,7 +39,7 @@ export default function CommsLogPage() {
     [q, channel, category, status],
   );
 
-  const { data, isLoading } = trpc.communication.logList.useQuery({ ...filters, take: 100 });
+  const { data, isLoading } = trpc.communication.logList.useQuery({ ...filters, take: 200 });
   const { data: stats, isLoading: statsLoading } = trpc.communication.stats.useQuery(
     { range: "today" },
     { staleTime: 30_000 },
@@ -68,7 +67,7 @@ export default function CommsLogPage() {
   }));
 
   return (
-    <PageShell>
+    <PageShell full>
       <PageHeader
         eyebrow="Operations"
         title="Communications"
@@ -77,9 +76,9 @@ export default function CommsLogPage() {
 
       <CommsTabs />
 
-      <CommunicationsStats data={stats} loading={statsLoading} />
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+        <CommunicationsStats data={stats} loading={statsLoading} />
 
-      <PageSection flush>
         <div className="flex flex-wrap items-end gap-2">
           <div className="relative min-w-64 flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
@@ -143,9 +142,8 @@ export default function CommsLogPage() {
           )}
         </div>
 
-        <CommsLogTable data={rows} />
-        {isLoading && <LoadingBlock padded="sm" />}
-      </PageSection>
+        <CommsLogTable data={isLoading ? undefined : rows} isLoading={isLoading} />
+      </div>
     </PageShell>
   );
 }

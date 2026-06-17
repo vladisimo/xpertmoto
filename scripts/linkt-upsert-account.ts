@@ -1,6 +1,6 @@
 /**
  * Provision the Linkt (Transurban) account from environment variables and,
- * optionally, run an initial sync + retire the legacy e-toll account.
+ * optionally, run an initial re-match sync.
  *
  * Credentials are read from env — NEVER hardcode or commit them:
  *   LINKT_USER     Linkt login email/username   (e.g. book@scootering.com.au)
@@ -11,7 +11,6 @@
  * Usage:
  *   tsx scripts/linkt-upsert-account.ts                     # upsert account only
  *   tsx scripts/linkt-upsert-account.ts --sync             # … then run a re-match pass
- *   tsx scripts/linkt-upsert-account.ts --deactivate-etoll # … and deactivate e-toll accounts
  *
  * The password is stored AES-256-GCM encrypted (SECRET_ENC_KEY). New trips are
  * ingested by uploading the Linkt CSV/Excel export in the staff UI (Linkt has no
@@ -31,7 +30,6 @@ const REGIONS: LinktRegion[] = ["NSW", "VIC", "QLD"];
 async function main() {
   const prisma = new PrismaClient();
   const doSync = process.argv.includes("--sync");
-  const deactivateEtoll = process.argv.includes("--deactivate-etoll");
 
   const user = process.env.LINKT_USER;
   const pass = process.env.LINKT_PASS;
@@ -92,20 +90,6 @@ async function main() {
     } catch (e) {
       console.error(`  FAILED: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }
-
-  if (deactivateEtoll) {
-    const { count } = await prisma.etollAccount.updateMany({
-      where: { isActive: true },
-      data: { isActive: false },
-    });
-    console.log(`\ndeactivated ${count} e-toll account(s) — Linkt now owns toll sync.`);
-    console.log("(e-toll data + UI remain read-only for historical infringements)");
-  } else {
-    console.log(
-      "\nReminder: once the Linkt sync is verified, retire the legacy e-toll account " +
-        "(re-run with --deactivate-etoll, or set isActive=false in the admin UI).",
-    );
   }
 
   await prisma.$disconnect();

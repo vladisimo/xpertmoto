@@ -27,7 +27,7 @@ import {
   type OnboardingIdentityValues,
 } from "@/lib/validators/onboarding";
 import type { OnboardingIdentityForm, OnboardingIdentityPath } from "@/stores/onboarding-flow";
-import { IdentityDocUploader } from "./identity-doc-uploader";
+import { IdentityDocUploader, type OnboardingExtractedPatch } from "./identity-doc-uploader";
 
 export interface StepIdentityProps {
   identityPath: Exclude<OnboardingIdentityPath, null>;
@@ -64,6 +64,30 @@ export function StepIdentity({ identityPath, initialValues, bindSubmit }: StepId
 
   const isInternational = identityPath === "INTERNATIONAL";
 
+  // Pre-fill typed fields from OCR. Set-if-empty so we never clobber what the
+  // customer already typed; the issuing state only applies to AU licences and
+  // is validated against AU_STATES.
+  const applyPrefill = React.useCallback(
+    (patch: OnboardingExtractedPatch) => {
+      const setIfEmpty = (name: keyof OnboardingIdentityValues, value: string | undefined) => {
+        if (!value) return;
+        const current = form.getValues(name);
+        if (typeof current === "string" && current.trim() !== "") return;
+        form.setValue(name, value as never, { shouldDirty: true, shouldValidate: true });
+      };
+      setIfEmpty("licenceNumber", patch.licenceNumber);
+      if (!isInternational && patch.licenceState) {
+        const upper = patch.licenceState.toUpperCase();
+        if ((AU_STATES as readonly string[]).includes(upper)) setIfEmpty("licenceState", upper);
+      }
+      setIfEmpty("licenceExpiry", patch.licenceExpiry);
+      setIfEmpty("licenceClass", patch.licenceClass);
+      setIfEmpty("passportNumber", patch.passportNumber);
+      setIfEmpty("passportExpiry", patch.passportExpiry);
+    },
+    [form, isInternational],
+  );
+
   return (
     <Form {...form}>
       <form className="space-y-8">
@@ -92,6 +116,8 @@ export function StepIdentity({ identityPath, initialValues, bindSubmit }: StepId
                     description="Make sure all four corners are visible and the text is in focus."
                     imageKey={field.value || null}
                     onChange={(key) => field.onChange(key ?? "")}
+                    kind="LICENCE_FRONT"
+                    onExtracted={applyPrefill}
                     required
                   />
                 </FormControl>
@@ -228,6 +254,8 @@ export function StepIdentity({ identityPath, initialValues, bindSubmit }: StepId
                       description="The page with your photo and details."
                       imageKey={field.value || null}
                       onChange={(key) => field.onChange(key ?? "")}
+                      kind="PASSPORT"
+                      onExtracted={applyPrefill}
                       required
                     />
                   </FormControl>

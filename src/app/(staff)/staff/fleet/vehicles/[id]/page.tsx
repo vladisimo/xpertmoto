@@ -14,6 +14,8 @@ import {
   BookOpen,
   History,
   Edit3,
+  Route,
+  Navigation,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
@@ -30,9 +32,11 @@ import { PageShell } from "@/components/layout/page-section";
 import { VehiclePhotos } from "@/components/fleet/vehicle-photos";
 import { VehicleTabOverview } from "@/components/fleet/vehicle-tab-overview";
 import { VehicleTabBookings } from "@/components/fleet/vehicle-tab-bookings";
+import { VehicleTabTracking } from "@/components/fleet/vehicle-tab-tracking";
 import { VehicleTabMaintenance } from "@/components/fleet/vehicle-tab-maintenance";
 import { VehicleTabInspections } from "@/components/fleet/vehicle-tab-inspections";
 import { VehicleTabIncidents } from "@/components/fleet/vehicle-tab-incidents";
+import { VehicleTabTolls } from "@/components/fleet/vehicle-tab-tolls";
 import { VehicleTabDocuments } from "@/components/fleet/vehicle-tab-documents";
 import { VehicleTabSpecsManuals } from "@/components/fleet/vehicle-tab-specs-manuals";
 import { VehicleTabStatusLog } from "@/components/fleet/vehicle-tab-status-log";
@@ -41,9 +45,11 @@ const TABS = [
   { value: "overview", label: "Overview", icon: LayoutGrid },
   { value: "photos", label: "Photos", icon: ImageIcon },
   { value: "bookings", label: "Bookings", icon: CalendarDays },
+  { value: "tracking", label: "Tracking", icon: Navigation },
   { value: "maintenance", label: "Maintenance", icon: Wrench },
   { value: "inspections", label: "Inspections", icon: ClipboardCheck },
   { value: "incidents", label: "Incidents", icon: AlertTriangle },
+  { value: "tolls", label: "Tolls", icon: Route },
   { value: "documents", label: "Documents", icon: FileText },
   { value: "specs", label: "Specifications & manuals", icon: BookOpen },
   { value: "status", label: "Status log", icon: History },
@@ -178,9 +184,13 @@ export default function VehicleDetailPage(props: { params: Promise<{ id: string 
         {activeTab === "overview" && <VehicleTabOverview data={data} />}
         {activeTab === "photos" && <VehiclePhotos vehicleId={id} />}
         {activeTab === "bookings" && <VehicleTabBookings vehicle={v} totalCount={data.totalBookings} />}
+        {activeTab === "tracking" && (
+          <VehicleTabTracking vehicleId={id} canFetchAuthoritative={data.canFetchTrack} />
+        )}
         {activeTab === "maintenance" && <VehicleTabMaintenance vehicle={v} />}
         {activeTab === "inspections" && <VehicleTabInspections vehicle={v} />}
         {activeTab === "incidents" && <VehicleTabIncidents vehicle={v} />}
+        {activeTab === "tolls" && <VehicleTabTolls vehicle={v} />}
         {activeTab === "documents" && <VehicleTabDocuments vehicle={v} />}
         {activeTab === "specs" && (
           <VehicleTabSpecsManuals vehicle={v} canRefresh={data.canManageCatalogue} />

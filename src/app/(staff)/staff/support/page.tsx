@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -72,15 +73,16 @@ export default function StaffSupportInbox() {
   );
 
   return (
-    <PageShell>
-      <PageHeader
-        eyebrow="Operations"
-        title="Support inbox"
-        description="Tickets raised by customers via the chat widget or structured forms."
-      />
+    <SectionShell section="support">
+      <PageShell>
+        <PageHeader
+          eyebrow="Operations"
+          title="Support inbox"
+          description="Tickets raised by customers via the chat widget or structured forms."
+        />
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
-        <TabsList>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as TabValue)}>
+          <TabsList className="lg:hidden">
           <TabsTrigger value="tickets" className="gap-1.5">
             <Ticket className="h-3.5 w-3.5" aria-hidden />
             Tickets
@@ -98,8 +100,9 @@ export default function StaffSupportInbox() {
         <TabsContent value="insights" className="mt-6 space-y-6 data-[state=inactive]:hidden" forceMount>
           <InsightsTab isAdmin={isAdmin} />
         </TabsContent>
-      </Tabs>
-    </PageShell>
+        </Tabs>
+      </PageShell>
+    </SectionShell>
   );
 }
 

@@ -12,6 +12,14 @@ import {
 import { slugToBikeType } from "@/lib/bike-types";
 import { slugToRiderLevel } from "@/lib/rider-levels";
 import { slugToBand } from "@/lib/engine-bands";
+import type { Metadata } from "next";
+
+// M-11: per-page title (composed via the root template) + unique description.
+export const metadata: Metadata = {
+  title: "Our fleet",
+  description:
+    "Browse the full scooter & motorbike hire fleet — from LAMS-friendly learner bikes to commuter scooters and touring machines. Filter by engine size, rider level and use case.",
+};
 
 /** Number of cards in the "high-performance picks" featured strip. */
 const FEATURED_COUNT = 3;

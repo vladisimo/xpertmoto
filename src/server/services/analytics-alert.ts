@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { sendEmail } from "@/lib/email";
+import { renderOpsNoticeEmail } from "@/lib/email-ops";
 import {
   ALERT_METRIC_LABEL,
   cooldownElapsed,
@@ -164,9 +165,12 @@ async function sendAlertEmails(
     "",
     "View the live dashboard to investigate: /staff/live",
   ].join("\n");
+  // Render the branded HTML once and reuse it for every recipient — the
+  // content is identical per alert. Keep `text` as the plain-text alternative.
+  const html = await renderOpsNoticeEmail({ subject, text: body });
   await Promise.all(
     emails.map((to) =>
-      sendEmail({ to, subject, text: body }).catch((err) =>
+      sendEmail({ to, subject, html, text: body }).catch((err) =>
         logger.error({ alertId: alert.id, to, err: String(err) }, "analytics-alert: email failed"),
       ),
     ),

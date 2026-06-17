@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { Prisma } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { scopedDepotFilter } from "./_depot-scope";
 import { calcDepreciation } from "@/server/services/depreciation";
@@ -14,11 +14,403 @@ import {
 import { reassignFutureBookings } from "@/server/services/fleet-reassign";
 import { sendNotification } from "@/server/services/notification-sender";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
+import { writeAuditAsync } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
 import { capturePaymentIntent } from "@/lib/stripe";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
+import {
+  runGps51Sync,
+  runGps51DailyTrackSync,
+  DAILY_TRACK_SYNC_SETTING_KEY,
+  queryTracks,
+  normaliseEpoch,
+  parseStatusVoltage,
+  deriveIgnition,
+  num,
+  speedKphFromRaw,
+  Gps51RateLimitError,
+  type Gps51PositionRecord,
+} from "@/server/services/gps51";
+import { getQueue } from "@/server/jobs/queue";
+import { haversineKm, reverseGeocode } from "@/lib/geo";
+import { logger } from "@/lib/logger";
+
+const trackLog = logger.child({ service: "vehicle-track" });
+
+/** Upper bound (km/h) for a plausible road-vehicle fix. GPS/tracker glitches
+ *  occasionally report absurd speeds (e.g. 70,000 km/h from a mis-parsed status
+ *  field); anything beyond this — or negative — is treated as unknown so it can't
+ *  poison the window/trip max-speed or the Fixes table. Well above any hire
+ *  scooter or LAMS motorbike. */
+const MAX_PLAUSIBLE_SPEED_KPH = 200;
+function sanitizeTrackSpeed(speedKph: number | null): number | null {
+  if (speedKph == null) return null;
+  if (speedKph < 0 || speedKph > MAX_PLAUSIBLE_SPEED_KPH) return null;
+  return speedKph;
+}
+
+/** Aggregate a trip's breadcrumb into distance / max-speed / duration. */
+type TripPoint = { lat: number; lng: number; speedKph: number | null; timestamp: Date };
+function tripSummary(points: TripPoint[]) {
+  if (points.length === 0) return null;
+  let distanceKm = 0;
+  let maxSpeedKph = 0;
+  for (let i = 1; i < points.length; i++) {
+    distanceKm += haversineKm(
+      { lat: points[i - 1]!.lat, lng: points[i - 1]!.lng },
+      { lat: points[i]!.lat, lng: points[i]!.lng },
+    );
+  }
+  for (const p of points) {
+    const s = sanitizeTrackSpeed(p.speedKph);
+    if (s != null && s > maxSpeedKph) maxSpeedKph = s;
+  }
+  const first = points[0]!.timestamp;
+  const last = points[points.length - 1]!.timestamp;
+  return {
+    pointCount: points.length,
+    distanceKm: Math.round(distanceKm * 10) / 10,
+    maxSpeedKph: Math.round(maxSpeedKph),
+    durationMinutes: Math.max(0, Math.round((last.getTime() - first.getTime()) / 60000)),
+    from: first,
+    to: last,
+  };
+}
+
+/** A breadcrumb fix enriched for the vehicle Tracking tab. Structurally a
+ *  superset of TripPoint, so `tripSummary()` accepts it directly. Fields beyond
+ *  the stored breadcrumb (odometer, voltage, moving, status text) are only
+ *  populated by the authoritative GPS51 pull. */
+type TrackPoint = TripPoint & {
+  headingDeg: number | null;
+  ignitionOn: boolean | null;
+  batteryPct: number | null;
+  odometerKm: number | null;
+  voltage: number | null;
+  moving: boolean | null;
+  statusText: string | null;
+  bookingId: string | null;
+  bookingReference: string | null;
+};
+
+/** Load the bookings overlapping a window and return a tagger that maps a fix
+ *  timestamp (ms) to the rental it belonged to. Shared by the stored and
+ *  authoritative track procedures. */
+async function loadBookingTagger(
+  prisma: PrismaClient,
+  vehicleId: string,
+  from: Date,
+  to: Date,
+) {
+  const bookingRows = await prisma.booking.findMany({
+    where: {
+      vehicleId,
+      status: { in: ["CONFIRMED", "ACTIVE", "COMPLETED"] },
+      pickupDateTime: { lte: to },
+      returnDateTime: { gte: from },
+    },
+    select: {
+      id: true,
+      bookingReference: true,
+      pickupDateTime: true,
+      returnDateTime: true,
+      actualPickupDateTime: true,
+      actualReturnDateTime: true,
+    },
+    orderBy: { pickupDateTime: "asc" },
+  });
+  const windows = bookingRows.map((b) => ({
+    id: b.id,
+    bookingReference: b.bookingReference,
+    from: (b.actualPickupDateTime ?? b.pickupDateTime).getTime(),
+    to: (b.actualReturnDateTime ?? b.returnDateTime).getTime(),
+  }));
+  const tag = (t: number) => windows.find((w) => t >= w.from && t <= w.to) ?? null;
+  return {
+    bookings: bookingRows.map((b) => ({ id: b.id, bookingReference: b.bookingReference })),
+    tag,
+  };
+}
+
+/** Derive the rich telemetry (supply voltage, moving flag, status text) that
+ *  isn't a dedicated column from a stored fix's raw GPS51 payload. */
+function richFromRaw(raw: Prisma.JsonValue | null | undefined): {
+  voltage: number | null;
+  moving: boolean | null;
+  statusText: string | null;
+} {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { voltage: null, moving: null, statusText: null };
+  }
+  const r = raw as unknown as Gps51PositionRecord;
+  return {
+    voltage: parseStatusVoltage(r),
+    moving: r.moving === 1 ? true : r.moving === 0 ? false : null,
+    statusText: r.strstatusen ?? r.strstatus ?? null,
+  };
+}
+
+/** onlyMoving / minSpeedKph thin only the Fixes table — never the trip/park
+ *  segmentation or window summary, which need the stationary fixes to find the
+ *  parks. Speed is km/h (see speedKphFromRaw), so minSpeedKph compares directly. */
+function passesDisplayFilter(
+  p: TrackPoint,
+  input: { onlyMoving?: boolean; minSpeedKph?: number },
+): boolean {
+  if (input.onlyMoving && !(p.speedKph != null && p.speedKph > 0)) return false;
+  if (input.minSpeedKph != null && !(p.speedKph != null && p.speedKph >= input.minSpeedKph)) return false;
+  return true;
+}
+
+/** Bundle tagged points into the Tracking-tab response shape. Trips, parking
+ *  events and the summary are derived from the FULL breadcrumb (movement-aware
+ *  segmentation needs the stationary fixes); the onlyMoving / minSpeedKph filters
+ *  thin only the displayed `points` (the Fixes table + fixes-coloured map). */
+function assembleTrack(
+  points: TrackPoint[],
+  bookings: { id: string; bookingReference: string }[],
+  input: { onlyMoving?: boolean; minSpeedKph?: number } = {},
+) {
+  // Drop implausible glitch speeds to "unknown" before anything reads speed —
+  // keeps the Fixes table, window summary and per-trip max-speed all sane.
+  const cleaned = points.map((p) => {
+    const s = sanitizeTrackSpeed(p.speedKph);
+    return s === p.speedKph ? p : { ...p, speedKph: s };
+  });
+  const { trips, parkings } = segmentTrack(cleaned);
+  const display = cleaned.filter((p) => passesDisplayFilter(p, input));
+  return { points: display, summary: tripSummary(cleaned), trips, parkings, bookings };
+}
+
+/** Reporting gap (minutes) over which the vehicle is assumed parked — a tracker
+ *  that stops reporting has almost always been switched off/parked. Always emits
+ *  a parking, even between two moving runs. */
+const IDLE_GAP_MIN = 10;
+
+/** Speed (km/h) at or below which a fix is treated as stationary. Filters GPS
+ *  jitter so a parked vehicle reporting 0–3 km/h noise isn't counted as moving. */
+const SPEED_MOVING_KPH = 3;
+
+/** Minimum stationary dwell (minutes) that counts as a parking event. Shorter
+ *  stops (traffic lights, give-ways) fold into the surrounding trip so one drive
+ *  isn't shattered into dozens of micro-trips. */
+const MIN_PARK_MINUTES = 2;
+
+/** Max fixes returned by `vehicleTrack` (the UI warns when truncated). */
+const VEHICLE_TRACK_CAP = 5000;
+
+/** Input for the vehicle Tracking tab. Exported so the client can reuse the
+ *  inferred type via `inferProcedureInput`. */
+export const VehicleTrackInput = z
+  .object({
+    vehicleId: z.string(),
+    from: z.coerce.date(),
+    to: z.coerce.date(),
+    onlyMoving: z.boolean().optional(),
+    minSpeedKph: z.number().min(0).optional(),
+  })
+  .refine((v) => v.to > v.from, { message: "`to` must be after `from`" })
+  .refine((v) => v.to.getTime() - v.from.getTime() <= 31 * 24 * 3600 * 1000, {
+    message: "Date range must be 31 days or less",
+  });
+
+/** A discrete trip — a contiguous run of movement. */
+export type Trip = {
+  index: number;
+  points: TrackPoint[];
+  summary: ReturnType<typeof tripSummary>;
+};
+
+/** A discrete parking event — a stationary dwell between trips. */
+export type ParkingEvent = {
+  index: number;
+  from: Date;
+  to: Date;
+  durationMinutes: number;
+  lat: number;
+  lng: number;
+  pointCount: number;
+};
+
+const gapMinutes = (a: TrackPoint, b: TrackPoint) =>
+  (b.timestamp.getTime() - a.timestamp.getTime()) / 60000;
+
+/** Classify a fix as moving / stationary / unknown. Speed is the PRIMARY signal
+ *  because it's the only one reliable across trackers: many units report ACC
+ *  permanently "off" (e.g. voltage-only trackers not wired to ignition) even
+ *  while driving, so ignition is a last-resort fallback, never primary. */
+function fixState(p: TrackPoint): "move" | "stop" | "unknown" {
+  if (p.speedKph != null) return p.speedKph > SPEED_MOVING_KPH ? "move" : "stop";
+  if (p.moving === true) return "move";
+  if (p.moving === false) return "stop";
+  if (p.ignitionOn === true) return "move";
+  if (p.ignitionOn === false) return "stop";
+  return "unknown";
+}
+
+/** Legacy gap-only segmentation: split wherever the gap to the next fix exceeds
+ *  IDLE_GAP_MIN. Used only when no fix in the window carries any movement signal
+ *  (speed / moving / ignition all null) so trips never collapse to nothing. */
+function legacyGapTrips(points: TrackPoint[]): Trip[] {
+  const trips: Trip[] = [];
+  let current: TrackPoint[] = [];
+  const flush = () => {
+    if (current.length === 0) return;
+    trips.push({ index: trips.length, points: current, summary: tripSummary(current) });
+    current = [];
+  };
+  for (let i = 0; i < points.length; i++) {
+    current.push(points[i]!);
+    const next = points[i + 1];
+    if (next && gapMinutes(points[i]!, next) > IDLE_GAP_MIN) flush();
+  }
+  flush();
+  return trips;
+}
+
+/**
+ * Split an ascending breadcrumb into discrete **trips** and **parking events**,
+ * mirroring how GPS51 segments the same points. A trip is a contiguous run of
+ * movement; a parking is a stationary dwell of at least MIN_PARK_MINUTES, or any
+ * reporting gap over IDLE_GAP_MIN (which always implies the vehicle was parked).
+ * Brief stationary blips below MIN_PARK_MINUTES (traffic lights) fold back into
+ * the surrounding trip so a single drive isn't shattered into micro-trips.
+ */
+export function segmentTrack(points: TrackPoint[]): { trips: Trip[]; parkings: ParkingEvent[] } {
+  if (points.length === 0) return { trips: [], parkings: [] };
+
+  // No movement signal anywhere → fall back to gap-only trips, no parking.
+  const hasSignal = points.some(
+    (p) => p.speedKph != null || p.moving != null || p.ignitionOn != null,
+  );
+  if (!hasSignal) return { trips: legacyGapTrips(points), parkings: [] };
+
+  // 1. Effective state per fix; carry an `unknown` forward (lead defaults to
+  //    moving so we never invent a park before the first real reading).
+  const eff: ("move" | "stop")[] = [];
+  let prevState: "move" | "stop" = "move";
+  for (const p of points) {
+    const s = fixState(p);
+    prevState = s === "unknown" ? prevState : s;
+    eff.push(prevState);
+  }
+
+  // 2. Group into blocks of one effective state, additionally split by a
+  //    reporting gap over IDLE_GAP_MIN — emitted as its own "gap" block.
+  type Block =
+    | { kind: "move" | "stop"; pts: TrackPoint[] }
+    | { kind: "gap"; from: TrackPoint; to: TrackPoint };
+  const blocks: Block[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]!;
+    if (i > 0 && gapMinutes(points[i - 1]!, p) > IDLE_GAP_MIN) {
+      blocks.push({ kind: "gap", from: points[i - 1]!, to: p });
+    }
+    const last = blocks[blocks.length - 1];
+    if (last && last.kind === eff[i]) last.pts.push(p);
+    else blocks.push({ kind: eff[i]!, pts: [p] });
+  }
+
+  // 3. Debounce into an ordered timeline of trips and parks. A `stop` block of
+  //    at least MIN_PARK_MINUTES (or any `gap`) flushes the running trip and
+  //    becomes a park; a shorter `stop` folds into the running trip.
+  type RawPark = { pts: TrackPoint[]; from: Date; to: Date; lat: number; lng: number };
+  type Event = { type: "trip"; pts: TrackPoint[] } | { type: "park"; park: RawPark };
+  const events: Event[] = [];
+  let trip: TrackPoint[] = [];
+  const flushTrip = () => {
+    if (trip.length === 0) return;
+    events.push({ type: "trip", pts: trip });
+    trip = [];
+  };
+  for (const b of blocks) {
+    if (b.kind === "gap") {
+      flushTrip(); // parked (and likely asleep) for the whole reporting gap
+      events.push({
+        type: "park",
+        park: { pts: [], from: b.from.timestamp, to: b.to.timestamp, lat: b.from.lat, lng: b.from.lng },
+      });
+    } else if (b.kind === "move") {
+      trip.push(...b.pts);
+    } else {
+      const first = b.pts[0]!;
+      const last = b.pts[b.pts.length - 1]!;
+      const dwellMin = gapMinutes(first, last);
+      if (dwellMin >= MIN_PARK_MINUTES) {
+        flushTrip();
+        events.push({
+          type: "park",
+          park: { pts: b.pts, from: first.timestamp, to: last.timestamp, lat: first.lat, lng: first.lng },
+        });
+      } else {
+        trip.push(...b.pts); // brief stop → still part of the trip
+      }
+    }
+  }
+  flushTrip();
+
+  // 4. Merge consecutive parks (e.g. an implied gap-park then a stationary run)
+  //    into a single dwell so the timeline reads trip → park → trip.
+  const merged: Event[] = [];
+  for (const e of events) {
+    const last = merged[merged.length - 1];
+    if (e.type === "park" && last && last.type === "park") {
+      last.park.to = e.park.to;
+      last.park.pts = last.park.pts.concat(e.park.pts);
+    } else {
+      merged.push(e);
+    }
+  }
+
+  // 5. Materialise, numbering trips/parks independently. Stretch each interior
+  //    park's end to the next event's start so its duration spans the full dwell
+  //    (matches GPS51, where a park lasts until the next trip begins).
+  const startOf = (e: Event) => (e.type === "trip" ? e.pts[0]!.timestamp : e.park.from);
+  const trips: Trip[] = [];
+  const parkings: ParkingEvent[] = [];
+  for (let i = 0; i < merged.length; i++) {
+    const e = merged[i]!;
+    if (e.type === "trip") {
+      trips.push({ index: trips.length, points: e.pts, summary: tripSummary(e.pts) });
+    } else {
+      const next = merged[i + 1];
+      const to = next ? startOf(next) : e.park.to;
+      parkings.push({
+        index: parkings.length,
+        from: e.park.from,
+        to,
+        durationMinutes: Math.max(0, Math.round((to.getTime() - e.park.from.getTime()) / 60000)),
+        lat: e.park.lat,
+        lng: e.park.lng,
+        pointCount: e.park.pts.length,
+      });
+    }
+  }
+  return { trips, parkings };
+}
+
+/** Format a Date as "yyyy-MM-dd HH:mm:ss" in Brisbane local time (UTC+10) for
+ *  the GPS51 querytracks window (timezone arg = 10). */
+function formatBrisbane(d: Date): string {
+  const b = new Date(d.getTime() + 10 * 3600 * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${b.getUTCFullYear()}-${p(b.getUTCMonth() + 1)}-${p(b.getUTCDate())} ${p(b.getUTCHours())}:${p(b.getUTCMinutes())}:${p(b.getUTCSeconds())}`;
+}
+
+/**
+ * Pull the toll point / travel location out of an Infringement's `notes`.
+ * Linkt-sourced tolls store it as `Toll: <tollpoint>. Source: <raw>`; we
+ * surface just the toll point. Returns null when the note doesn't carry one
+ * (e.g. a placeholder "—") so the UI can fall back gracefully.
+ */
+export function tollPointFromNotes(notes: string | null): string | null {
+  if (!notes) return null;
+  const match = notes.match(/Toll:\s*(.*?)\s*\.\s*Source:/i);
+  const point = (match?.[1] ?? "").trim();
+  return point && point !== "—" ? point : null;
+}
 
 // Statuses that a human (import or UI) is allowed to set directly.
 // Operational statuses (RENTED / RESERVED / IN_TRANSIT) are driven by
@@ -687,6 +1079,7 @@ export const fleetRouter = createTRPCRouter({
 
     const canManageCatalogue =
       ctx.user.role === "ADMIN" || ctx.user.role === "SUPER_ADMIN";
+    const canFetchTrack = ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role);
 
     return {
       vehicle,
@@ -696,6 +1089,7 @@ export const fleetRouter = createTRPCRouter({
       totalMaintenanceCost: Number(maintenanceAgg._sum.actualCost ?? 0),
       changeLog,
       canManageCatalogue,
+      canFetchTrack,
     };
   }),
 
@@ -808,6 +1202,96 @@ export const fleetRouter = createTRPCRouter({
       });
 
       return { created: result.length, vehicleIds: result };
+    }),
+
+  // Tolls identified for a vehicle. Tolls are stored as `Infringement` rows
+  // with `type = TOLL` (no separate toll-charge model). Joins each toll to its
+  // `INFRINGEMENT_RECOVERY` Payment so the badge reflects whether the renter
+  // actually paid, and resolves the attributed customer (direct or via the
+  // matched booking). Mirrors `staffCustomer.tolls` but scoped to one vehicle.
+  vehicleTolls: staffProcedure
+    .input(z.object({ vehicleId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const tolls = await ctx.prisma.infringement.findMany({
+        where: { type: "TOLL", deletedAt: null, vehicleId: input.vehicleId },
+        include: {
+          booking: {
+            select: { id: true, bookingReference: true, customerId: true },
+          },
+        },
+        orderBy: { offenceDate: "desc" },
+      });
+      if (tolls.length === 0) return [];
+
+      // Resolve customer names for both directly-attributed tolls and
+      // booking-matched ones in a single batch.
+      const customerIds = [
+        ...new Set(
+          tolls
+            .map((t) => t.customerId ?? t.booking?.customerId ?? null)
+            .filter((id): id is string => id != null),
+        ),
+      ];
+      const customers = customerIds.length
+        ? await ctx.prisma.user.findMany({
+            where: { id: { in: customerIds } },
+            select: { id: true, firstName: true, lastName: true },
+          })
+        : [];
+      const customerById = new Map(customers.map((c) => [c.id, c]));
+
+      const refs = tolls.map((t) => `INFR-${t.referenceNumber}`);
+      const payments = await ctx.prisma.payment.findMany({
+        where: { reference: { in: refs }, type: "INFRINGEMENT_RECOVERY" },
+        select: {
+          id: true,
+          reference: true,
+          status: true,
+          amount: true,
+          createdAt: true,
+          processedAt: true,
+        },
+      });
+      const paymentByRef = new Map(payments.map((p) => [p.reference, p]));
+
+      return tolls.map((t) => {
+        const payment = paymentByRef.get(`INFR-${t.referenceNumber}`) ?? null;
+        const customer = customerById.get(
+          t.customerId ?? t.booking?.customerId ?? "",
+        );
+        return {
+          id: t.id,
+          referenceNumber: t.referenceNumber,
+          // Human-readable travel location. Linkt tolls embed the toll
+          // point in `notes` as "Toll: <tollpoint>. Source: ...";
+          // structured `offenceLocation` wins when present (manual entry).
+          location: t.offenceLocation ?? tollPointFromNotes(t.notes),
+          issuer: t.issuer,
+          offenceDate: t.offenceDate,
+          amount: Number(t.amount),
+          adminFee: Number(t.adminFee),
+          status: t.status,
+          notes: t.notes,
+          booking: t.booking
+            ? { id: t.booking.id, bookingReference: t.booking.bookingReference }
+            : null,
+          customer: customer
+            ? {
+                id: customer.id,
+                name: `${customer.firstName} ${customer.lastName}`.trim(),
+              }
+            : null,
+          payment: payment
+            ? {
+                id: payment.id,
+                status: payment.status,
+                amount: Number(payment.amount),
+                createdAt: payment.createdAt,
+                processedAt: payment.processedAt,
+              }
+            : null,
+        };
+      });
     }),
 
   addVehicleImage: staffProcedure
@@ -950,6 +1434,9 @@ export const fleetRouter = createTRPCRouter({
         colour: z.string().min(1).optional(),
         fuelType: z.string().nullable().optional(),
         currentOdometerKm: z.number().int().min(0).optional(),
+        // GPS tracking — the GPS51 device serial bound to this vehicle. Empty
+        // string clears it; a non-empty value must be unique across the fleet.
+        gpsTrackerId: z.string().trim().nullable().optional(),
         // Compliance
         regoExpiry: z.coerce.date().nullable().optional(),
         ctpExpiry: z.coerce.date().nullable().optional(),
@@ -991,6 +1478,23 @@ export const fleetRouter = createTRPCRouter({
       if (patch.depotId && patch.depotId !== existing.depotId) {
         const d = await ctx.prisma.depot.findUnique({ where: { id: patch.depotId } });
         if (!d) throw new TRPCError({ code: "BAD_REQUEST", message: "Depot not found" });
+      }
+      // Normalise an empty tracker ID to null, and guard fleet-wide uniqueness.
+      if (patch.gpsTrackerId !== undefined) {
+        const tracker = patch.gpsTrackerId?.trim() || null;
+        patch.gpsTrackerId = tracker;
+        if (tracker && tracker !== existing.gpsTrackerId) {
+          const dup = await ctx.prisma.vehicle.findFirst({
+            where: { gpsTrackerId: tracker, id: { not: id } },
+            select: { id: true },
+          });
+          if (dup) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: "GPS tracker ID already assigned to another vehicle",
+            });
+          }
+        }
       }
 
       const previousData: Record<string, unknown> = {};
@@ -1043,6 +1547,456 @@ export const fleetRouter = createTRPCRouter({
         return updated;
       });
     }),
+
+  // ---------------------------------------------------------------------------
+  // GPS51 live tracking
+  // ---------------------------------------------------------------------------
+
+  /** Latest known position per tracked vehicle — powers the live fleet map.
+   *  Reads VehicleLivePosition only (never the telemetry hypertable). */
+  liveLocations: staffProcedure.query(async ({ ctx }) => {
+    const rows = await ctx.prisma.vehicleLivePosition.findMany({
+      where: { vehicleId: { not: null } },
+      include: {
+        vehicle: {
+          select: {
+            id: true,
+            internalCode: true,
+            rego: true,
+            make: true,
+            model: true,
+            // Primary photo (or first by display order) for the live-map card thumbnail.
+            images: {
+              orderBy: [{ isPrimary: "desc" }, { displayOrder: "asc" }],
+              take: 1,
+              select: { url: true },
+            },
+          },
+        },
+      },
+      orderBy: { timestamp: "desc" },
+    });
+    return rows.map((r) => ({
+      deviceId: r.deviceId,
+      vehicleId: r.vehicleId,
+      vehicle: r.vehicle,
+      latitude: r.latitude,
+      longitude: r.longitude,
+      speedKph: r.speedKph,
+      headingDeg: r.headingDeg,
+      ignitionOn: r.ignitionOn,
+      batteryPct: r.batteryPct,
+      // Hardwired bike trackers report supply voltage in the status text, not a
+      // battery %, so surface that for fleet health (e.g. 12.5 V).
+      voltageV: parseStatusVoltage((r.raw ?? {}) as Gps51PositionRecord),
+      moving: r.moving,
+      timestamp: r.timestamp,
+    }));
+  }),
+
+  /** On-demand "where is this vehicle now". Returns the ≤60s-fresh live
+   *  position; `force` triggers an immediate poll first. */
+  locateNow: staffProcedure
+    .input(z.object({ vehicleId: z.string(), force: z.boolean().optional() }))
+    .mutation(async ({ ctx, input }) => {
+      let warning: string | undefined;
+      let refreshed = false;
+      if (input.force) {
+        try {
+          await runGps51Sync(ctx.prisma);
+          refreshed = true;
+        } catch (err) {
+          warning = err instanceof Error ? err.message : "Live refresh failed";
+        }
+      }
+      const pos = await ctx.prisma.vehicleLivePosition.findUnique({
+        where: { vehicleId: input.vehicleId },
+      });
+      if (!pos) return { position: null, ageSeconds: null, refreshed, warning };
+      return {
+        position: {
+          latitude: pos.latitude,
+          longitude: pos.longitude,
+          speedKph: pos.speedKph,
+          headingDeg: pos.headingDeg,
+          ignitionOn: pos.ignitionOn,
+          batteryPct: pos.batteryPct,
+          voltageV: parseStatusVoltage((pos.raw ?? {}) as Gps51PositionRecord),
+          moving: pos.moving,
+          timestamp: pos.timestamp,
+        },
+        ageSeconds: Math.max(0, Math.round((Date.now() - pos.timestamp.getTime()) / 1000)),
+        refreshed,
+        warning,
+      };
+    }),
+
+  /** Reverse-geocode a live coordinate to a human-readable street address via
+   *  OpenStreetMap Nominatim. Server-side only (usage policy). Returns null when
+   *  the lookup fails — the caller falls back to raw coordinates. */
+  reverseGeocode: staffProcedure
+    .input(z.object({ lat: z.number(), lng: z.number() }))
+    .query(async ({ input }) => {
+      const address = await reverseGeocode(input.lat, input.lng);
+      return { address };
+    }),
+
+  /** Per-rental trip rendered from our own stored breadcrumb (no rate limit). */
+  bookingTrip: staffProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const booking = await ctx.prisma.booking.findUnique({
+        where: { id: input.bookingId },
+        select: {
+          vehicleId: true,
+          pickupDateTime: true,
+          returnDateTime: true,
+          actualPickupDateTime: true,
+          actualReturnDateTime: true,
+        },
+      });
+      if (!booking) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!booking.vehicleId) return { vehicleId: null, points: [] as TripPoint[], summary: null };
+      const from = booking.actualPickupDateTime ?? booking.pickupDateTime;
+      const to = booking.actualReturnDateTime ?? booking.returnDateTime;
+      const rows = await ctx.prisma.vehicleTelemetry.findMany({
+        where: { vehicleId: booking.vehicleId, timestamp: { gte: from, lte: to } },
+        orderBy: { timestamp: "asc" },
+        select: { timestamp: true, latitude: true, longitude: true, speedKph: true },
+      });
+      const points: TripPoint[] = rows.map((r) => ({
+        lat: r.latitude,
+        lng: r.longitude,
+        speedKph: r.speedKph,
+        timestamp: r.timestamp,
+      }));
+      return { vehicleId: booking.vehicleId, points, summary: tripSummary(points) };
+    }),
+
+  /** Historical breadcrumb for a single vehicle over an arbitrary window, with
+   *  server-side moving/speed filtering, trip segmentation, and per-fix booking
+   *  association. Reads our OWN stored telemetry (no rate limit); the
+   *  full-fidelity parent-server track comes from `vehicleTrackAuthoritative`. */
+  vehicleTrack: staffProcedure
+    .input(VehicleTrackInput)
+    .query(async ({ ctx, input }) => {
+      // Fetch the FULL window (no speed filter): trip/parking segmentation needs
+      // the stationary fixes to find the parks. onlyMoving / minSpeedKph thin
+      // only the displayed Fixes table — applied in assembleTrack.
+      const rows = await ctx.prisma.vehicleTelemetry.findMany({
+        where: {
+          vehicleId: input.vehicleId,
+          timestamp: { gte: input.from, lte: input.to },
+        },
+        orderBy: { timestamp: "asc" },
+        take: VEHICLE_TRACK_CAP + 1,
+        select: {
+          timestamp: true,
+          latitude: true,
+          longitude: true,
+          speedKph: true,
+          headingDeg: true,
+          ignitionOn: true,
+          batteryPct: true,
+          odometerKm: true,
+          source: true,
+          raw: true,
+        },
+      });
+
+      const truncated = rows.length > VEHICLE_TRACK_CAP;
+      const kept = truncated ? rows.slice(0, VEHICLE_TRACK_CAP) : rows;
+
+      const { bookings, tag } = await loadBookingTagger(
+        ctx.prisma,
+        input.vehicleId,
+        input.from,
+        input.to,
+      );
+
+      const points: TrackPoint[] = kept.map((r) => {
+        const b = tag(r.timestamp.getTime());
+        const rich = richFromRaw(r.raw);
+        return {
+          lat: r.latitude,
+          lng: r.longitude,
+          speedKph: r.speedKph,
+          timestamp: r.timestamp,
+          headingDeg: r.headingDeg,
+          ignitionOn: r.ignitionOn,
+          batteryPct: r.batteryPct,
+          odometerKm: r.odometerKm,
+          voltage: rich.voltage,
+          moving: rich.moving,
+          statusText: rich.statusText,
+          bookingId: b?.id ?? null,
+          bookingReference: b?.bookingReference ?? null,
+        };
+      });
+
+      // If any fix in the window came from an on-demand track pull, this window
+      // is backed by the full-fidelity parent-server data — surface that.
+      const source = kept.some((r) => r.source === "gps51-track") ? ("gps51" as const) : ("stored" as const);
+
+      return { source, reason: null, ...assembleTrack(points, bookings, input), truncated };
+    }),
+
+  /** Full-fidelity travel path + telemetry pulled straight from the GPS51 parent
+   *  server for an arbitrary vehicle window (ON-DEMAND only, ≤5/device/day).
+   *  Unlike the stored breadcrumb this includes every fix the tracker reported,
+   *  plus odometer, supply voltage, moving flag and raw status text. Falls back
+   *  to stored telemetry when the vehicle has no tracker or the daily quota is
+   *  spent. */
+  vehicleTrackAuthoritative: managerProcedure
+    .input(VehicleTrackInput)
+    .mutation(async ({ ctx, input }) => {
+      const vehicle = await ctx.prisma.vehicle.findUnique({
+        where: { id: input.vehicleId },
+        select: { gpsTrackerId: true },
+      });
+      const deviceId = vehicle?.gpsTrackerId ?? null;
+      const { bookings, tag } = await loadBookingTagger(
+        ctx.prisma,
+        input.vehicleId,
+        input.from,
+        input.to,
+      );
+
+      const storedFallback = async (reason: string) => {
+        const rows = await ctx.prisma.vehicleTelemetry.findMany({
+          where: {
+            vehicleId: input.vehicleId,
+            timestamp: { gte: input.from, lte: input.to },
+          },
+          orderBy: { timestamp: "asc" },
+          take: VEHICLE_TRACK_CAP + 1,
+          select: {
+            timestamp: true,
+            latitude: true,
+            longitude: true,
+            speedKph: true,
+            headingDeg: true,
+            ignitionOn: true,
+            batteryPct: true,
+            odometerKm: true,
+          },
+        });
+        const truncated = rows.length > VEHICLE_TRACK_CAP;
+        const kept = truncated ? rows.slice(0, VEHICLE_TRACK_CAP) : rows;
+        const points: TrackPoint[] = kept.map((r) => {
+          const b = tag(r.timestamp.getTime());
+          return {
+            lat: r.latitude,
+            lng: r.longitude,
+            speedKph: r.speedKph,
+            timestamp: r.timestamp,
+            headingDeg: r.headingDeg,
+            ignitionOn: r.ignitionOn,
+            batteryPct: r.batteryPct,
+            odometerKm: r.odometerKm,
+            voltage: null,
+            moving: null,
+            statusText: null,
+            bookingId: b?.id ?? null,
+            bookingReference: b?.bookingReference ?? null,
+          };
+        });
+        return { source: "stored" as const, reason, ...assembleTrack(points, bookings, input), truncated };
+      };
+
+      if (!deviceId) return storedFallback("no tracker assigned");
+      try {
+        const records = await queryTracks({
+          deviceId,
+          begin: formatBrisbane(input.from),
+          end: formatBrisbane(input.to),
+        });
+        const valid = records.filter(
+          (r: Gps51PositionRecord) => num(r.callat) != null && num(r.callon) != null,
+        );
+
+        // Cache the full pulled track into our own telemetry so it survives a
+        // refresh and saves future quota. We persist EVERY valid fix (not just
+        // the speed-filtered display set) and dedupe on the (deviceId,timestamp)
+        // PK. source "gps51-track" marks an on-demand pull vs the poll's samples.
+        const persistRows = valid.map((r: Gps51PositionRecord) => ({
+          deviceId,
+          vehicleId: input.vehicleId,
+          timestamp: normaliseEpoch(r.updatetime ?? r.devicetime) ?? input.from,
+          latitude: r.callat as number,
+          longitude: r.callon as number,
+          speedKph: speedKphFromRaw(r.speed),
+          headingDeg: num(r.course),
+          odometerKm: r.totaldistance != null ? Number(r.totaldistance) / 1000 : null,
+          batteryPct: num(r.voltagepercent),
+          ignitionOn: deriveIgnition(r),
+          source: "gps51-track",
+          raw: r as unknown as Prisma.InputJsonValue,
+        }));
+        if (persistRows.length > 0) {
+          try {
+            const { count } = await ctx.prisma.vehicleTelemetry.createMany({
+              data: persistRows,
+              skipDuplicates: true,
+            });
+            trackLog.info(
+              { vehicleId: input.vehicleId, pulled: valid.length, persisted: count },
+              "vehicle-track: cached on-demand GPS51 pull",
+            );
+          } catch (err) {
+            // Caching is best-effort — never fail the response over it.
+            trackLog.warn(
+              { vehicleId: input.vehicleId, err: err instanceof Error ? err.message : String(err) },
+              "vehicle-track: failed to cache GPS51 pull",
+            );
+          }
+        }
+
+        // Map the FULL valid set (no speed filter): segmentation needs the
+        // stationary fixes; assembleTrack thins the displayed Fixes table.
+        const points: TrackPoint[] = valid
+          .map((r: Gps51PositionRecord) => {
+            const timestamp = normaliseEpoch(r.updatetime ?? r.devicetime) ?? input.from;
+            const b = tag(timestamp.getTime());
+            return {
+              lat: r.callat as number,
+              lng: r.callon as number,
+              speedKph: speedKphFromRaw(r.speed),
+              timestamp,
+              headingDeg: num(r.course),
+              ignitionOn: deriveIgnition(r),
+              batteryPct: num(r.voltagepercent),
+              odometerKm: r.totaldistance != null ? Number(r.totaldistance) / 1000 : null,
+              voltage: parseStatusVoltage(r),
+              moving: r.moving === 1 ? true : r.moving === 0 ? false : null,
+              statusText: r.strstatusen ?? r.strstatus ?? null,
+              bookingId: b?.id ?? null,
+              bookingReference: b?.bookingReference ?? null,
+            };
+          })
+          // GPS51 ordering isn't guaranteed; sort so trips/summary are correct.
+          .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+        return { source: "gps51" as const, reason: null, ...assembleTrack(points, bookings, input), truncated: false };
+      } catch (err) {
+        if (err instanceof Gps51RateLimitError) return storedFallback("daily track quota reached");
+        throw err;
+      }
+    }),
+
+  /** Optional full-fidelity GPS51 track for a booking window (ON-DEMAND only,
+   *  ≤5/device/day). Falls back to the stored breadcrumb when rate-limited or
+   *  the vehicle has no tracker. */
+  bookingTripAuthoritative: managerProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const booking = await ctx.prisma.booking.findUnique({
+        where: { id: input.bookingId },
+        select: {
+          vehicleId: true,
+          pickupDateTime: true,
+          returnDateTime: true,
+          actualPickupDateTime: true,
+          actualReturnDateTime: true,
+          vehicle: { select: { gpsTrackerId: true } },
+        },
+      });
+      if (!booking) throw new TRPCError({ code: "NOT_FOUND" });
+      const from = booking.actualPickupDateTime ?? booking.pickupDateTime;
+      const to = booking.actualReturnDateTime ?? booking.returnDateTime;
+      const deviceId = booking.vehicle?.gpsTrackerId ?? null;
+
+      const storedFallback = async (reason: string) => {
+        const rows = await ctx.prisma.vehicleTelemetry.findMany({
+          where: { vehicleId: booking.vehicleId ?? "", timestamp: { gte: from, lte: to } },
+          orderBy: { timestamp: "asc" },
+          select: { timestamp: true, latitude: true, longitude: true, speedKph: true },
+        });
+        const points: TripPoint[] = rows.map((r) => ({
+          lat: r.latitude,
+          lng: r.longitude,
+          speedKph: r.speedKph,
+          timestamp: r.timestamp,
+        }));
+        return { source: "stored" as const, reason, points, summary: tripSummary(points) };
+      };
+
+      if (!deviceId) return storedFallback("no tracker assigned");
+      try {
+        const records = await queryTracks({
+          deviceId,
+          begin: formatBrisbane(from),
+          end: formatBrisbane(to),
+        });
+        const points: TripPoint[] = records
+          .filter((r: Gps51PositionRecord) => typeof r.callat === "number" && typeof r.callon === "number")
+          .map((r: Gps51PositionRecord) => ({
+            lat: r.callat as number,
+            lng: r.callon as number,
+            speedKph: typeof r.speed === "number" ? r.speed : null,
+            timestamp: normaliseEpoch(r.updatetime ?? r.devicetime) ?? from,
+          }));
+        return { source: "gps51" as const, reason: null, points, summary: tripSummary(points) };
+      } catch (err) {
+        if (err instanceof Gps51RateLimitError) return storedFallback("daily track quota reached");
+        throw err;
+      }
+    }),
+
+  /** Trigger one GPS51 poll now (manual refresh). */
+  gps51SyncNow: managerProcedure.mutation(async ({ ctx }) => {
+    return runGps51Sync(ctx.prisma);
+  }),
+
+  /**
+   * Trigger the daily full-track sync now (testing / ad-hoc backfill). Enqueues
+   * to the worker when Redis is up so the long paced pull doesn't block the
+   * request; falls back to inline when there's no queue. `hoursBack` lets ops
+   * backfill a wider window than the nightly 24h.
+   */
+  gps51DailySyncNow: managerProcedure
+    .input(z.object({ hoursBack: z.number().int().min(1).max(720).optional() }).optional())
+    .mutation(async ({ ctx, input }) => {
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.user.id,
+        category: "MUTATION",
+        action: "gps51.daily_track_sync.manual",
+        entity: "VehicleTelemetry",
+        newData: { hoursBack: input?.hoursBack ?? 24 },
+      });
+      const q = getQueue("gps51-daily-sync");
+      if (q) {
+        await q.add(
+          "manual",
+          { hoursBack: input?.hoursBack },
+          { removeOnComplete: 100, removeOnFail: 100 },
+        );
+        return { mode: "queued" as const };
+      }
+      const result = await runGps51DailyTrackSync(ctx.prisma, { hoursBack: input?.hoursBack });
+      return { mode: "inline" as const, ...result };
+    }),
+
+  /** Recent GPS51 sync runs + tracked-device count + last daily-track run for the admin tab. */
+  gps51SyncStatus: staffProcedure.query(async ({ ctx }) => {
+    const [runs, trackedDevices, dailyRun] = await Promise.all([
+      ctx.prisma.gps51Sync.findMany({ orderBy: { startedAt: "desc" }, take: 10 }),
+      ctx.prisma.vehicleLivePosition.count(),
+      ctx.prisma.systemSetting.findUnique({ where: { key: DAILY_TRACK_SYNC_SETTING_KEY } }),
+    ]);
+    return {
+      runs: runs.map((r) => ({
+        id: r.id,
+        status: r.status,
+        startedAt: r.startedAt,
+        finishedAt: r.finishedAt,
+        devicesSeen: r.devicesSeen,
+        recordsWritten: r.recordsWritten,
+        error: r.error,
+      })),
+      trackedDevices,
+      dailyTrackSync: (dailyRun?.value ?? null) as Record<string, unknown> | null,
+    };
+  }),
 
   decommission: managerProcedure
     .input(
@@ -1782,19 +2736,104 @@ export const fleetRouter = createTRPCRouter({
         vehicleId: z.string(),
         bookingId: z.string().optional(),
         customerId: z.string().optional(),
-        type: z.enum(["SPEEDING", "PARKING", "TOLL", "RED_LIGHT", "OTHER"]),
+        type: z.enum([
+          "SPEEDING",
+          "PARKING",
+          "TOLL",
+          "RED_LIGHT",
+          "MOBILE_PHONE",
+          "SEATBELT",
+          "UNREGISTERED",
+          "OTHER",
+        ]),
         issuer: z.string(),
         referenceNumber: z.string(),
         offenceDate: z.coerce.date(),
         amount: z.number(),
         dueDate: z.coerce.date().optional(),
+        // NSW nomination workflow fields.
+        issueDate: z.coerce.date().optional(),
+        offenceCode: z.string().optional(),
+        offenceDescription: z.string().optional(),
+        offenceLocation: z.string().optional(),
+        demeritPoints: z.number().int().min(0).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const inf = await ctx.prisma.infringement.create({ data: input });
+      const { findBookingForVehicleAt } = await import(
+        "@/server/services/booking-matcher"
+      );
+      const { computeNominationDeadline, defaultHandlingForType } = await import(
+        "@/lib/nsw-nomination"
+      );
+
+      // Auto-match the renter who held the vehicle at the offence time unless
+      // staff supplied an explicit booking/customer. Matches land in
+      // PENDING_REVIEW — never auto-nominated (false nomination is criminal).
+      let bookingId = input.bookingId ?? null;
+      let customerId = input.customerId ?? null;
+      if (!bookingId && !customerId) {
+        const match = await findBookingForVehicleAt(
+          ctx.prisma,
+          input.vehicleId,
+          input.offenceDate,
+        );
+        if (match) {
+          bookingId = match.id;
+          customerId = match.customerId;
+        }
+      }
+
+      const nominationDeadline = input.issueDate
+        ? computeNominationDeadline(input.issueDate)
+        : null;
+
+      const inf = await ctx.prisma.infringement.create({
+        data: {
+          vehicleId: input.vehicleId,
+          bookingId,
+          customerId,
+          type: input.type,
+          issuer: input.issuer,
+          referenceNumber: input.referenceNumber,
+          offenceDate: input.offenceDate,
+          amount: input.amount,
+          dueDate: input.dueDate,
+          issueDate: input.issueDate,
+          offenceCode: input.offenceCode,
+          offenceDescription: input.offenceDescription,
+          offenceLocation: input.offenceLocation,
+          demeritPoints: input.demeritPoints ?? 0,
+          handling: defaultHandlingForType(input.type),
+          nominationDeadline,
+          // A matched renter awaits staff confirmation before any nomination.
+          status: bookingId || customerId ? "PENDING_REVIEW" : "RECEIVED",
+        },
+      });
+      // Audit row tagged to the vehicle so the toll/infringement surfaces in
+      // the vehicle's audit history (entity='Vehicle'). The auto-audit
+      // middleware also logs the bare mutation; this companion row carries the
+      // domain detail and the vehicle association.
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.user.id,
+        category: "MUTATION",
+        action: input.type === "TOLL" ? "toll.create" : "infringement.create",
+        entity: "Vehicle",
+        entityId: input.vehicleId,
+        newData: {
+          infringementId: inf.id,
+          type: inf.type,
+          issuer: inf.issuer,
+          referenceNumber: inf.referenceNumber,
+          amount: input.amount,
+          offenceDate: input.offenceDate,
+          bookingId: bookingId ?? null,
+          customerId: customerId ?? null,
+        },
+      });
       await trackServer({
         event: SERVER_EVENTS.infringementCreated,
-        distinctId: input.customerId ?? ctx.user.id,
+        distinctId: customerId ?? ctx.user.id,
         properties: {
           infringementId: inf.id,
           referenceNumber: inf.referenceNumber,
@@ -1802,7 +2841,7 @@ export const fleetRouter = createTRPCRouter({
           issuer: input.issuer,
           amountAud: input.amount,
           vehicleId: input.vehicleId,
-          bookingId: input.bookingId ?? null,
+          bookingId: bookingId ?? null,
           actorUserId: ctx.user.id,
         },
       });

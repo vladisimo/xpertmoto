@@ -121,6 +121,8 @@ export function IdentityDropzone({
   );
   const [ocr, setOcr] = React.useState<OcrStatus>({ kind: "idle" });
   const [error, setError] = React.useState<string | null>(null);
+  // Non-error informational notice (e.g. an accepted-but-swapped ID type).
+  const [notice, setNotice] = React.useState<string | null>(null);
 
   const previewSrc = resolveIdentityImageSrc(uploadedKey ?? currentImageUrl);
   const expiryTone = expiryStatus(currentExpiry);
@@ -130,6 +132,7 @@ export function IdentityDropzone({
   const handleFile = React.useCallback(
     async (file: File) => {
       setError(null);
+      setNotice(null);
       setOcr({ kind: "idle" });
       setPhase("uploading");
       try {
@@ -142,49 +145,89 @@ export function IdentityDropzone({
         }
         const { key } = (await res.json()) as { key: string };
 
-        await upload.mutateAsync({ type: kind, imageKey: key });
-        setUploadedKey(key);
-
-        // OCR runs only for FRONT / PASSPORT. BACK has no fields to extract.
+        // The licence back has no extractor — store it as-is.
         if (kind === "LICENCE_BACK") {
+          await upload.mutateAsync({ type: kind, imageKey: key });
+          setUploadedKey(key);
           setPhase("done");
         } else {
+          // Classify + read details BEFORE storing so a genuine non-ID image
+          // is rejected without creating a CustomerDocument row. A swapped ID
+          // type is accepted (both are valid IDs) but not pre-filled — the
+          // extractor returns no cross-type fields.
           setPhase("detecting");
           setOcr({ kind: "running" });
           const patch: IdentityExtractedPatch = {};
+          let detected: "DRIVERS_LICENCE" | "PASSPORT" | "OTHER" | undefined;
+          let confidence: number | undefined;
+          let nudge: string | null = null;
           try {
             if (kind === "PASSPORT") {
               const r = await extractPassport.mutateAsync({ imageKey: key });
-              if (r.confidence >= 0.7) {
+              detected = r.documentType;
+              confidence = r.confidence;
+              if (r.documentType !== "OTHER" && r.confidence >= 0.7) {
                 if (r.passportNumber) patch.passportNumber = r.passportNumber;
                 if (r.country) patch.passportCountry = r.country;
                 if (r.expiryDate) patch.passportExpiry = isoDate(new Date(r.expiryDate));
                 if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
               }
-              setOcr(
-                r.confidence >= 0.7
-                  ? { kind: "done", confidence: r.confidence, fieldsPopulated: Object.keys(patch).length }
-                  : { kind: "empty" },
-              );
+              if (r.documentType === "DRIVERS_LICENCE") {
+                nudge =
+                  "This looks like a driver's licence — we've saved it here, but you'll still need to upload your passport.";
+              }
             } else {
               // LICENCE_FRONT
               const r = await extractLicence.mutateAsync({ imageKey: key });
-              if (r.confidence >= 0.7) {
+              detected = r.documentType;
+              confidence = r.confidence;
+              if (r.documentType !== "OTHER" && r.confidence >= 0.7) {
                 if (r.licenceNumber) patch.licenceNumber = r.licenceNumber;
                 if (r.state) patch.licenceState = r.state;
                 if (r.licenceClass) patch.licenceClass = r.licenceClass;
                 if (r.expiryDate) patch.licenceExpiry = isoDate(new Date(r.expiryDate));
                 if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
               }
-              setOcr(
-                r.confidence >= 0.7
-                  ? { kind: "done", confidence: r.confidence, fieldsPopulated: Object.keys(patch).length }
-                  : { kind: "empty" },
-              );
+              if (r.documentType === "PASSPORT") {
+                nudge =
+                  "This looks like a passport — we've saved it here, but you'll still need to upload your driver's licence.";
+              }
             }
           } catch {
+            // OCR/classification failure is non-fatal — fall through and store
+            // without pre-fill. Only a definitive OTHER blocks the upload.
+            detected = undefined;
             setOcr({ kind: "failed" });
           }
+
+          // Reject a genuine non-ID image — do not store it.
+          if (detected === "OTHER") {
+            setPhase("error");
+            setOcr({ kind: "idle" });
+            setError(
+              kind === "PASSPORT"
+                ? "This doesn't look like a passport. Please upload a clear photo of your passport's photo page."
+                : "This doesn't look like a driver's licence. Please upload a clear photo of your licence.",
+            );
+            return;
+          }
+
+          await upload.mutateAsync({ type: kind, imageKey: key });
+          setUploadedKey(key);
+          if (nudge) setNotice(nudge);
+
+          // Leave a "failed" status as-is; otherwise reflect the extraction.
+          setOcr((prev) =>
+            prev.kind === "failed"
+              ? prev
+              : Object.keys(patch).length > 0
+                ? {
+                    kind: "done",
+                    ...(confidence != null ? { confidence } : {}),
+                    fieldsPopulated: Object.keys(patch).length,
+                  }
+                : { kind: "empty" },
+          );
 
           if (Object.keys(patch).length > 0) {
             if (onExtracted) {
@@ -229,6 +272,7 @@ export function IdentityDropzone({
     setPhase("idle");
     setOcr({ kind: "idle" });
     setError(null);
+    setNotice(null);
   }
 
   return (
@@ -290,6 +334,9 @@ export function IdentityDropzone({
 
       {error && (
         <p className="text-sm text-destructive">{error}</p>
+      )}
+      {notice && !error && (
+        <p className="text-sm text-muted-foreground">{notice}</p>
       )}
     </div>
   );

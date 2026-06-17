@@ -25,6 +25,10 @@ export function PostHogIdentify() {
     retry: false,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
+    // Ambient probe in the root layout: a 401 here just means "anonymous"
+    // and must NOT trigger the global session-expired redirect (it runs on
+    // public pages too). See createQueryClient in @/lib/trpc/provider.
+    meta: { authOptional: true },
   });
   useEffect(() => {
     if (!data?.id) return;

@@ -1,6 +1,26 @@
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { buildCustomerListWhere, staffCustomerRouter } from "@/server/trpc/router/staff-customer";
+
+// detectDocument tests stub the vision extractor + storage so no provider /
+// network call is made. Factories reference these top-level fns (same pattern
+// as the computeCustomerRewards mock below).
+const extractLicenceData = vi.fn();
+const extractPassportData = vi.fn();
+const downloadFile = vi.fn();
+
+vi.mock("@/server/services/document-extract", () => ({
+  extractLicenceData: (...args: unknown[]) => extractLicenceData(...args),
+  extractPassportData: (...args: unknown[]) => extractPassportData(...args),
+}));
+
+vi.mock("@/lib/storage", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/storage")>("@/lib/storage");
+  return {
+    ...actual,
+    downloadFile: (...args: unknown[]) => downloadFile(...args),
+  };
+});
 
 // The detail card's reward counters are overlaid from a live computeCustomerRewards
 // snapshot. Mock the compute (its own derivation is unit-tested separately) so we
@@ -176,5 +196,94 @@ describe("staffCustomer.topSpenders", () => {
       totalSpend: 2457.36,
       totalBookings: 1,
     });
+  });
+});
+
+describe("staffCustomer.detectDocument — wrong-type rejection", () => {
+  type Caller = ReturnType<typeof staffCustomerRouter.createCaller>;
+
+  function buildCtx(doc: {
+    id: string;
+    customerId: string;
+    type: string;
+    fileUrl: string;
+    expiryDate: Date | null;
+  }) {
+    return {
+      prisma: {
+        customerDocument: { findUnique: vi.fn().mockResolvedValue(doc) },
+      },
+      user: { id: "staff1", role: "STAFF" as const },
+      session: { user: { id: "staff1", role: "STAFF" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["detectDocument"]>[0];
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    downloadFile.mockResolvedValue(Buffer.from([1, 2, 3]));
+  });
+
+  test("blocks when a licence-slot document reads as a passport", async () => {
+    extractLicenceData.mockResolvedValue({ documentType: "PASSPORT", confidence: 0.95 });
+    const ctx = buildCtx({
+      id: "d1",
+      customerId: "c1",
+      type: "LICENCE_FRONT",
+      fileUrl: "drivers/c1/x.jpg",
+      expiryDate: null,
+    });
+
+    await expect(
+      staffCustomerRouter.createCaller(ctx as never).detectDocument({ documentId: "d1" }),
+    ).rejects.toThrow(/passport/i);
+    expect(extractLicenceData).toHaveBeenCalledTimes(1);
+  });
+
+  test("blocks when a licence-slot document is not an ID at all (OTHER)", async () => {
+    extractLicenceData.mockResolvedValue({ documentType: "OTHER", confidence: 0 });
+    const ctx = buildCtx({
+      id: "d2",
+      customerId: "c1",
+      type: "LICENCE_FRONT",
+      fileUrl: "drivers/c1/x.jpg",
+      expiryDate: null,
+    });
+
+    await expect(
+      staffCustomerRouter.createCaller(ctx as never).detectDocument({ documentId: "d2" }),
+    ).rejects.toThrow(/identity document/i);
+  });
+
+  test("blocks when a passport-slot document reads as a licence", async () => {
+    extractPassportData.mockResolvedValue({ documentType: "DRIVERS_LICENCE", confidence: 0.9 });
+    const ctx = buildCtx({
+      id: "d3",
+      customerId: "c1",
+      type: "PASSPORT",
+      fileUrl: "drivers/c1/p.jpg",
+      expiryDate: null,
+    });
+
+    await expect(
+      staffCustomerRouter.createCaller(ctx as never).detectDocument({ documentId: "d3" }),
+    ).rejects.toThrow(/driver's licence/i);
+    expect(extractPassportData).toHaveBeenCalledTimes(1);
+  });
+
+  test("still rejects an unreadable but correctly-typed licence (existing behaviour)", async () => {
+    extractLicenceData.mockResolvedValue({ documentType: "DRIVERS_LICENCE", confidence: 0 });
+    const ctx = buildCtx({
+      id: "d4",
+      customerId: "c1",
+      type: "LICENCE_FRONT",
+      fileUrl: "drivers/c1/x.jpg",
+      expiryDate: null,
+    });
+
+    await expect(
+      staffCustomerRouter.createCaller(ctx as never).detectDocument({ documentId: "d4" }),
+    ).rejects.toThrow(/clearer image/i);
   });
 });

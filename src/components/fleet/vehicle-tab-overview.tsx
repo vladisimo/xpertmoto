@@ -10,6 +10,7 @@ import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useVehicleActions } from "./vehicle-action-sheets";
 import { VehicleEditSheet, type VehicleEditSection } from "./vehicle-edit-sheet";
+import { VehicleLocateCard } from "./vehicle-locate-card";
 import type { VehicleDetail } from "./vehicle-detail-types";
 import { expiryTone } from "./expiry";
 
@@ -65,7 +66,7 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
         </div>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 lg:grid-flow-row-dense">
         <Card>
           <EditableCardHeader title="Identity" onEdit={() => setEditing("identity")} />
           <CardContent>
@@ -79,6 +80,7 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
               <Row label="Colour" value={v.colour} />
               <Row label="Fuel type" value={v.fuelType ?? "—"} />
               <Row label="Odometer" value={`${v.currentOdometerKm.toLocaleString()} km`} />
+              <Row label="GPS tracker ID" value={v.gpsTrackerId ?? "—"} />
             </dl>
           </CardContent>
         </Card>
@@ -136,6 +138,14 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
           </CardContent>
         </Card>
 
+        {v.gpsTrackerId && (
+          <VehicleLocateCard
+            vehicleId={v.id}
+            label={v.internalCode}
+            className="md:col-span-2 lg:col-span-2 lg:row-span-2 h-full"
+          />
+        )}
+
         <Card>
           <EditableCardHeader title="Pricing" onEdit={() => setEditing("pricing")} />
           <CardContent>
@@ -173,7 +183,7 @@ export function VehicleTabOverview({ data }: { data: VehicleDetail }) {
         </Card>
 
         {v.notes && (
-          <Card className="md:col-span-2">
+          <Card className="md:col-span-2 lg:col-span-3">
             <CardHeader>
               <CardTitle className="text-base">Notes</CardTitle>
             </CardHeader>

@@ -296,3 +296,99 @@ describe("sendNotification cross-process dedup", () => {
     );
   });
 });
+
+describe("sendNotification branded-shell wrap (plain-body EMAIL)", () => {
+  beforeEach(() => {
+    settingsFindMany.mockResolvedValue([]);
+  });
+
+  it("wraps a plain body (no html) in the branded shell for EMAIL", async () => {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "LICENCE_EXPIRING",
+      channels: ["EMAIL"],
+      subject: "Your licence is expiring",
+      body: "Hi Alex, your licence expires next week.",
+    });
+
+    expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+    const sent = sendEmailSpy.mock.calls[0]![0] as { html?: string; text?: string };
+    // HTML is now the branded shell (was previously undefined → bare text).
+    expect(sent.html).toBeTruthy();
+    expect(sent.html).toContain("<!doctype html>");
+    expect(sent.html).toContain("Terms of service"); // shell footer landmark
+    expect(sent.html).toContain("Hi Alex, your licence expires next week.");
+    // Branding placeholders resolved — no literal {{...}} reaches the client.
+    expect(sent.html).not.toContain("{{");
+    // Plain-text alternative preserved verbatim.
+    expect(sent.text).toBe("Hi Alex, your licence expires next week.");
+  });
+
+  it("keeps SMS plain while EMAIL gets the shell on a multi-channel send", async () => {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "DEBT_REMINDER",
+      channels: ["EMAIL", "SMS"],
+      body: "You owe A$50.",
+    });
+
+    const emailArg = sendEmailSpy.mock.calls[0]![0] as { html?: string };
+    expect(emailArg.html).toContain("<!doctype html>");
+
+    expect(sendSmsSpy).toHaveBeenCalledTimes(1);
+    const smsArg = sendSmsSpy.mock.calls[0]![0] as { body: string };
+    expect(smsArg.body).toBe("You owe A$50."); // no HTML tags in the SMS body
+    expect(smsArg.body).not.toContain("<");
+  });
+
+  it("does NOT shell-wrap when the caller supplied authored html (no double-wrap)", async () => {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "BOOKING_CONFIRMATION",
+      channels: ["EMAIL"],
+      body: "plain fallback",
+      html: "<div>Authored {{siteName}} body</div>",
+    });
+
+    const sent = sendEmailSpy.mock.calls[0]![0] as { html?: string };
+    expect(sent.html).toContain("Authored");
+    expect(sent.html).not.toContain("<!doctype html>"); // not the shell
+  });
+
+  it("does not build email html for a non-EMAIL (SMS-only) send", async () => {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "DEBT_REMINDER",
+      channels: ["SMS"],
+      body: "ping",
+    });
+
+    expect(sendEmailSpy).not.toHaveBeenCalled();
+    expect(sendSmsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("HTML-escapes the body before wrapping (no markup injection)", async () => {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+
+    await sendNotification({
+      userId: "u1",
+      type: "INCIDENT_REPORTED",
+      channels: ["EMAIL"],
+      body: "balance < 0 & overdue",
+    });
+
+    const sent = sendEmailSpy.mock.calls[0]![0] as { html?: string; text?: string };
+    expect(sent.html).toContain("balance &lt; 0 &amp; overdue");
+    expect(sent.html).not.toContain("balance < 0 & overdue");
+    // The plain-text part keeps the raw characters.
+    expect(sent.text).toBe("balance < 0 & overdue");
+  });
+});

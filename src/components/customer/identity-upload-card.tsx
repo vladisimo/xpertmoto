@@ -170,39 +170,71 @@ export function IdentityUploadCard({
       }
       const json = (await res.json()) as { key: string };
 
-      await upload.mutateAsync({ type: kind, imageKey: json.key });
-
-      // Kick off OCR. Errors here are non-fatal — the document is already
-      // on file; we just skip auto-fill.
+      // Classify + read details BEFORE storing, so a genuine non-ID image
+      // (selfie, utility bill, blank) can be rejected without ever creating a
+      // CustomerDocument row. A passport dropped in the licence slot (or vice
+      // versa) is still accepted — both are valid IDs — but pre-fill is
+      // skipped and we nudge the customer to upload the missing document too.
       setPhase("detecting");
       let patch: IdentityExtractedPatch = {};
+      let nudge: string | null = null;
+      let detected: "DRIVERS_LICENCE" | "PASSPORT" | "OTHER" | undefined = undefined;
       try {
         if (kind === "PASSPORT") {
           const r = await extractPassport.mutateAsync({ imageKey: json.key });
-          if (r.confidence >= 0.7) {
+          detected = r.documentType;
+          if (r.documentType !== "OTHER" && r.confidence >= 0.7) {
             if (r.passportNumber) patch.passportNumber = r.passportNumber;
             if (r.country) patch.passportCountry = r.country;
             if (r.expiryDate) patch.passportExpiry = isoDate(new Date(r.expiryDate));
             if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
           }
+          if (r.documentType === "DRIVERS_LICENCE") {
+            nudge =
+              "This looks like a driver's licence — we've saved it here, but you'll still need to upload your passport.";
+          }
         } else if (kind === "LICENCE_FRONT") {
           const r = await extractLicence.mutateAsync({ imageKey: json.key });
-          if (r.confidence >= 0.7) {
+          detected = r.documentType;
+          if (r.documentType !== "OTHER" && r.confidence >= 0.7) {
             if (r.licenceNumber) patch.licenceNumber = r.licenceNumber;
             if (r.state) patch.licenceState = r.state;
             if (r.licenceClass) patch.licenceClass = r.licenceClass;
             if (r.expiryDate) patch.licenceExpiry = isoDate(new Date(r.expiryDate));
             if (r.dateOfBirth) patch.dateOfBirth = isoDate(new Date(r.dateOfBirth));
           }
+          if (r.documentType === "PASSPORT") {
+            nudge =
+              "This looks like a passport — we've saved it here, but you'll still need to upload your driver's licence.";
+          }
         }
+        // LICENCE_BACK has no extractor — it's stored as-is below.
       } catch {
-        // OCR failure is non-fatal — document is already attached.
+        // OCR/classification failure is non-fatal — fall through and store the
+        // document without pre-fill. Only a definitive OTHER classification
+        // (returned, not thrown) blocks the upload.
+        detected = undefined;
       }
+
+      // Reject a genuine non-ID image — do not store it.
+      if (detected === "OTHER") {
+        setPhase("error");
+        setError(
+          kind === "PASSPORT"
+            ? "This doesn't look like a passport. Please upload a clear photo of your passport's photo page."
+            : "This doesn't look like a driver's licence. Please upload a clear photo of your licence.",
+        );
+        return;
+      }
+
+      // Store the document (a valid ID, or a type we don't classify such as
+      // the licence back).
+      await upload.mutateAsync({ type: kind, imageKey: json.key });
 
       if (Object.keys(patch).length > 0) {
         if (onExtracted) {
           onExtracted(patch);
-          setToast("Details detected — review the form above.");
+          setToast(nudge ?? "Details detected — review the form above.");
         } else {
           // Dashboard mode: write the OCR patch directly to the profile.
           // `updateProfile` overwrites whatever fields it receives, and emits
@@ -213,13 +245,16 @@ export function IdentityUploadCard({
             await updateProfile.mutateAsync(
               patch as unknown as Parameters<typeof updateProfile.mutateAsync>[0],
             );
-            setToast("Document saved — details pre-filled from the image.");
+            setToast(nudge ?? "Document saved — details pre-filled from the image.");
           } catch {
             setToast("Document saved. We couldn't auto-fill — please update details manually.");
           }
         }
       } else {
-        setToast("Document saved. We couldn't read details from the image — please update them manually.");
+        setToast(
+          nudge ??
+            "Document saved. We couldn't read details from the image — please update them manually.",
+        );
       }
 
       // Refresh the identity-documents query so /dashboard/documents picks

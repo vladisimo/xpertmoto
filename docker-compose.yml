@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB (drop-in for the official postgres:16 image) powers the
+    # VehicleTelemetry hypertable for GPS tracking history. timescaledb MUST be
+    # in shared_preload_libraries (below) or `CREATE EXTENSION timescaledb` fails.
+    image: timescale/timescaledb:latest-pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -12,13 +15,13 @@ services:
       - postgres-data:/var/lib/postgresql/data
       # Init scripts run once on a fresh data volume.
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
-    # shared_preload_libraries=pg_stat_statements enables per-query stats.
-    # The rest is a modest dev-tier tuning baseline — adjust in prod
-    # based on actual container memory allocation.
+    # shared_preload_libraries: timescaledb (required) + pg_stat_statements
+    # (per-query stats). The rest is a modest dev-tier tuning baseline — adjust
+    # in prod based on actual container memory allocation.
     command:
       - "postgres"
       - "-c"
-      - "shared_preload_libraries=pg_stat_statements"
+      - "shared_preload_libraries=timescaledb,pg_stat_statements"
       - "-c"
       - "pg_stat_statements.track=all"
       - "-c"

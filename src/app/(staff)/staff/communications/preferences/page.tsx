@@ -2,7 +2,7 @@
 
 import { CommsTabs } from "@/components/communications/comms-tabs";
 import { PageHeader } from "@/components/layout/page-header";
-import { PageSection, PageShell } from "@/components/layout/page-section";
+import { PageShell } from "@/components/layout/page-section";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { trpc } from "@/lib/trpc/client";
@@ -18,7 +18,7 @@ type Row = {
 };
 
 export default function PreferencesPage() {
-  const { data, isLoading } = trpc.communication.suppressionList.useQuery({ take: 100 });
+  const { data, isLoading } = trpc.communication.suppressionList.useQuery({ take: 200 });
 
   const rows: Row[] = (data?.items ?? []).map((p) => ({
     id: p.user.id,
@@ -75,7 +75,7 @@ export default function PreferencesPage() {
   ];
 
   return (
-    <PageShell>
+    <PageShell full>
       <PageHeader
         eyebrow="Operations"
         title="Communications"
@@ -84,15 +84,20 @@ export default function PreferencesPage() {
 
       <CommsTabs />
 
-      <PageSection flush>
+      <div className="flex min-h-0 flex-1 flex-col">
         <DataTable<Row>
           columns={columns}
           data={isLoading ? undefined : rows}
+          isLoading={isLoading}
           getRowId={(r) => r.id}
           getRowHref={(r) => `/staff/customers/${r.id}`}
           empty="No customers have opted out or unsubscribed yet."
+          fillHeight
+          pageSize={25}
+          pageSizeOptions={[25, 50, 100]}
+          paginationEmptyLabel="No suppressed customers"
         />
-      </PageSection>
+      </div>
     </PageShell>
   );
 }

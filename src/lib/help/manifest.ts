@@ -261,10 +261,10 @@ export const HELP_ARTICLES: readonly HelpArticle[] = [
   {
     slug: "infringements-tolls",
     title: "Infringements & tolls",
-    summary: "Match traffic fines and eToLL charges to the responsible booking and on-charge them.",
+    summary: "Match traffic fines and toll charges to the responsible booking and on-charge them.",
     category: "operations",
     audience: "Staff",
-    keywords: ["infringement", "fine", "toll", "etoll", "penalty", "on-charge"],
+    keywords: ["infringement", "fine", "toll", "penalty", "on-charge"],
     relatedNav: ["/staff/infringements", "/staff/tolls"],
     file: "operations/infringements-tolls.md",
   },

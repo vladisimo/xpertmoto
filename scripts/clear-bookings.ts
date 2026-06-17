@@ -181,8 +181,8 @@ async function wipeDatabase() {
     prisma.incidentNote.deleteMany(),
     prisma.incident.deleteMany(),
 
-    prisma.etollUnmatchedRow.deleteMany(),
-    prisma.etollSync.deleteMany(),
+    prisma.linktUnmatchedRow.deleteMany(),
+    prisma.linktSync.deleteMany(),
     prisma.infringement.deleteMany(),
 
     prisma.review.deleteMany(),

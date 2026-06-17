@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { sendEmail } from "@/lib/email";
+import { renderOpsNoticeEmail } from "@/lib/email-ops";
 import { getQueue, registerWorker } from "@/server/jobs/queue";
 import { isNotificationsPaused } from "@/server/services/notification-gate";
 import { trackServer } from "@/lib/analytics";
@@ -242,12 +243,16 @@ export async function runWeeklyDigest(): Promise<{ recipients: number; sent: num
   });
 
   const { subject, text } = renderDigestEmail(digest);
+  // Render the branded HTML once (identical per run); reuse for all recipients.
+  // `<pre>` inside the shell preserves the digest's column-aligned rows. Keep
+  // `text` as the plain-text alternative.
+  const html = await renderOpsNoticeEmail({ subject, text });
   const recipients = await resolveRecipients(prisma);
   let sent = 0;
   await Promise.all(
     recipients.map(async (to) => {
       try {
-        await sendEmail({ to, subject, text });
+        await sendEmail({ to, subject, html, text });
         sent++;
       } catch (err) {
         logger.error({ to, err: String(err) }, "analytics-digest: send failed");

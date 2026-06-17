@@ -3,6 +3,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import { FormGrid } from "@/components/forms/form-grid";
 import { SettingField } from "@/components/admin/settings/setting-field";
 import {
@@ -250,7 +251,8 @@ export default function SettingsPage() {
   }
 
   return (
-    <PageShell>
+    <SectionShell section="settings">
+      <PageShell>
       <PageHeader
         eyebrow="Administration"
         title="System settings"
@@ -258,7 +260,7 @@ export default function SettingsPage() {
       />
 
       <div
-        className="-mx-3 flex gap-1 overflow-x-auto border-b px-3 sm:mx-0 sm:px-0"
+        className="-mx-3 flex gap-1 overflow-x-auto border-b px-3 sm:mx-0 sm:px-0 lg:hidden"
         role="tablist"
       >
         {TABS.map((t) => {
@@ -358,6 +360,7 @@ export default function SettingsPage() {
           )}
         </PageSection>
       )}
-    </PageShell>
+      </PageShell>
+    </SectionShell>
   );
 }

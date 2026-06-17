@@ -73,3 +73,15 @@ export const setPasswordInputSchema = z.object({
   password: strongPasswordField,
 });
 export type SetPasswordInput = z.infer<typeof setPasswordInputSchema>;
+
+/** Consume an email-verification link (R2-M4). */
+export const verifyEmailInputSchema = z.object({
+  token: z.string().min(10, "Invalid token"),
+});
+export type VerifyEmailInput = z.infer<typeof verifyEmailInputSchema>;
+
+/** Request a fresh email-verification link (non-enumerating). */
+export const resendVerificationInputSchema = z.object({
+  email: emailField,
+});
+export type ResendVerificationInput = z.infer<typeof resendVerificationInputSchema>;

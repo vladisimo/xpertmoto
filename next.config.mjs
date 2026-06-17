@@ -21,6 +21,30 @@ const storageOrigin =
   parseStorageOrigin(process.env.S3_PUBLIC_URL) ??
   parseStorageOrigin(process.env.S3_ENDPOINT);
 
+// MapLibre basemap origin for CSP. The interactive back-office maps fetch the
+// style JSON, vector tiles, glyphs and sprite from the provider over
+// `connect-src`. Derive the origin from NEXT_PUBLIC_MAP_STYLE_URL so swapping
+// providers (OpenFreeMap → MapTiler / Stadia / Protomaps) stays a pure env
+// change. Falls back to OpenFreeMap's host, which matches the code default in
+// src/lib/maps/style.ts. Providers co-locate style + tiles + glyphs + sprite
+// on this origin; split-host providers would need their tile host added too.
+const mapTileOrigin =
+  parseStorageOrigin(process.env.NEXT_PUBLIC_MAP_STYLE_URL)?.origin ??
+  "https://tiles.openfreemap.org";
+
+// CSP img-src must not allow plaintext http for a remote storage host
+// (mixed content on an https page). Upgrade the storage origin's scheme to
+// https for any non-local host so a misconfigured `S3_PUBLIC_URL` (e.g.
+// http://) can't open a mixed-content hole; dev MinIO on localhost stays
+// http so local images keep loading. The real fix is to set S3_PUBLIC_URL
+// to an https:// URL — this is belt-and-braces.
+function cspStorageImgSrc(origin) {
+  if (!origin) return null;
+  const isLocal = ["localhost", "127.0.0.1", "::1"].includes(origin.hostname);
+  if (isLocal || origin.protocol === "https") return origin.origin;
+  return origin.origin.replace(/^http:\/\//, "https://");
+}
+
 // Next.js dev server compiles modules with `eval` for fast HMR, and the
 // React Refresh runtime evaluates fresh code on every hot update. Both
 // trip `script-src` without 'unsafe-eval'. Production builds emit only
@@ -39,8 +63,11 @@ const scriptSrc = [
 // 'unsafe-inline' on script-src is temporary: Next 16 App Router still
 // ships inline hydration scripts without nonce propagation. A later
 // security tier adds a middleware.ts that issues per-request nonces and
-// tightens to strict-dynamic. Shipping report-only here first so we see
-// real violations before enforcing.
+// tightens to strict-dynamic, which is what lets us finally drop
+// 'unsafe-inline'. This policy is now ENFORCED (not report-only): with all
+// third parties enumerated below it hardens object-src/frame-ancestors/
+// base-uri/form-action today, while `report-uri` keeps surfacing any
+// violation at /api/csp-report so regressions stay visible.
 const imgSrc = [
   "'self'",
   "data:",
@@ -48,7 +75,7 @@ const imgSrc = [
   "https://*.s3.ap-southeast-2.amazonaws.com",
   "https://files.stripe.com",
   "https://*.googleusercontent.com",
-  storageOrigin ? storageOrigin.origin : null,
+  cspStorageImgSrc(storageOrigin),
 ]
   .filter(Boolean)
   .join(" ");
@@ -61,11 +88,13 @@ const cspDirectives = [
   "font-src 'self' data:",
   // *.i.posthog.com covers both event ingestion (us.i.posthog.com) and the
   // static asset host (us-assets.i.posthog.com), plus the EU region.
-  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io https://*.i.posthog.com${
-    process.env.NEXT_PUBLIC_MAP_STYLE_URL
-      ? ""
-      : " https://demotiles.maplibre.org"
-  }`,
+  // mapTileOrigin allows the MapLibre basemap provider (style + tiles + glyphs
+  // + sprite all fetch over connect-src).
+  `connect-src 'self' https://api.stripe.com https://*.ingest.sentry.io https://*.i.posthog.com ${mapTileOrigin}`,
+  // MapLibre GL parses vector tiles in a web worker created from a blob: URL.
+  // Without an explicit worker-src it falls back to script-src (no blob:) and
+  // the worker is blocked, so the map never renders tiles.
+  "worker-src 'self' blob:",
   // www.google.com hosts the Google Maps embed iframes (public depot map).
   "frame-src https://js.stripe.com https://hooks.stripe.com https://www.google.com",
   "object-src 'none'",
@@ -82,7 +111,14 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(self)" },
-  { key: "Content-Security-Policy-Report-Only", value: cspDirectives },
+  // Cross-origin isolation. `same-origin-allow-popups` isolates this window
+  // from cross-origin openers while keeping popup-based flows (Stripe 3DS,
+  // OAuth popups) working; full `same-origin` would sever those. COEP is
+  // intentionally omitted — it would block Stripe.js / PostHog cross-origin
+  // embeds.
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+  { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
+  { key: "Content-Security-Policy", value: cspDirectives },
 ];
 
 const nextConfig = {
@@ -160,6 +196,17 @@ const nextConfig = {
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },
+  async rewrites() {
+    return [
+      // RFC 9116 security.txt. Served by a route handler (reads branding for
+      // the contact address) rather than a static file; the rewrite avoids
+      // the leading-dot app-folder ambiguity for `.well-known`.
+      {
+        source: "/.well-known/security.txt",
+        destination: "/api/well-known/security-txt",
+      },
+    ];
+  },
   webpack: (config) => {
     config.ignoreWarnings = [
       ...(config.ignoreWarnings ?? []),
@@ -176,6 +223,15 @@ const sentryBuildOptions = {
   project: process.env.SENTRY_PROJECT,
   authToken: process.env.SENTRY_AUTH_TOKEN,
   hideSourceMaps: true,
+  // Delete client source maps from .next/static after they're uploaded to
+  // Sentry so the original source isn't downloadable from production
+  // (the .map files were publicly reachable). Server maps in .next/server
+  // are kept (needed for runtime symbolication; not publicly served).
+  // Only triggers when the upload runs — i.e. SENTRY_AUTH_TOKEN is set at
+  // build time; otherwise lock .map down at the edge.
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
   widenClientFileUpload: true,
   tunnelRoute: "/monitoring",
   webpack: {

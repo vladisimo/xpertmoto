@@ -48,6 +48,14 @@ vi.mock("@/lib/customer-pii", () => ({
     [enc]: null,
   }),
 }));
+// The onboarding OCR procedures call the vision service — stub it so no
+// provider/network call is made.
+const extractLicenceData = vi.fn();
+const extractPassportData = vi.fn();
+vi.mock("@/server/services/document-extract", () => ({
+  extractLicenceData: (...args: unknown[]) => extractLicenceData(...args),
+  extractPassportData: (...args: unknown[]) => extractPassportData(...args),
+}));
 
 import { onboardingRouter } from "@/server/trpc/router/onboarding";
 import { buildOnboardingVersion } from "@/lib/onboarding-status";
@@ -284,6 +292,41 @@ describe("onboarding.complete", () => {
     expect(res.ok).toBe(true);
     expect(profile.onboardedAt).toBeInstanceOf(Date);
     expect(profile.onboardingVersion).toMatch(/\|.*\|.*\|/); // joint key
+  });
+});
+
+describe("onboarding.extractLicenceFromImage", () => {
+  it("rejects a key outside the caller's own folder (no OCR runs)", async () => {
+    const { ctx } = makeCtx();
+    await expect(
+      caller(ctx).extractLicenceFromImage({ imageKey: "drivers/someone-else/x.jpg" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" } satisfies Partial<TRPCError>);
+    expect(extractLicenceData).not.toHaveBeenCalled();
+  });
+
+  it("passes the extraction (incl. documentType) through for an own-folder key", async () => {
+    extractLicenceData.mockResolvedValue({ documentType: "PASSPORT", confidence: 0 });
+    const { ctx } = makeCtx();
+    const r = await caller(ctx).extractLicenceFromImage({ imageKey: "drivers/u1/x.jpg" });
+    expect(r.documentType).toBe("PASSPORT");
+    expect(extractLicenceData).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("onboarding.extractPassportFromImage", () => {
+  it("rejects a key outside the caller's own folder", async () => {
+    const { ctx } = makeCtx();
+    await expect(
+      caller(ctx).extractPassportFromImage({ imageKey: "drivers/other/p.jpg" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" } satisfies Partial<TRPCError>);
+  });
+
+  it("surfaces an OTHER classification without throwing for an own-folder key", async () => {
+    extractPassportData.mockResolvedValue({ documentType: "OTHER", confidence: 0 });
+    const { ctx } = makeCtx();
+    const r = await caller(ctx).extractPassportFromImage({ imageKey: "drivers/u1/p.jpg" });
+    expect(r.documentType).toBe("OTHER");
+    expect(extractPassportData).toHaveBeenCalledTimes(1);
   });
 });
 

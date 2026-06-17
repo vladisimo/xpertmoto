@@ -2,9 +2,8 @@
  * Linkt (Transurban) toll integration service.
  *
  * Linkt is a single Transurban account spanning NSW/VIC/QLD toll roads.
- * XPERT Moto's fleet tolls run through this provider, replacing the legacy
- * NSW e-toll account. This module is a first-class parity port of
- * `src/server/services/etoll.ts`:
+ * XPERT Moto's fleet tolls run through this provider (it superseded the
+ * former NSW E-Toll integration, now removed). This module:
  *
  *   parse the uploaded export file → normalised trip rows →
  *   match each trip to the vehicle + active booking → raise an idempotent
@@ -19,13 +18,18 @@
  * source-agnostic; a future Linkt for Business feed would only change how the
  * buffer is obtained.
  *
- * PROVISIONAL: the column headers / date format / sign convention in
- * `parseLinktExport` are best-effort and should be reconciled against a real
- * sample export the first time one is uploaded.
+ * `parseLinktExport` is reconciled against a real Linkt CSV export (2026-06-15)
+ * — see its doc comment for the exact column/sign/identity handling.
  */
 import * as XLSX from "xlsx";
 import { createHash } from "crypto";
 import { Prisma, type LinktAccount, type PrismaClient } from "@prisma/client";
+
+import {
+  findBookingForVehicleAt,
+  normalisePlate,
+  resolveVehicleByPlate,
+} from "./booking-matcher";
 
 export type LinktTripRow = {
   externalHash: string; // sha256(accountId|plate|iso|cents|tollpoint) — idempotency key
@@ -153,6 +157,7 @@ function findHeaderRow(rows: string[][]): number {
 
 type ColumnMap = {
   plate: number;
+  tag: number;
   timestamp: number;
   amount: number;
   tollpoint: number;
@@ -171,10 +176,13 @@ function mapColumns(header: string[]): ColumnMap {
   };
   return {
     plate: firstOf(/plate|lpn|licen[cs]e\s*plate|registration|rego/, /vehicle/),
-    timestamp: firstOf(/date.*time|date\s*&?\s*time|transaction\s*date|trip\s*date/, /date|time/),
+    // E-tag column — the real Linkt export identifies the vehicle by tag when
+    // the LPN/plate column is blank.
+    tag: firstOf(/tag\s*number|tag\s*no\.?|^tag$|e-?tag/),
+    timestamp: firstOf(/date.*time|date\s*&?\s*time|transaction\s*date|trip\s*date|start\s*date/, /date|time/),
     // "toll point" / "location" deliberately excluded from amount matching.
     amount: firstOf(/trip\s*cost|toll\s*amount/, /amount|cost|charge|debit|price/),
-    tollpoint: firstOf(/toll\s*point|tollpoint|gantry/, /location|road|motorway|point|description/),
+    tollpoint: firstOf(/toll\s*point|tollpoint|gantry/, /location|road|motorway|point|description|details/),
     type: firstOf(/transaction\s*type|activity\s*type|^type$/),
   };
 }
@@ -213,15 +221,18 @@ function parseAmountCents(s: string): number | null {
   return Math.round(n * 100) * (neg ? -1 : 1);
 }
 
-export function normalisePlate(s: string): string {
-  return (s ?? "").toUpperCase().replace(/[\s\-]/g, "");
-}
+// Re-exported from the shared booking matcher so the historical import site
+// (`@/server/services/linkt`) keeps working.
+export { normalisePlate };
 
 /**
  * Parse a Linkt trip-history export (CSV or XLSX buffer, or a CSV string in
- * tests) into normalised trip rows. Header names / date format / sign
- * convention are matched flexibly and MUST be reconciled with the Phase-0
- * sample export.
+ * tests) into normalised trip rows. Reconciled against a real export
+ * (2026-06-15): columns `Start Date, End Date, Type, Details, LPN, Tag number,
+ * Fleet ID, Vehicle class, Amount`; trip `Amount` is NEGATIVE (a debit) and the
+ * `Type` column ("Trips") gates real tolls, so we trust the type and take the
+ * magnitude; the vehicle is identified by `Tag number` when `LPN` is blank.
+ * Header matching stays flexible to tolerate minor column-name drift.
  */
 export function parseLinktExport(input: Buffer | string, account: { id: string }): LinktTripRow[] {
   const rows = toRowMatrix(input);
@@ -255,8 +266,14 @@ export function parseLinktExport(input: Buffer | string, account: { id: string }
     const amountCents = hasTypeCol ? Math.abs(signed) : signed;
     if (amountCents <= 0) continue;
 
-    const plate = normalisePlate(idx.plate >= 0 ? cells[idx.plate] ?? "" : "");
-    const tollpoint = (idx.tollpoint >= 0 ? cells[idx.tollpoint] ?? "" : "").trim();
+    // Identify the vehicle by LPN/plate, falling back to the e-tag number when
+    // the plate column is blank (the real Linkt export populates one or the
+    // other). resolveVehicleByPlate matches either against Vehicle.rego or
+    // Vehicle.gpsTrackerId.
+    const lpn = (idx.plate >= 0 ? cells[idx.plate] ?? "" : "").trim();
+    const tag = (idx.tag >= 0 ? cells[idx.tag] ?? "" : "").trim();
+    const plate = normalisePlate(lpn || tag);
+    const tollpoint = (idx.tollpoint >= 0 ? cells[idx.tollpoint] ?? "" : "").trim().replace(/\s+/g, " ");
     const externalHash = createHash("sha256")
       .update([account.id, plate, eventAt.toISOString(), amountCents, tollpoint].join("|"))
       .digest("hex");
@@ -287,28 +304,13 @@ export async function matchTripRow(
   prisma: PrismaClient,
   row: LinktTripRow,
 ): Promise<LinktMatch | null> {
-  const token = normalisePlate(row.plate);
-  if (!token) return null;
-  // Vehicle.rego isn't stored normalised; gpsTrackerId holds the toll tag id
-  // when the depot registers tags per vehicle. Try rego then tag, comparing
-  // normalised in JS (mirrors etoll.matchTripRow).
-  const vehicles = await prisma.vehicle.findMany({
-    select: { id: true, rego: true, gpsTrackerId: true },
-  });
-  const vehicle =
-    vehicles.find((v) => normalisePlate(v.rego) === token) ??
-    vehicles.find((v) => v.gpsTrackerId && normalisePlate(v.gpsTrackerId) === token);
+  // Shared with the NSW infringement-nomination flow — see booking-matcher.ts.
+  // (The matcher prefers actual check-out/return times and restricts to
+  // statuses where the vehicle was genuinely out with a renter.)
+  const vehicle = await resolveVehicleByPlate(prisma, row.plate);
   if (!vehicle) return null;
 
-  const booking = await prisma.booking.findFirst({
-    where: {
-      vehicleId: vehicle.id,
-      pickupDateTime: { lte: row.eventAt },
-      returnDateTime: { gte: row.eventAt },
-    },
-    select: { id: true, customerId: true },
-    orderBy: { pickupDateTime: "desc" },
-  });
+  const booking = await findBookingForVehicleAt(prisma, vehicle.id, row.eventAt);
 
   return {
     vehicleId: vehicle.id,
@@ -318,7 +320,7 @@ export async function matchTripRow(
 }
 
 // ---------------------------------------------------------------------------
-// Classify + upsert (idempotent) — ported verbatim from etoll for independence
+// Classify + upsert (idempotent)
 // ---------------------------------------------------------------------------
 
 export type CreateResult = "created" | "duplicate" | "unmatched";
@@ -333,8 +335,8 @@ export type RowAction =
 
 /**
  * Pure decision function for what a sync should do with one Linkt row given
- * what it finds in the DB. Kept self-contained (a port of etoll's, not an
- * import) so the legacy e-toll module can be retired without breaking Linkt.
+ * what it finds in the DB. Kept self-contained so the matching pipeline has
+ * no external coupling.
  */
 export function classifyRowAction(input: {
   existingInfringement: boolean;
@@ -579,4 +581,134 @@ export async function runLinktSync(
   });
 
   return { syncId: sync.id, status: finalStatus };
+}
+
+// ---------------------------------------------------------------------------
+// Summary stats (for the weekly toll-sync digest email)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolls land in one of three buckets (see `upsertInfringementFromRow` above):
+ *   - matched to a booking — TOLL `Infringement` with `bookingId != null`
+ *     (charged to the hire; the vehicle always carries a rego, i.e. a plate).
+ *   - vehicle known, no booking — TOLL `Infringement` with `bookingId == null`
+ *     (vehicle resolved by plate/tag but no active hire spanned the trip).
+ *   - unmatched — pending `LinktUnmatchedRow` (no vehicle could be resolved).
+ * Resolved unmatched rows are excluded from the total: an AUTO_MATCHED row
+ * also has an `Infringement`, so counting both would double-count.
+ */
+export type TollSummaryRow = {
+  eventAt: Date;
+  plate: string; // "" when no plate/tag was on the trip
+  tollpoint: string;
+  amountCents: number;
+  matchedBooking: string | null; // booking reference when matched, else null
+  status: "MATCHED" | "NO_BOOKING" | "UNMATCHED";
+};
+
+export type TollSummaryStats = {
+  totalTolls: number;
+  matchedToBooking: number;
+  unmatchedToBooking: number; // vehicle-no-booking + pending-unmatched
+  withPlate: number;
+  withoutPlate: number;
+  lastSync: { status: string; finishedAt: Date | null } | null;
+  recent: TollSummaryRow[]; // last 7 days, newest first
+  recentTruncated: boolean;
+};
+
+const RECENT_ROW_CAP = 100;
+
+/** Pull "Toll: <tollpoint>." back out of the Infringement notes blob. */
+function tollpointFromNotes(notes: string | null): string {
+  if (!notes) return "";
+  const m = notes.match(/^Toll:\s*(.*?)\.\s*Source:/);
+  const t = (m?.[1] ?? "").trim();
+  return t === "—" ? "" : t;
+}
+
+export async function getTollSummaryStats(
+  prisma: PrismaClient,
+  opts?: { now?: Date; sevenDaysMs?: number },
+): Promise<TollSummaryStats> {
+  const now = opts?.now ?? new Date();
+  const since = new Date(now.getTime() - (opts?.sevenDaysMs ?? 7 * 24 * 60 * 60 * 1000));
+
+  const [matchedToBooking, vehicleNoBooking, pendingUnmatched, withoutPlate, lastSync] =
+    await Promise.all([
+      prisma.infringement.count({
+        where: { type: "TOLL", deletedAt: null, bookingId: { not: null } },
+      }),
+      prisma.infringement.count({
+        where: { type: "TOLL", deletedAt: null, bookingId: null },
+      }),
+      prisma.linktUnmatchedRow.count({ where: { resolvedAt: null } }),
+      prisma.linktUnmatchedRow.count({ where: { resolvedAt: null, plate: "" } }),
+      prisma.linktSync.findFirst({
+        where: { finishedAt: { not: null } },
+        orderBy: { finishedAt: "desc" },
+        select: { status: true, finishedAt: true },
+      }),
+    ]);
+
+  const totalTolls = matchedToBooking + vehicleNoBooking + pendingUnmatched;
+  const unmatchedToBooking = vehicleNoBooking + pendingUnmatched;
+  const withPlate = totalTolls - withoutPlate;
+
+  // Last-7-days rows: matched/vehicle-known tolls (Infringement) unioned with
+  // still-pending unmatched rows, newest first, capped.
+  const [recentInfringements, recentUnmatched] = await Promise.all([
+    prisma.infringement.findMany({
+      where: { type: "TOLL", deletedAt: null, offenceDate: { gte: since } },
+      orderBy: { offenceDate: "desc" },
+      take: RECENT_ROW_CAP + 1,
+      select: {
+        offenceDate: true,
+        amount: true,
+        bookingId: true,
+        notes: true,
+        vehicle: { select: { rego: true } },
+        booking: { select: { bookingReference: true } },
+      },
+    }),
+    prisma.linktUnmatchedRow.findMany({
+      where: { resolvedAt: null, eventAt: { gte: since } },
+      orderBy: { eventAt: "desc" },
+      take: RECENT_ROW_CAP + 1,
+      select: { eventAt: true, plate: true, tollpoint: true, amountCents: true },
+    }),
+  ]);
+
+  const rows: TollSummaryRow[] = [
+    ...recentInfringements.map((i): TollSummaryRow => ({
+      eventAt: i.offenceDate,
+      plate: i.vehicle?.rego ?? "",
+      tollpoint: tollpointFromNotes(i.notes),
+      amountCents: Math.round(Number(i.amount) * 100),
+      matchedBooking: i.booking?.bookingReference ?? null,
+      status: i.bookingId ? "MATCHED" : "NO_BOOKING",
+    })),
+    ...recentUnmatched.map((u): TollSummaryRow => ({
+      eventAt: u.eventAt,
+      plate: u.plate,
+      tollpoint: u.tollpoint,
+      amountCents: u.amountCents,
+      matchedBooking: null,
+      status: "UNMATCHED",
+    })),
+  ].sort((a, b) => b.eventAt.getTime() - a.eventAt.getTime());
+
+  const recentTruncated = rows.length > RECENT_ROW_CAP;
+  const recent = rows.slice(0, RECENT_ROW_CAP);
+
+  return {
+    totalTolls,
+    matchedToBooking,
+    unmatchedToBooking,
+    withPlate,
+    withoutPlate,
+    lastSync: lastSync ? { status: lastSync.status, finishedAt: lastSync.finishedAt } : null,
+    recent,
+    recentTruncated,
+  };
 }

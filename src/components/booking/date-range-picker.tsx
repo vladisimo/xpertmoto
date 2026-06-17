@@ -187,6 +187,20 @@ export function BookingDateRangePicker({
               closed: isClosedDay,
               openDay: isOpenDay,
             }}
+            // R2-M5 (WCAG 1.4.1): availability is conveyed on each day by
+            // colour alone (red past / orange closed / emerald open). Fold the
+            // same state into the day button's accessible name so screen-reader
+            // and colour-blind users get a non-colour cue, not just the date.
+            labels={{
+              labelDayButton: (date, modifiers) => {
+                const base = format(date, "EEEE d MMMM yyyy");
+                if (modifiers.pastDay) return `${base}, unavailable (past date)`;
+                if (modifiers.closed)
+                  return `${base}, depot closed — available mid-hire only`;
+                if (modifiers.openDay) return `${base}, available`;
+                return base;
+              },
+            }}
             modifiersClassNames={{
               // Modifier classes are applied to the table cell (td), but
               // the day button uses the ghost variant which carries its

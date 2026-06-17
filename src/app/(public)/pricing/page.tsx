@@ -1,6 +1,14 @@
+import type { Metadata } from "next";
 import { prisma } from "@/lib/prisma";
 import { DividedTitle } from "@/components/marketing/divided-title";
 import { formatCurrency } from "@/lib/utils";
+
+// M-11: per-page title (composed via the root template) + unique description.
+export const metadata: Metadata = {
+  title: "Pricing & insurance",
+  description:
+    "Transparent, GST-inclusive scooter & motorbike hire rates — daily and weekly pricing, insurance tiers and excess, add-ons, and the refundable bond explained.",
+};
 
 export default async function PricingPage() {
   const [categories, addons, insurance] = await Promise.all([

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { inferRouterOutputs } from "@trpc/server";
 import { trpc } from "@/lib/trpc/client";
 import type { AppRouter } from "@/server/trpc/router";
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageSection, PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import { TieredPricingPanel } from "@/components/admin/pricing/tiered-pricing-panel";
 import { TierEditor } from "@/components/admin/pricing/tier-editor";
 import { CategoriesManager } from "@/components/admin/categories-manager";
@@ -76,11 +77,18 @@ export default function PricingPage() {
   const upsertDiscount = trpc.admin.upsertDiscount.useMutation({ onSuccess: invalidate });
   const upsertSeason = trpc.admin.upsertSeason.useMutation({ onSuccess: invalidate });
 
+  const router = useRouter();
   const searchParams = useSearchParams();
   const urlTab = searchParams.get("tab") as Tab | null;
-  const [tab, setTab] = useState<Tab>(
-    urlTab && TABS.some((t) => t.value === urlTab) ? urlTab : "rates",
-  );
+  // URL-driven so the section rail (and deep links) control the active tab.
+  const tab: Tab = urlTab && TABS.some((t) => t.value === urlTab) ? urlTab : "rates";
+  const setTab = (next: Tab) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "rates") params.delete("tab");
+    else params.set("tab", next);
+    const qs = params.toString();
+    router.replace(qs ? `/admin/pricing?${qs}` : "/admin/pricing", { scroll: false });
+  };
   const [ratesView, setRatesView] = useState<RatesView>("base");
   const [newDiscount, setNewDiscount] = useState({ code: "", type: "PERCENTAGE" as "PERCENTAGE" | "FIXED", value: 10, isActive: true });
   const [newSeason, setNewSeason] = useState({ name: "", startDate: "", endDate: "", multiplier: 1.2, isActive: true });
@@ -488,14 +496,15 @@ export default function PricingPage() {
   ];
 
   return (
-    <PageShell full={tab === "models"}>
+    <SectionShell section="pricing">
+      <PageShell full={tab === "models"}>
       <PageHeader
         eyebrow="Administration"
         title="Pricing"
         description="Base rates, add-ons, insurance tiers, discounts, and seasonal multipliers."
       />
 
-      <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0">
+      <div className="-mx-3 flex gap-2 overflow-x-auto border-b px-3 sm:mx-0 sm:overflow-visible sm:px-0 lg:hidden">
         {TABS.map((t) => {
           const Icon = t.icon;
           return (
@@ -864,7 +873,8 @@ export default function PricingPage() {
         </>
       )}
 
-    </PageShell>
+      </PageShell>
+    </SectionShell>
   );
 }
 

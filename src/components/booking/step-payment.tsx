@@ -3,7 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronDown, Info, Loader2 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
-import { flushBookingWizard, useBookingWizard } from "@/stores/booking-wizard";
+import {
+  bookingCartSignature,
+  DRAFT_TTL_MS,
+  flushBookingWizard,
+  useBookingWizard,
+  type WizardDraft,
+} from "@/stores/booking-wizard";
 import { Button } from "@/components/ui/button";
 import { QuoteSummary } from "./quote-summary";
 import {
@@ -26,6 +32,20 @@ type CreatedBooking = {
   payOnlineAmount: number;
   bondAmount: number;
 };
+
+/** Rehydrate the `created` state from a persisted wizard draft (H-4). */
+function draftToCreated(d: WizardDraft): CreatedBooking {
+  return {
+    booking: { id: d.bookingId, bookingReference: d.bookingReference },
+    paymentClientSecret: d.paymentClientSecret,
+    paymentIntentId: d.paymentIntentId,
+    bondClientSecret: d.bondClientSecret,
+    bondIntentId: d.bondIntentId,
+    stripeEnabled: d.stripeEnabled,
+    payOnlineAmount: d.payOnlineAmount,
+    bondAmount: d.bondAmount,
+  };
+}
 
 export function StepPayment() {
   const w = useBookingWizard();
@@ -84,6 +104,9 @@ export function StepPayment() {
         deliveryFee: w.deliveryFee,
         agreedToTerms: true,
         termsVersion: TERMS_VERSION,
+        // H-4: hand the server our previous draft so it can retire it
+        // instead of leaving an orphaned "Pending payment" row behind.
+        draftBookingId: w.draft?.bookingId,
       });
 
       // Stub mode (no Stripe configured) — auto-confirm server-side as before.
@@ -100,8 +123,24 @@ export function StepPayment() {
       }
 
       // Real Stripe — hand off to the <StripePaymentForm> so the customer
-      // can enter a card and confirm client-side.
-      setCreated(res as CreatedBooking);
+      // can enter a card and confirm client-side. Persist the draft so a
+      // refresh / back-forward reuses this booking + these PaymentIntents
+      // instead of creating another orphaned draft (H-4).
+      const created = res as CreatedBooking;
+      w.setDraft({
+        signature: bookingCartSignature(w),
+        expiresAt: Date.now() + DRAFT_TTL_MS,
+        bookingId: created.booking.id,
+        bookingReference: created.booking.bookingReference,
+        paymentClientSecret: created.paymentClientSecret,
+        paymentIntentId: created.paymentIntentId,
+        bondClientSecret: created.bondClientSecret,
+        bondIntentId: created.bondIntentId,
+        stripeEnabled: created.stripeEnabled,
+        payOnlineAmount: created.payOnlineAmount,
+        bondAmount: created.bondAmount,
+      });
+      setCreated(created);
       setProcessing(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not start payment");
@@ -202,6 +241,20 @@ export function StepPayment() {
     )
       return;
     autoStartedRef.current = true;
+    // H-4: reuse a still-valid draft for an unchanged cart instead of firing
+    // booking.create again — this is what stops refreshes / back-forwards on
+    // step 6 from spawning orphaned "Pending payment" bookings.
+    const draft = w.draft;
+    if (
+      draft &&
+      draft.signature === bookingCartSignature(w) &&
+      draft.stripeEnabled &&
+      draft.paymentClientSecret &&
+      Date.now() < draft.expiresAt
+    ) {
+      setCreated(draftToCreated(draft));
+      return;
+    }
     void handleStart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [missingImagesMessage, idGateReady]);

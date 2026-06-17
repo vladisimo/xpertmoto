@@ -45,7 +45,7 @@ export function ocrUsageToAud(usage: OcrUsage): number {
 
 export type OcrLogContext = {
   prisma: PrismaClient;
-  kind: "LICENCE" | "PASSPORT" | "OTHER";
+  kind: "LICENCE" | "PASSPORT" | "INFRINGEMENT" | "OTHER";
   customerId?: string;
   bookingId?: string;
   triggeredById?: string;

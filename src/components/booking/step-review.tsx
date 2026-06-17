@@ -21,6 +21,7 @@ export function StepReview() {
   const [platformTermsAgreed, setPlatformTermsAgreed] = useState(false);
   const [platformPrivacyAgreed, setPlatformPrivacyAgreed] = useState(false);
   const [consentError, setConsentError] = useState<string | null>(null);
+  const termsRef = useRef<HTMLLabelElement>(null);
   const { missingImagesMessage, goBackToDetails } = useRequiredIdImagesGuard();
   const { status: sessionStatus } = useSession();
   // Only authenticated customers have a profile to read consent from. Step 5
@@ -79,6 +80,7 @@ export function StepReview() {
     if (soldOut) return;
     if (!w.agreedToTerms) {
       setAttempted(true);
+      termsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
     if (showConsentBlock) {
@@ -228,7 +230,7 @@ export function StepReview() {
           {consentError && <FieldError message={consentError} />}
         </div>
       )}
-      <label className="flex items-start gap-3 text-sm">
+      <label ref={termsRef} className="flex items-start gap-3 text-sm scroll-mt-24">
         <input
           type="checkbox"
           checked={w.agreedToTerms}

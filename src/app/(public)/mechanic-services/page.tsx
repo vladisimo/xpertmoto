@@ -30,14 +30,14 @@ const PRICING: { type: string; price: string }[] = [
 ];
 
 const REPAIR_PHOTOS = [
-  "/mechanic/repair1.png",
-  "/mechanic/repair3.png",
-  "/mechanic/repair4.png",
-  "/mechanic/repair6.png",
-  "/mechanic/repair7.png",
-  "/mechanic/repair8.png",
-  "/mechanic/repair9.png",
-  "/mechanic/repair10.png",
+  "/mechanic/repair1.webp",
+  "/mechanic/repair3.webp",
+  "/mechanic/repair4.webp",
+  "/mechanic/repair6.webp",
+  "/mechanic/repair7.webp",
+  "/mechanic/repair8.webp",
+  "/mechanic/repair9.webp",
+  "/mechanic/repair10.webp",
 ];
 
 const BRAND_LOGOS = [
@@ -164,7 +164,7 @@ export default async function MechanicServicesPage() {
       <section className="relative isolate">
         <div className="relative h-[60vh] min-h-[420px] w-full overflow-hidden">
           <Image
-            src="/mechanic/repair1.png"
+            src="/mechanic/repair1.webp"
             alt={`Motorcycle being serviced in the ${siteName} workshop`}
             fill
             priority

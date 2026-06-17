@@ -19,6 +19,12 @@ export type VehicleCardVehicle = {
   currentOdometerKm: number;
   internalCode: string;
   category: { name: string; engineCapacity: number };
+  /**
+   * Per-unit engine capacity from the linked catalogue model (M-6). Preferred
+   * over the coarse `category.engineCapacity`; when null the Engine spec is
+   * hidden rather than showing a misleading shared figure.
+   */
+  engineCapacityCc?: number | null;
   depot: { name: string };
   images: { url: string; isPrimary: boolean; displayOrder: number; caption?: string | null }[];
 };
@@ -86,6 +92,7 @@ export function VehicleCard({
             <span
               role="button"
               tabIndex={0}
+              aria-label={`View ${vehicle.images.length} photos`}
               onClick={(e) => {
                 e.stopPropagation();
                 setLightboxOpen(true);
@@ -136,18 +143,28 @@ export function VehicleCard({
               {secondaryBadge}
             </div>
           </div>
-          {!compact && (
-            <dl className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px]">
-              <div className="flex items-baseline justify-between">
-                <dt className="caption">Engine</dt>
-                <dd className="font-medium tabular-nums">{vehicle.category.engineCapacity}cc</dd>
-              </div>
-              <div className="flex items-baseline justify-between">
-                <dt className="caption">Km</dt>
-                <dd className="font-medium tabular-nums">{vehicle.currentOdometerKm.toLocaleString()}</dd>
-              </div>
-            </dl>
-          )}
+          {/* M-6: show only specs we actually hold per unit. Engine uses the
+           *  catalogue model's cc (not the coarse category figure); Km is
+           *  hidden until a real odometer reading is on file (0 = unset). */}
+          {!compact &&
+            (vehicle.engineCapacityCc != null || vehicle.currentOdometerKm > 0) && (
+              <dl className="mt-1 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[11px]">
+                {vehicle.engineCapacityCc != null && (
+                  <div className="flex items-baseline justify-between">
+                    <dt className="caption">Engine</dt>
+                    <dd className="font-medium tabular-nums">{vehicle.engineCapacityCc}cc</dd>
+                  </div>
+                )}
+                {vehicle.currentOdometerKm > 0 && (
+                  <div className="flex items-baseline justify-between">
+                    <dt className="caption">Km</dt>
+                    <dd className="font-medium tabular-nums">
+                      {vehicle.currentOdometerKm.toLocaleString()}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            )}
           {!compact && (
             <span
               role="button"

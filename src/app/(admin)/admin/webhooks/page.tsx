@@ -14,6 +14,7 @@ import { trpc } from "@/lib/trpc/client";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell, PageSection } from "@/components/layout/page-section";
 import { FinanceTabsBar } from "@/components/admin/finance-tabs-bar";
+import { SectionShell } from "@/components/layout/section-shell";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge, type StatusKey } from "@/components/ui/status-badge";
@@ -131,7 +132,8 @@ export default function AdminWebhookHealthPage() {
   ];
 
   return (
-    <PageShell full>
+    <SectionShell section="finance">
+      <PageShell full>
       <PageHeader
         eyebrow="Administration · Finance"
         title="Stripe webhook health"
@@ -259,7 +261,8 @@ export default function AdminWebhookHealthPage() {
           </div>
         </div>
       </div>
-    </PageShell>
+      </PageShell>
+    </SectionShell>
   );
 }
 

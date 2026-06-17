@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { paragraphs, renderEmailShell, summaryTable } from "@/lib/email-shell";
+import { escapeText, paragraphs, renderEmailShell, summaryTable } from "@/lib/email-shell";
 
 describe("renderEmailShell", () => {
   test("includes the expected landmarks: logo, title, body slot, policy links, footer", () => {
@@ -57,6 +57,26 @@ describe("renderEmailShell", () => {
       footerNote: `<a href="{{unsubscribeUrl}}">Unsubscribe</a>`,
     });
     expect(html).toContain(`href="{{unsubscribeUrl}}"`);
+  });
+});
+
+describe("escapeText", () => {
+  test("escapes the HTML metacharacters that would break markup or inject", () => {
+    expect(escapeText(`5 < 10 & "x" > 'y'`)).toBe(
+      "5 &lt; 10 &amp; &quot;x&quot; &gt; &#39;y&#39;",
+    );
+  });
+
+  test("leaves plain text untouched", () => {
+    expect(escapeText("Hello Alex, your booking SCT-1234 is ready.")).toBe(
+      "Hello Alex, your booking SCT-1234 is ready.",
+    );
+  });
+
+  test("escapes ampersand first so existing entities are not double-decoded", () => {
+    // & must become &amp; before < becomes &lt;, else "&lt;" would re-escape.
+    expect(escapeText("<")).toBe("&lt;");
+    expect(escapeText("&lt;")).toBe("&amp;lt;");
   });
 });
 

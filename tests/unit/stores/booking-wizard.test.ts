@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  bookingCartSignature,
   flushBookingWizard,
   isCustomerComplete,
   isPickupTooLate,
@@ -8,6 +9,7 @@ import {
   resetStaleBookingWizard,
   STALE_RESET_FLAG,
   useBookingWizard,
+  type WizardDraft,
 } from "@/stores/booking-wizard";
 import { BOOKING_RULES } from "@/lib/constants";
 
@@ -169,6 +171,28 @@ describe("booking wizard store", () => {
       expect(() => flushBookingWizard()).not.toThrow();
       expect(useBookingWizard.getState().step).toBe(1);
       expect(sessionStorage.getItem(POST_BOOKING_RESET_FLAG)).toBe("1");
+    });
+
+    it("clears the persisted payment draft (H-4) so the next booking starts clean", () => {
+      const draft: WizardDraft = {
+        signature: "sig",
+        expiresAt: Date.now() + 1000,
+        bookingId: "bk_1",
+        bookingReference: "SCT-1",
+        paymentClientSecret: "pi_secret",
+        paymentIntentId: "pi_1",
+        bondClientSecret: null,
+        bondIntentId: null,
+        stripeEnabled: true,
+        payOnlineAmount: 46.5,
+        bondAmount: 300,
+      };
+      useBookingWizard.getState().setDraft(draft);
+      expect(useBookingWizard.getState().draft).not.toBeNull();
+
+      flushBookingWizard();
+
+      expect(useBookingWizard.getState().draft).toBeNull();
     });
 
     it("strips ?step= from the URL so a subsequent Back doesn't restore the just-completed step", () => {
@@ -409,6 +433,51 @@ describe("booking wizard store", () => {
       expect(useBookingWizard.getState().step).toBe(2);
       // 3 transitions: setStep(2), next→3, back→2
       expect(pushSpy).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe("bookingCartSignature()", () => {
+    const base = {
+      categoryId: "cat_1",
+      pickupDepotId: "dep_1",
+      returnDepotId: "dep_1",
+      pickupDateTime: "2026-05-01T10:00:00.000Z",
+      returnDateTime: "2026-05-03T10:00:00.000Z",
+      addons: [] as { addonId: string; quantity: number }[],
+      insuranceOptionId: "ins_std",
+      discountCode: "",
+      isDelivery: false,
+      deliveryFee: 0,
+    };
+
+    it("is stable for the same cart", () => {
+      expect(bookingCartSignature(base)).toBe(bookingCartSignature({ ...base }));
+    });
+
+    it("is order-independent for addons", () => {
+      const a = bookingCartSignature({
+        ...base,
+        addons: [
+          { addonId: "x", quantity: 1 },
+          { addonId: "y", quantity: 2 },
+        ],
+      });
+      const b = bookingCartSignature({
+        ...base,
+        addons: [
+          { addonId: "y", quantity: 2 },
+          { addonId: "x", quantity: 1 },
+        ],
+      });
+      expect(a).toBe(b);
+    });
+
+    it("changes when a pricing-relevant field changes", () => {
+      const sig = bookingCartSignature(base);
+      expect(bookingCartSignature({ ...base, returnDateTime: "2026-05-04T10:00:00.000Z" })).not.toBe(sig);
+      expect(bookingCartSignature({ ...base, insuranceOptionId: "ins_basic" })).not.toBe(sig);
+      expect(bookingCartSignature({ ...base, discountCode: "SAVE10" })).not.toBe(sig);
+      expect(bookingCartSignature({ ...base, isDelivery: true, deliveryFee: 20 })).not.toBe(sig);
     });
   });
 });

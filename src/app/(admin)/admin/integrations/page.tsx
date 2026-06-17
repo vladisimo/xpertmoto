@@ -6,6 +6,7 @@ import { Tabs, TabsTrigger } from "@/components/ui/tabs";
 import { MobileScrollTabs } from "@/components/ui/mobile-scroll-tabs";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
+import { SectionShell } from "@/components/layout/section-shell";
 import {
   LayoutGrid,
   CreditCard,
@@ -14,6 +15,7 @@ import {
   Car,
   Sparkles,
   Satellite,
+  Navigation,
   KeyRound,
 } from "lucide-react";
 import {
@@ -24,6 +26,7 @@ import {
   IntegrationsTabTolls,
   IntegrationsTabCustomer,
   IntegrationsTabOperations,
+  IntegrationsTabTracking,
   IntegrationsTabApiKeys,
 } from "@/components/admin/integration-tabs";
 import dynamic from "next/dynamic";
@@ -44,6 +47,7 @@ const TABS = [
   { value: "tolls", label: "Tolls", icon: Car },
   { value: "customer", label: "Customer CX", icon: Sparkles },
   { value: "operations", label: "Operations", icon: Satellite },
+  { value: "tracking", label: "GPS tracking", icon: Navigation },
   { value: "api-keys", label: "API keys", icon: KeyRound },
 ] as const;
 
@@ -61,7 +65,8 @@ export default function AdminIntegrationsPage() {
   };
 
   return (
-    <PageShell>
+    <SectionShell section="integrations">
+      <PageShell>
       <PageHeader
         eyebrow="Administration"
         title="Integrations"
@@ -71,7 +76,7 @@ export default function AdminIntegrationsPage() {
       <IntegrationsStats overview={overview} loading={isLoading} />
 
       <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <MobileScrollTabs className="w-full justify-start sm:w-full">
+        <MobileScrollTabs className="w-full justify-start sm:w-full lg:hidden">
           {TABS.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -97,9 +102,11 @@ export default function AdminIntegrationsPage() {
           {activeTab === "tolls" && <IntegrationsTabTolls overview={overview} />}
           {activeTab === "customer" && <IntegrationsTabCustomer overview={overview} />}
           {activeTab === "operations" && <IntegrationsTabOperations overview={overview} />}
+          {activeTab === "tracking" && <IntegrationsTabTracking />}
           {activeTab === "api-keys" && <IntegrationsTabApiKeys />}
         </>
       )}
-    </PageShell>
+      </PageShell>
+    </SectionShell>
   );
 }

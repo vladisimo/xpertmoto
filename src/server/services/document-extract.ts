@@ -26,6 +26,16 @@ const DEFAULT_MODEL_ANTHROPIC = "claude-sonnet-4-6";
 /** OpenRouter default; picked when OPENROUTER_API_KEY is set. */
 const DEFAULT_MODEL_OPENROUTER = "anthropic/claude-sonnet-4.6";
 
+/**
+ * What kind of identity document the model actually sees in the image —
+ * classified by *function*, not physical format (a passport-style driver
+ * licence is `DRIVERS_LICENCE`; an international driving permit is
+ * `DRIVERS_LICENCE`; anything that is not a licence or a passport bio-data
+ * page is `OTHER`). Callers compare this against the document slot they
+ * expected and decide whether to accept, nudge, or reject.
+ */
+export type DocumentClassification = "DRIVERS_LICENCE" | "PASSPORT" | "OTHER";
+
 export interface ExtractLicenceData {
   licenceNumber?: string;
   state?: string;
@@ -46,6 +56,14 @@ export interface ExtractLicenceData {
    * source image dimensions. Absent if Claude couldn't locate a face.
    */
   faceBoundingBox?: { x: number; y: number; width: number; height: number };
+  /**
+   * The kind of document the model classified the image as. Present whenever
+   * the model returned a structured result; absent only on a hard failure
+   * (network error / no tool call / schema mismatch) so callers can tell
+   * "couldn't reach the model" apart from "wrong document type". When this is
+   * not `DRIVERS_LICENCE`, no licence fields are populated.
+   */
+  documentType?: DocumentClassification;
   confidence: number;
 }
 
@@ -59,6 +77,8 @@ export interface DetectedLicenceMetadata {
   detectedAt: string;
   detectedById?: string;
   confidence: number;
+  /** What the detector classified the image as, for audit traceability. */
+  documentType?: DocumentClassification;
   licenceNumber?: string;
   state?: string;
   firstName?: string;
@@ -87,6 +107,8 @@ export interface DetectedPassportMetadata {
   detectedAt: string;
   detectedById?: string;
   confidence: number;
+  /** What the detector classified the image as, for audit traceability. */
+  documentType?: DocumentClassification;
   passportNumber?: string;
   country?: string;
   firstName?: string;
@@ -102,6 +124,51 @@ export interface ExtractPassportData {
   lastName?: string;
   dateOfBirth?: Date;
   expiryDate?: Date;
+  /**
+   * The kind of document the model classified the image as. See
+   * `ExtractLicenceData.documentType`. When this is not `PASSPORT`, no
+   * passport fields are populated.
+   */
+  documentType?: DocumentClassification;
+  confidence: number;
+}
+
+/** Infringement category aligned to the Prisma `InfringementType` enum. */
+export type InfringementTypeGuess =
+  | "SPEEDING"
+  | "PARKING"
+  | "TOLL"
+  | "RED_LIGHT"
+  | "MOBILE_PHONE"
+  | "SEATBELT"
+  | "UNREGISTERED"
+  | "OTHER";
+
+/** Whether the image actually is a penalty / infringement notice. */
+export type NoticeClassification = "PENALTY_NOTICE" | "OTHER";
+
+/**
+ * Fields extracted from a scanned/photographed NSW penalty notice. Every
+ * field is a SUGGESTION ONLY — staff confirm before an Infringement row is
+ * created. Empty object (confidence 0) on any failure.
+ */
+export interface ExtractInfringementData {
+  penaltyNoticeNumber?: string;
+  vehicleRego?: string;
+  issuer?: string;
+  offenceCode?: string;
+  offenceDescription?: string;
+  offenceLocation?: string;
+  /** When the offence occurred (used to match the renter). */
+  offenceDate?: Date;
+  /** When the notice was issued (drives the 21-day nomination deadline). */
+  issueDate?: Date;
+  /** Issuer fine amount in AUD. */
+  amount?: number;
+  demeritPoints?: number;
+  type?: InfringementTypeGuess;
+  /** What the model classified the image as. Not PENALTY_NOTICE → no fields. */
+  documentType?: NoticeClassification;
   confidence: number;
 }
 
@@ -128,6 +195,7 @@ const licenceToolSchema = z.object({
       height: z.number().min(0).max(1),
     })
     .optional(),
+  documentType: z.enum(["DRIVERS_LICENCE", "PASSPORT", "OTHER"]).optional(),
   confidence: z.number().min(0).max(1),
 });
 
@@ -138,6 +206,34 @@ const passportToolSchema = z.object({
   lastName: z.string().optional(),
   dateOfBirth: z.string().optional(),
   expiryDate: z.string().optional(),
+  documentType: z.enum(["DRIVERS_LICENCE", "PASSPORT", "OTHER"]).optional(),
+  confidence: z.number().min(0).max(1),
+});
+
+const infringementToolSchema = z.object({
+  penaltyNoticeNumber: z.string().optional(),
+  vehicleRego: z.string().optional(),
+  issuer: z.string().optional(),
+  offenceCode: z.string().optional(),
+  offenceDescription: z.string().optional(),
+  offenceLocation: z.string().optional(),
+  offenceDate: z.string().optional(),
+  issueDate: z.string().optional(),
+  amount: z.number().optional(),
+  demeritPoints: z.number().optional(),
+  type: z
+    .enum([
+      "SPEEDING",
+      "PARKING",
+      "TOLL",
+      "RED_LIGHT",
+      "MOBILE_PHONE",
+      "SEATBELT",
+      "UNREGISTERED",
+      "OTHER",
+    ])
+    .optional(),
+  documentType: z.enum(["PENALTY_NOTICE", "OTHER"]).optional(),
   confidence: z.number().min(0).max(1),
 });
 
@@ -252,6 +348,16 @@ You must always call the "extract_licence" tool exactly once; never respond
 with free text. If a field is illegible or missing, omit it. Set
 \`confidence\` to your self-estimate (0 = guessing, 1 = every field crisp).
 
+First classify the image and report it in \`documentType\`, judging by the
+document's *function*, not its physical format:
+- "DRIVERS_LICENCE" — any driver licence / driving permit, including
+  passport-style booklet licences and international driving permits.
+- "PASSPORT" — a passport bio-data page.
+- "OTHER" — anything else (a selfie, utility bill, blank page, screenshot, or
+  any document that is not a licence or a passport).
+If \`documentType\` is not "DRIVERS_LICENCE", set \`confidence\` to 0 and omit
+every other field — do not guess licence details from a non-licence image.
+
 For \`country\`, report the country that issued the licence (e.g. "Australia"
 for any Australian state/territory licence, "New Zealand", "United Kingdom").
 Infer it from visible branding (e.g. "New South Wales, Australia" → Australia)
@@ -276,7 +382,17 @@ passports and returns a structured summary. You must always call the
 "extract_passport" tool exactly once; never respond with free text. Read the
 machine-readable zone when available and cross-check the visual fields. If a
 field is illegible or missing, omit it. Set \`confidence\` to your
-self-estimate (0 = guessing, 1 = every field crisp).`;
+self-estimate (0 = guessing, 1 = every field crisp).
+
+First classify the image and report it in \`documentType\`, judging by the
+document's *function*, not its physical format:
+- "PASSPORT" — a passport bio-data page.
+- "DRIVERS_LICENCE" — any driver licence / driving permit, including
+  passport-style booklet licences and international driving permits.
+- "OTHER" — anything else (a selfie, utility bill, blank page, screenshot, or
+  any document that is not a licence or a passport).
+If \`documentType\` is not "PASSPORT", set \`confidence\` to 0 and omit every
+other field — do not guess passport details from a non-passport image.`;
 
 const LICENCE_TOOL: Anthropic.Messages.Tool = {
   name: "extract_licence",
@@ -310,6 +426,12 @@ const LICENCE_TOOL: Anthropic.Messages.Tool = {
         },
         required: ["x", "y", "width", "height"],
       },
+      documentType: {
+        type: "string",
+        enum: ["DRIVERS_LICENCE", "PASSPORT", "OTHER"],
+        description:
+          "What kind of identity document the image actually is, by function: 'DRIVERS_LICENCE' for any driver licence/permit (incl. passport-style booklet licences and IDPs), 'PASSPORT' for a passport bio-data page, 'OTHER' for anything that is not a licence or passport.",
+      },
       confidence: {
         type: "number",
         description: "Self-estimated confidence from 0 to 1.",
@@ -317,7 +439,70 @@ const LICENCE_TOOL: Anthropic.Messages.Tool = {
         maximum: 1,
       },
     },
-    required: ["confidence"],
+    required: ["documentType", "confidence"],
+  },
+};
+
+const INFRINGEMENT_SYSTEM = `You are an OCR assistant that reads Australian
+(New South Wales) traffic and parking penalty / infringement notices and
+returns a structured summary. You must always call the "extract_infringement"
+tool exactly once; never respond with free text. If a field is illegible or
+missing, omit it. Set \`confidence\` to your self-estimate (0 = guessing,
+1 = every field crisp).
+
+First classify the image in \`documentType\`:
+- "PENALTY_NOTICE" — a traffic/camera/parking penalty or infringement notice
+  (Revenue NSW, a NSW council, Transport for NSW, etc.).
+- "OTHER" — anything that is not a penalty/infringement notice.
+If \`documentType\` is not "PENALTY_NOTICE", set \`confidence\` to 0 and omit
+every other field.
+
+Field guidance:
+- \`penaltyNoticeNumber\`: the penalty/infringement notice number (the unique
+  reference, not the camera/offence code).
+- \`vehicleRego\`: the vehicle registration plate the notice was issued against.
+- \`issuer\`: the issuing authority as printed (e.g. "Revenue NSW",
+  "City of Sydney", "Transport for NSW").
+- \`offenceCode\` / \`offenceDescription\`: the offence code and its printed
+  description.
+- \`offenceLocation\`: where the offence occurred, as printed.
+- \`offenceDate\`: when the OFFENCE occurred — ISO "YYYY-MM-DD" (include the
+  time only if you cannot separate it). \`issueDate\`: when the NOTICE was
+  issued — ISO "YYYY-MM-DD". These are often different; do not conflate them.
+- \`amount\`: the penalty amount in Australian dollars as a number (e.g. 387).
+- \`demeritPoints\`: the number of demerit points, 0 if none shown.
+- \`type\`: classify the offence — SPEEDING, PARKING, TOLL, RED_LIGHT,
+  MOBILE_PHONE, SEATBELT, UNREGISTERED, or OTHER.`;
+
+const INFRINGEMENT_TOOL: Anthropic.Messages.Tool = {
+  name: "extract_infringement",
+  description: "Report the fields extracted from the penalty/infringement notice image.",
+  input_schema: {
+    type: "object",
+    properties: {
+      penaltyNoticeNumber: { type: "string", description: "Unique penalty/infringement notice number." },
+      vehicleRego: { type: "string", description: "Vehicle registration plate on the notice." },
+      issuer: { type: "string", description: "Issuing authority as printed." },
+      offenceCode: { type: "string", description: "Offence code, as printed." },
+      offenceDescription: { type: "string", description: "Offence description, as printed." },
+      offenceLocation: { type: "string", description: "Location of the offence, as printed." },
+      offenceDate: { type: "string", description: "ISO date YYYY-MM-DD the OFFENCE occurred." },
+      issueDate: { type: "string", description: "ISO date YYYY-MM-DD the NOTICE was issued." },
+      amount: { type: "number", description: "Penalty amount in AUD as a number." },
+      demeritPoints: { type: "number", description: "Demerit points (0 if none)." },
+      type: {
+        type: "string",
+        enum: ["SPEEDING", "PARKING", "TOLL", "RED_LIGHT", "MOBILE_PHONE", "SEATBELT", "UNREGISTERED", "OTHER"],
+        description: "Offence category.",
+      },
+      documentType: {
+        type: "string",
+        enum: ["PENALTY_NOTICE", "OTHER"],
+        description: "Whether the image is a penalty/infringement notice or something else.",
+      },
+      confidence: { type: "number", minimum: 0, maximum: 1, description: "Self-estimated confidence 0-1." },
+    },
+    required: ["documentType", "confidence"],
   },
 };
 
@@ -333,9 +518,15 @@ const PASSPORT_TOOL: Anthropic.Messages.Tool = {
       lastName: { type: "string" },
       dateOfBirth: { type: "string", description: "ISO date YYYY-MM-DD if parseable." },
       expiryDate: { type: "string", description: "ISO expiry YYYY-MM-DD if parseable." },
+      documentType: {
+        type: "string",
+        enum: ["DRIVERS_LICENCE", "PASSPORT", "OTHER"],
+        description:
+          "What kind of identity document the image actually is, by function: 'PASSPORT' for a passport bio-data page, 'DRIVERS_LICENCE' for any driver licence/permit (incl. passport-style booklet licences and IDPs), 'OTHER' for anything that is not a licence or passport.",
+      },
       confidence: { type: "number", minimum: 0, maximum: 1 },
     },
-    required: ["confidence"],
+    required: ["documentType", "confidence"],
   },
 };
 
@@ -549,7 +740,7 @@ export async function extractLicenceData(
     ? { ...opts.log, kind: "LICENCE" }
     : undefined;
   try {
-    const { data: raw, usage } = await runVisionTool({
+    const { data: raw, usage } = await _internal.runVisionTool({
       systemPrompt: LICENCE_SYSTEM,
       tool: LICENCE_TOOL,
       imageBuffer,
@@ -564,9 +755,20 @@ export async function extractLicenceData(
       await maybeLogOcr(logCtx, usage, "ERROR");
       return { confidence: 0 };
     }
+    const documentType = parsed.data.documentType;
+    // Wrong document type — the image is not a driver's licence. Surface the
+    // classification so callers can decide (accept-and-nudge vs reject), but
+    // never pre-fill licence fields from a non-licence image.
+    if (documentType && documentType !== "DRIVERS_LICENCE") {
+      await maybeLogOcr(logCtx, usage, "NO_MATCH");
+      return { documentType, confidence: parsed.data.confidence };
+    }
     if (parsed.data.confidence < MIN_CONFIDENCE) {
       await maybeLogOcr(logCtx, usage, "LOW_CONFIDENCE");
-      return { confidence: parsed.data.confidence };
+      return {
+        ...(documentType ? { documentType } : {}),
+        confidence: parsed.data.confidence,
+      };
     }
     await maybeLogOcr(logCtx, usage, "SUCCESS");
     const dob = parseLooseDate(parsed.data.dateOfBirth);
@@ -587,6 +789,7 @@ export async function extractLicenceData(
       ...(parsed.data.addressState ? { addressState: parsed.data.addressState.toUpperCase() } : {}),
       ...(parsed.data.postcode ? { postcode: parsed.data.postcode } : {}),
       ...(parsed.data.faceBoundingBox ? { faceBoundingBox: parsed.data.faceBoundingBox } : {}),
+      ...(documentType ? { documentType } : {}),
       confidence: parsed.data.confidence,
     };
   } catch {
@@ -606,7 +809,7 @@ export async function extractPassportData(
     ? { ...opts.log, kind: "PASSPORT" }
     : undefined;
   try {
-    const { data: raw, usage } = await runVisionTool({
+    const { data: raw, usage } = await _internal.runVisionTool({
       systemPrompt: PASSPORT_SYSTEM,
       tool: PASSPORT_TOOL,
       imageBuffer,
@@ -621,9 +824,20 @@ export async function extractPassportData(
       await maybeLogOcr(logCtx, usage, "ERROR");
       return { confidence: 0 };
     }
+    const documentType = parsed.data.documentType;
+    // Wrong document type — the image is not a passport. Surface the
+    // classification so callers can decide (accept-and-nudge vs reject), but
+    // never pre-fill passport fields from a non-passport image.
+    if (documentType && documentType !== "PASSPORT") {
+      await maybeLogOcr(logCtx, usage, "NO_MATCH");
+      return { documentType, confidence: parsed.data.confidence };
+    }
     if (parsed.data.confidence < MIN_CONFIDENCE) {
       await maybeLogOcr(logCtx, usage, "LOW_CONFIDENCE");
-      return { confidence: parsed.data.confidence };
+      return {
+        ...(documentType ? { documentType } : {}),
+        confidence: parsed.data.confidence,
+      };
     }
     await maybeLogOcr(logCtx, usage, "SUCCESS");
     const dob = parseLooseDate(parsed.data.dateOfBirth);
@@ -635,6 +849,72 @@ export async function extractPassportData(
       ...(parsed.data.lastName ? { lastName: parsed.data.lastName } : {}),
       ...(dob ? { dateOfBirth: dob } : {}),
       ...(expiry ? { expiryDate: expiry } : {}),
+      ...(documentType ? { documentType } : {}),
+      confidence: parsed.data.confidence,
+    };
+  } catch {
+    return { confidence: 0 };
+  }
+}
+
+/**
+ * Extract fields from a NSW penalty / infringement notice image. Same
+ * contract as `extractLicenceData` — empty object (confidence 0) on any
+ * failure, never throws, results are pre-fill SUGGESTIONS only. Staff must
+ * confirm every field before an Infringement is created (a wrong nomination
+ * to Revenue NSW is a criminal offence).
+ */
+export async function extractInfringementNotice(
+  imageBuffer: Buffer,
+  opts: { model?: string; log?: Omit<OcrLogContext, "kind"> } = {},
+): Promise<ExtractInfringementData> {
+  const logCtx: OcrLogContext | undefined = opts.log
+    ? { ...opts.log, kind: "INFRINGEMENT" }
+    : undefined;
+  try {
+    const { data: raw, usage } = await _internal.runVisionTool({
+      systemPrompt: INFRINGEMENT_SYSTEM,
+      tool: INFRINGEMENT_TOOL,
+      imageBuffer,
+      ...(opts.model !== undefined ? { model: opts.model } : {}),
+    });
+    if (!raw) {
+      await maybeLogOcr(logCtx, usage, "NO_MATCH");
+      return { confidence: 0 };
+    }
+    const parsed = infringementToolSchema.safeParse(raw);
+    if (!parsed.success) {
+      await maybeLogOcr(logCtx, usage, "ERROR");
+      return { confidence: 0 };
+    }
+    const documentType = parsed.data.documentType;
+    if (documentType && documentType !== "PENALTY_NOTICE") {
+      await maybeLogOcr(logCtx, usage, "NO_MATCH");
+      return { documentType, confidence: parsed.data.confidence };
+    }
+    if (parsed.data.confidence < MIN_CONFIDENCE) {
+      await maybeLogOcr(logCtx, usage, "LOW_CONFIDENCE");
+      return {
+        ...(documentType ? { documentType } : {}),
+        confidence: parsed.data.confidence,
+      };
+    }
+    await maybeLogOcr(logCtx, usage, "SUCCESS");
+    const offenceDate = parseLooseDate(parsed.data.offenceDate);
+    const issueDate = parseLooseDate(parsed.data.issueDate);
+    return {
+      ...(parsed.data.penaltyNoticeNumber ? { penaltyNoticeNumber: parsed.data.penaltyNoticeNumber } : {}),
+      ...(parsed.data.vehicleRego ? { vehicleRego: parsed.data.vehicleRego.toUpperCase() } : {}),
+      ...(parsed.data.issuer ? { issuer: parsed.data.issuer } : {}),
+      ...(parsed.data.offenceCode ? { offenceCode: parsed.data.offenceCode } : {}),
+      ...(parsed.data.offenceDescription ? { offenceDescription: parsed.data.offenceDescription } : {}),
+      ...(parsed.data.offenceLocation ? { offenceLocation: parsed.data.offenceLocation } : {}),
+      ...(offenceDate ? { offenceDate } : {}),
+      ...(issueDate ? { issueDate } : {}),
+      ...(typeof parsed.data.amount === "number" ? { amount: parsed.data.amount } : {}),
+      ...(typeof parsed.data.demeritPoints === "number" ? { demeritPoints: parsed.data.demeritPoints } : {}),
+      ...(parsed.data.type ? { type: parsed.data.type } : {}),
+      ...(documentType ? { documentType } : {}),
       confidence: parsed.data.confidence,
     };
   } catch {

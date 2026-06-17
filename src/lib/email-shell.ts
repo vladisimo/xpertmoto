@@ -1,3 +1,5 @@
+import { EMAIL_COLORS, EMAIL_FONT_STACK } from "../../emails/tokens";
+
 /**
  * Produces a mobile-responsive HTML email shell: logo header, optional
  * eyebrow/title, body slot, CTA slot, and footer with policy links.
@@ -11,6 +13,9 @@
  * `notification-sender` render step resolves before dispatch. Keep the
  * shell itself brand-neutral so a single deployment's branding config
  * drives the appearance.
+ *
+ * The colours + font come from `emails/tokens.ts`, shared with the React
+ * Email templates' `_layout.tsx`, so both rendering paths look identical.
  */
 export type ShellOptions = {
   /** Short preview text shown in inbox list. Keep under 100 chars. */
@@ -33,14 +38,14 @@ export type ShellOptions = {
   footerNote?: string;
 };
 
-const PRIMARY = "#1B6B4A";
-const PRIMARY_DARK = "#134E37";
-const TEXT = "#111111";
-const TEXT_MUTED = "#666666";
-const TEXT_SUBTLE = "#888888";
-const BG = "#F4F4F1";
-const SURFACE = "#FFFFFF";
-const BORDER = "#E5E5E2";
+const PRIMARY = EMAIL_COLORS.primary;
+const PRIMARY_DARK = EMAIL_COLORS.primaryDark;
+const TEXT = EMAIL_COLORS.textPrimary;
+const TEXT_MUTED = EMAIL_COLORS.textMuted;
+const TEXT_SUBTLE = EMAIL_COLORS.textSubtle;
+const BG = EMAIL_COLORS.background;
+const SURFACE = EMAIL_COLORS.surface;
+const BORDER = EMAIL_COLORS.border;
 
 export function renderEmailShell(opts: ShellOptions): string {
   const eyebrow = opts.eyebrow
@@ -102,7 +107,7 @@ export function renderEmailShell(opts: ShellOptions): string {
     }
   </style>
 </head>
-<body class="email-body" style="margin:0;padding:0;background:${BG};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Rubik,Helvetica,Arial,sans-serif;color:${TEXT};">
+<body class="email-body" style="margin:0;padding:0;background:${BG};font-family:${EMAIL_FONT_STACK};color:${TEXT};">
   ${preheader}
   <table role="presentation" class="outer" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:${BG};padding:24px 16px;">
     <tr><td align="center">
@@ -149,11 +154,27 @@ export function renderEmailShell(opts: ShellOptions): string {
 }
 
 /**
+ * Escape a plain-text string for safe interpolation into HTML. Use this
+ * before slotting an untrusted/plain body (e.g. a notification `body` that
+ * may contain `<`, `&`, or a customer-supplied name) into the shell, since
+ * `paragraphs()` does NOT escape. Mirrors the escaping `renderTemplate`
+ * applies to `{{double-brace}}` values so both paths are consistent.
+ */
+export function escapeText(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
  * Convenience helper: turn `\n\n` into paragraph separators so existing
  * plain-text bodies can be slotted into the shell without hand-wrapping
  * every paragraph in `<p>`. NOT HTML-escaping — it assumes the source is
- * trusted template author HTML. Blank lines between text blocks become
- * `</p><p>` boundaries.
+ * trusted template author HTML (escape plain bodies with `escapeText()`
+ * first). Blank lines between text blocks become `</p><p>` boundaries.
  */
 export function paragraphs(text: string): string {
   return text

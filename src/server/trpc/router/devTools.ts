@@ -4,9 +4,10 @@ import { createTRPCRouter, superAdminProcedure } from "../trpc";
 import { generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
 import { runOverdueCheck } from "@/server/jobs/overdue-check";
 import {
-  type EtollTripRow,
+  type LinktTripRow,
   upsertInfringementFromRow,
-} from "@/server/services/etoll";
+} from "@/server/services/linkt";
+import { findBookingForVehicleAt } from "@/server/services/booking-matcher";
 
 const TEST_TOLL_ACCOUNT_NAME = "Test injections";
 
@@ -34,37 +35,9 @@ async function resolveActiveBooking(
   vehicleId: string,
   at: Date,
 ): Promise<ResolvedBooking> {
-  const booking = await prisma.booking.findFirst({
-    where: {
-      vehicleId,
-      status: { in: ["CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED", "COMPLETED"] },
-      AND: [
-        {
-          OR: [
-            { actualPickupDateTime: { lte: at } },
-            { actualPickupDateTime: null, pickupDateTime: { lte: at } },
-          ],
-        },
-        {
-          OR: [
-            { actualReturnDateTime: null },
-            { actualReturnDateTime: { gte: at } },
-          ],
-        },
-      ],
-    },
-    orderBy: { pickupDateTime: "desc" },
-    select: {
-      id: true,
-      bookingReference: true,
-      customerId: true,
-      status: true,
-      pickupDateTime: true,
-      returnDateTime: true,
-      customer: { select: { firstName: true, lastName: true, email: true } },
-    },
-  });
-  return booking;
+  // Delegates to the shared matcher (booking-matcher.ts) so the test-injection
+  // preview and the production toll/infringement attribution stay in lock-step.
+  return findBookingForVehicleAt(prisma, vehicleId, at);
 }
 
 export const devToolsRouter = createTRPCRouter({
@@ -111,7 +84,7 @@ export const devToolsRouter = createTRPCRouter({
         vehicleId: z.string().min(1),
         eventAt: z.coerce.date(),
         amountCents: z.number().int().min(1),
-        gantryCode: z.string().optional(),
+        tollpoint: z.string().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -124,11 +97,11 @@ export const devToolsRouter = createTRPCRouter({
 
       // Reuse an existing account if present, else make a dedicated test one
       // so real accounts aren't polluted with fake rows.
-      let account = await ctx.prisma.etollAccount.findFirst({
+      let account = await ctx.prisma.linktAccount.findFirst({
         where: { name: TEST_TOLL_ACCOUNT_NAME },
       });
       if (!account) {
-        account = await ctx.prisma.etollAccount.create({
+        account = await ctx.prisma.linktAccount.create({
           data: {
             name: TEST_TOLL_ACCOUNT_NAME,
             username: "test@xpertmoto.local",
@@ -141,12 +114,11 @@ export const devToolsRouter = createTRPCRouter({
       }
 
       const externalHash = `test-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const row: EtollTripRow = {
+      const row: LinktTripRow = {
         externalHash,
         eventAt: input.eventAt,
-        rego: vehicle.rego,
-        gantryCode: input.gantryCode ?? "TEST",
-        concession: "TEST",
+        plate: vehicle.rego,
+        tollpoint: input.tollpoint ?? "TEST",
         amountCents: input.amountCents,
         rawDetails: "Injected by test-data panel",
       };

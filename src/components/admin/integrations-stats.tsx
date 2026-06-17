@@ -25,7 +25,6 @@ export function computeIntegrationsLevels(overview: any): IntegrationSpec[] {
   pair("twilio", "Twilio", overview.twilio.configured, overview.twilio.statusCallbackConfigured);
   pair("resend", "Resend", overview.resend.configured, overview.resend.webhookConfigured);
   pair("xero", "Xero", overview.xero.configured, overview.xero.connected);
-  pair("etoll", "E-Toll", overview.etoll.configured);
   pair("linkt", "Linkt", overview.linkt.configured);
   pair("push", "Web Push", overview.push.vapidConfigured, overview.push.browserKeyConfigured);
   pair("telemetry", "Telemetry", overview.telemetry.ingestConfigured);
@@ -65,7 +64,7 @@ function ConfiguredCard({
   overview?: any;
   loading?: boolean;
 }) {
-  const lastSync = overview?.etoll?.lastSyncAt ? new Date(overview.etoll.lastSyncAt) : null;
+  const lastSync = overview?.linkt?.lastSyncAt ? new Date(overview.linkt.lastSyncAt) : null;
   return (
     <StatShell title="Integrations configured" icon={<Plug className="h-4 w-4" aria-hidden />}>
       {loading || !overview ? (
@@ -77,8 +76,8 @@ function ConfiguredCard({
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {lastSync
-              ? `E-toll last sync ${lastSync.toLocaleString("en-AU")}`
-              : "E-toll not synced yet"}
+              ? `Linkt last sync ${lastSync.toLocaleString("en-AU")}`
+              : "Linkt not synced yet"}
           </div>
         </>
       )}

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 import { OAUTH_PROVIDER_IDS, getEnabledOAuthProviders } from "@/lib/auth-providers";
@@ -5,6 +6,12 @@ import { auth } from "@/lib/auth";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
 import { LoginForm } from "./login-form";
 import { LoginImageCarousel } from "./login-image-carousel";
+
+// M-11: per-page title (composed via the root template) + unique description.
+export const metadata: Metadata = {
+  title: "Sign in",
+  description: "Sign in to manage your bookings, complete a hire, or access your account.",
+};
 
 export default async function LoginPage({
   searchParams,
@@ -52,6 +59,9 @@ export default async function LoginPage({
       </aside>
 
       <main className="flex items-center justify-center p-6 sm:p-10 md:p-12">
+        {/* M-9/M-11: every page needs exactly one <h1>. The visible UI leads
+         *  with the logo + form, so the page heading is screen-reader-only. */}
+        <h1 className="sr-only">Sign in</h1>
         <LoginForm
           allProviders={[...OAUTH_PROVIDER_IDS]}
           enabledProviders={enabledProviders}

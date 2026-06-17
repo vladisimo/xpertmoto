@@ -41,6 +41,7 @@ import {
   confirmBookingPayment,
   sendBookingConfirmationNotification,
   PaymentNotSucceededError,
+  PaymentIntentInvalidError,
   BondNotHeldError,
   BookingNotConfirmableError,
 } from "../../../src/server/services/booking-confirmation";
@@ -220,6 +221,40 @@ describe("confirmBookingPayment — guards", () => {
         source: "checkout",
       }),
     ).rejects.toBeInstanceOf(BondNotHeldError);
+  });
+
+  it("maps a forged/invalid PaymentIntent id to a clean client error, not a 500 (R2-L9)", async () => {
+    // Stripe throws StripeInvalidRequestError ("No such payment_intent") for a
+    // forged id. That must become a typed client error (→ 400), not bubble up.
+    retrievePaymentIntentMock.mockRejectedValue(
+      Object.assign(new Error("No such payment_intent: pi_forged"), {
+        type: "StripeInvalidRequestError",
+      }),
+    );
+    const { prisma } = makeMockPrisma(makeBooking());
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_forged",
+        source: "checkout",
+      }),
+    ).rejects.toBeInstanceOf(PaymentIntentInvalidError);
+  });
+
+  it("lets a genuine Stripe outage bubble up unchanged (stays a retryable 500)", async () => {
+    retrievePaymentIntentMock.mockRejectedValue(
+      Object.assign(new Error("connection error"), { type: "StripeConnectionError" }),
+    );
+    const { prisma } = makeMockPrisma(makeBooking());
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_1",
+        source: "checkout",
+      }),
+    ).rejects.not.toBeInstanceOf(PaymentIntentInvalidError);
   });
 
   it("rejects a CANCELLED booking as not confirmable", async () => {

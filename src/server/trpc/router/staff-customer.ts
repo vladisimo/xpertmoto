@@ -27,6 +27,7 @@ import {
   extractPassportData,
   type DetectedLicenceMetadata,
   type DetectedPassportMetadata,
+  type DocumentClassification,
 } from "@/server/services/document-extract";
 import {
   computeCustomerRewards,
@@ -64,6 +65,23 @@ const PENDING_HIRE_STATUSES: Prisma.BookingWhereInput["status"] = {
 
 function isProjectableIdentityType(type: string): type is ProjectableIdentityType {
   return (PROJECTABLE_IDENTITY_TYPES as readonly string[]).includes(type);
+}
+
+/**
+ * Staff-facing message when the detector classifies a document as a different
+ * type than the slot it was filed under. `expected` is the family the
+ * document's `type` belongs to; `detected` is what Claude actually saw.
+ */
+function documentMismatchMessage(
+  expected: "DRIVERS_LICENCE" | "PASSPORT",
+  detected: DocumentClassification,
+): string {
+  const expectedLabel = expected === "PASSPORT" ? "a passport" : "a driver's licence";
+  if (detected === "OTHER") {
+    return `This image doesn't look like ${expectedLabel} — it doesn't appear to be an identity document. Re-check the file or its document type.`;
+  }
+  const detectedLabel = detected === "PASSPORT" ? "a passport" : "a driver's licence";
+  return `This looks like ${detectedLabel}, not ${expectedLabel}. Re-file it under the correct document type.`;
 }
 
 // Decimal fields can't cross the Server→Client Component boundary via
@@ -1128,6 +1146,14 @@ export const staffCustomerRouter = createTRPCRouter({
             triggeredById: ctx.user.id,
           },
         });
+        // Wrong-type guard runs before the readability check so a clearly
+        // legible but mis-filed document yields the accurate message.
+        if (detection.documentType && detection.documentType !== "PASSPORT") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: documentMismatchMessage("PASSPORT", detection.documentType),
+          });
+        }
         if (detection.confidence === 0) {
           throw new TRPCError({
             code: "UNPROCESSABLE_CONTENT",
@@ -1140,6 +1166,7 @@ export const staffCustomerRouter = createTRPCRouter({
           detectedAt: new Date().toISOString(),
           detectedById: ctx.user.id,
           confidence: detection.confidence,
+          ...(detection.documentType ? { documentType: detection.documentType } : {}),
           ...(detection.passportNumber ? { passportNumber: detection.passportNumber } : {}),
           ...(detection.country ? { country: detection.country } : {}),
           ...(detection.firstName ? { firstName: detection.firstName } : {}),
@@ -1223,6 +1250,16 @@ export const staffCustomerRouter = createTRPCRouter({
         },
       });
 
+      // Wrong-type guard runs before the readability check so a clearly
+      // legible but mis-filed document yields the accurate message. The
+      // licence branch also serves PASSPORT_STYLE_DL, which the detector
+      // classifies as DRIVERS_LICENCE (classification is by function).
+      if (detection.documentType && detection.documentType !== "DRIVERS_LICENCE") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: documentMismatchMessage("DRIVERS_LICENCE", detection.documentType),
+        });
+      }
       if (detection.confidence === 0) {
         throw new TRPCError({
           code: "UNPROCESSABLE_CONTENT",
@@ -1258,6 +1295,7 @@ export const staffCustomerRouter = createTRPCRouter({
         detectedAt: new Date().toISOString(),
         detectedById: ctx.user.id,
         confidence: detection.confidence,
+        ...(detection.documentType ? { documentType: detection.documentType } : {}),
         ...(detection.licenceNumber ? { licenceNumber: detection.licenceNumber } : {}),
         ...(detection.state ? { state: detection.state } : {}),
         ...(detection.firstName ? { firstName: detection.firstName } : {}),

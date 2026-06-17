@@ -23,6 +23,15 @@ export function StepIdentity() {
     setLicenceOcr({ kind: "running" });
     try {
       const result = await extractLicence.mutateAsync({ imageKey });
+      // Reject a genuine non-ID image: clear the slot so it isn't carried to
+      // submit. A passport (the other valid ID) is left in place but won't
+      // pre-fill — the extractor returns no cross-type fields.
+      if (result.documentType === "OTHER") {
+        form.setValue("licenceImageFront", "", { shouldDirty: true });
+        setLicenceFields(null);
+        setLicenceOcr({ kind: "failed", message: "Not a driver's licence" });
+        return;
+      }
       const populated = applyLicencePrefill(form, result);
       setLicenceFields({
         "Licence #": result.licenceNumber,
@@ -48,6 +57,15 @@ export function StepIdentity() {
     setPassportOcr({ kind: "running" });
     try {
       const result = await extractPassport.mutateAsync({ imageKey });
+      // Reject a genuine non-ID image: clear the slot so it isn't carried to
+      // submit. A licence (the other valid ID) is left in place but won't
+      // pre-fill — the extractor returns no cross-type fields.
+      if (result.documentType === "OTHER") {
+        form.setValue("passportImage", "", { shouldDirty: true });
+        setPassportFields(null);
+        setPassportOcr({ kind: "failed", message: "Not a passport" });
+        return;
+      }
       const populated = applyPassportPrefill(form, result);
       setPassportFields({
         "Passport #": result.passportNumber,

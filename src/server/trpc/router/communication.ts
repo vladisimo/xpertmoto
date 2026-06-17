@@ -16,6 +16,7 @@ import {
   evaluateSegment,
 } from "@/server/services/segment-evaluator";
 import { skipAutoAudit, writeAuditAsync } from "@/server/services/audit";
+import { listCodeTemplates } from "@/server/services/email-code-templates";
 
 import {
   adminProcedure,
@@ -308,6 +309,11 @@ export const communicationRouter = createTRPCRouter({
         orderBy: [{ category: "asc" }, { name: "asc" }],
       }),
     ),
+
+  // Code-defined React Email templates (emails/*.tsx). These have no DB row
+  // — they're rendered in code at send time — so they're listed separately
+  // and surfaced read-only in the templates catalogue.
+  codeTemplateList: staffProcedure.query(() => listCodeTemplates()),
 
   templateGet: staffProcedure
     .input(z.object({ id: z.string().optional(), type: notificationTypeEnum.optional() }))

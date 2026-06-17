@@ -34,6 +34,44 @@ export class BondNotHeldError extends Error {
   }
 }
 
+/**
+ * The PaymentIntent id could not be retrieved from Stripe — an invalid or
+ * forged reference (Stripe `resource_missing`). Distinct from
+ * PaymentNotSucceededError (the PI exists but isn't `succeeded`). Callers map
+ * this to a 400 so a bad/forged id surfaces as a clean client error rather
+ * than a 500 (R2-L9).
+ */
+export class PaymentIntentInvalidError extends Error {
+  constructor(public readonly paymentIntentId: string) {
+    super("The payment reference is invalid. Please retry the payment.");
+    this.name = "PaymentIntentInvalidError";
+  }
+}
+
+/** A Stripe `StripeInvalidRequestError` means the id was malformed or doesn't
+ *  exist (a client/forged error) — not an outage. Outages (connection, auth,
+ *  rate-limit) keep their original error so they remain a retryable 500. */
+function isInvalidStripeRequest(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    (err as { type?: string }).type === "StripeInvalidRequestError"
+  );
+}
+
+/** Retrieve a PaymentIntent, converting a forged/invalid id into a typed
+ *  client error instead of letting the raw Stripe throw become a 500. */
+async function retrievePaymentIntentOrThrow(paymentIntentId: string) {
+  try {
+    return await retrievePaymentIntent(paymentIntentId);
+  } catch (err) {
+    if (isInvalidStripeRequest(err)) {
+      throw new PaymentIntentInvalidError(paymentIntentId);
+    }
+    throw err;
+  }
+}
+
 /** Booking is in a state that can never be confirmed (e.g. CANCELLED). */
 export class BookingNotConfirmableError extends Error {
   constructor(public readonly bookingStatus: string) {
@@ -114,13 +152,13 @@ export async function confirmBookingPayment(
   // retrievePaymentIntent returns null and we skip this check so local
   // dev still works.
   if (args.paymentIntentId) {
-    const pi = await retrievePaymentIntent(args.paymentIntentId);
+    const pi = await retrievePaymentIntentOrThrow(args.paymentIntentId);
     if (pi && pi.status !== "succeeded") {
       throw new PaymentNotSucceededError(pi.status);
     }
   }
   if (args.bondPaymentIntentId) {
-    const bondPi = await retrievePaymentIntent(args.bondPaymentIntentId);
+    const bondPi = await retrievePaymentIntentOrThrow(args.bondPaymentIntentId);
     if (bondPi && bondPi.status !== "requires_capture") {
       throw new BondNotHeldError(bondPi.status);
     }

@@ -178,6 +178,115 @@ export async function applyInfringementRecoveryCharge(args: {
 }
 
 /**
+ * Nominate-only counterpart of {@link applyInfringementRecoveryCharge}.
+ *
+ * For demerit-point offences the driver is formally nominated to Revenue
+ * NSW, who then reissue the fine (and the points) to the renter directly —
+ * so XPERT Moto must NOT recover the fine amount from the renter. We only
+ * charge our flat administration/handling fee. This avoids the recovery
+ * helper's mandatory "Issuer fine" line and its non-positive-total throw
+ * (which would fire when the issuer amount is excluded).
+ *
+ * Same `INFR-${referenceNumber}` idempotency key and balanceDue invariant as
+ * the recovery path, so the two paths can never double-charge the same
+ * infringement.
+ */
+export async function applyAdminFeeOnlyCharge(args: {
+  prisma: PrismaClient;
+  infringement: Omit<InfringementChargeInput, "amount">;
+  performedById?: string | null;
+  notes?: string;
+}): Promise<InfringementChargeResult> {
+  const { prisma, infringement: inf } = args;
+
+  if (!inf.customerId) {
+    throw new Error(
+      `applyAdminFeeOnlyCharge: infringement ${inf.id} has no customerId`,
+    );
+  }
+
+  const adminFee = round2(toAud(inf.adminFee));
+  if (adminFee <= 0) {
+    throw new Error(
+      `applyAdminFeeOnlyCharge: infringement ${inf.id} has non-positive admin fee (${adminFee})`,
+    );
+  }
+
+  const reference = `INFR-${inf.referenceNumber}`;
+
+  const existing = await prisma.payment.findUnique({
+    where: { reference },
+    select: { id: true },
+  });
+  if (existing) {
+    return { paymentId: existing.id, alreadyExisted: true, amount: adminFee };
+  }
+
+  const defaultNotes =
+    `Nomination handling fee — ${inf.type} ${inf.referenceNumber}. ` +
+    `Issuer fine reissued to the nominated driver by Revenue NSW.`;
+
+  const payment = await prisma.$transaction(async (tx) => {
+    const created = await tx.payment.create({
+      data: {
+        reference,
+        bookingId: inf.bookingId,
+        customerId: inf.customerId,
+        type: "INFRINGEMENT_RECOVERY",
+        method: "STRIPE",
+        amount: adminFee,
+        status: "PENDING",
+        notes: args.notes ?? defaultNotes,
+        processedById: args.performedById ?? null,
+      },
+      select: { id: true },
+    });
+    if (inf.bookingId) {
+      const booking = await tx.booking.findUnique({
+        where: { id: inf.bookingId },
+        select: { balanceDue: true },
+      });
+      if (booking) {
+        await tx.booking.update({
+          where: { id: inf.bookingId },
+          data: { balanceDue: round2(toAud(booking.balanceDue) + adminFee) },
+        });
+      }
+    }
+    return created;
+  });
+
+  if (inf.bookingId) {
+    try {
+      await tryIssueAdjustmentForBooking({
+        bookingId: inf.bookingId,
+        type: "INCREASE",
+        reason: "INFRINGEMENT",
+        description: `Nomination handling fee — ${inf.type} ${inf.referenceNumber}`,
+        lineItems: [
+          {
+            description: "Administration fee — driver nomination",
+            quantity: 1,
+            unitPrice: adminFee,
+            totalPrice: adminFee,
+            gstIncluded: true,
+          },
+        ],
+        paymentId: payment.id,
+        issuedById: args.performedById ?? null,
+      });
+    } catch (err) {
+      logger.warn(
+        { err, infringementId: inf.id, paymentId: payment.id },
+        "applyAdminFeeOnlyCharge: AdjustmentNote issuance failed (non-blocking)",
+      );
+    }
+  }
+
+  return { paymentId: payment.id, alreadyExisted: false, amount: adminFee };
+}
+
+/**
  * Reverse-side of {@link applyInfringementRecoveryCharge}: when an
  * `INFRINGEMENT_RECOVERY` Payment is voided, the infringement should
  * step back to `NOMINATED` so it shows up correctly on the staff Tolls

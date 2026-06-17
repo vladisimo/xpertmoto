@@ -10,7 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # TimescaleDB drop-in (auto-enables timescaledb in shared_preload_libraries
+        # on init) so `CREATE EXTENSION timescaledb` in migrations succeeds in CI.
+        image: timescale/timescaledb:latest-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -69,7 +71,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # TimescaleDB drop-in (auto-enables timescaledb in shared_preload_libraries
+        # on init) so `CREATE EXTENSION timescaledb` in migrations succeeds in CI.
+        image: timescale/timescaledb:latest-pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

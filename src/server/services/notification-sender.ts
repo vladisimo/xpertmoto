@@ -7,6 +7,7 @@ import type {
 } from "@prisma/client";
 
 import { htmlToText, sendEmail, type EmailAttachment } from "@/lib/email";
+import { escapeText, paragraphs, renderEmailShell } from "@/lib/email-shell";
 import { getEmailBrandingVars } from "@/lib/email-branding-vars";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
@@ -282,9 +283,27 @@ export async function sendNotification(
   const renderedSubject = renderTemplate(input.subject ?? "", vars, "PLAIN_TEXT");
   const renderedTitle = renderTemplate(input.title ?? "", vars, "PLAIN_TEXT");
   const renderedBody = renderTemplate(input.body, vars, "PLAIN_TEXT");
+  // When the caller supplied authored HTML, render it as-is (existing
+  // behaviour — campaign/composeSend baked HTML). Otherwise, if EMAIL is a
+  // requested channel, wrap the plain body in the shared branded shell so
+  // every email — not just template-driven ones — carries the logo header,
+  // policy footer and mobile/dark layout. SMS/PUSH/IN_APP keep using the
+  // plain `renderedBody` untouched (the shell is EMAIL-only). The body is
+  // escaped before wrapping since `paragraphs()` does not escape.
+  const wantsEmail = input.channels.includes("EMAIL");
+  const shellHtml =
+    !input.html && wantsEmail
+      ? renderEmailShell({
+          preheader: renderedSubject || renderedTitle || undefined,
+          title: renderedTitle || renderedSubject || undefined,
+          body: paragraphs(escapeText(renderedBody)),
+        })
+      : undefined;
   const renderedHtml = input.html
     ? renderTemplate(input.html, vars, "HTML")
-    : undefined;
+    : shellHtml
+      ? renderTemplate(shellHtml, vars, "HTML")
+      : undefined;
   // Overlay the rendered strings onto the input so downstream log /
   // notification writes capture what was actually sent, not the template.
   const loggedInput: SendNotificationInput = {

@@ -3491,8 +3491,6 @@ export const adminRouter = createTRPCRouter({
       pushDelivered24h,
       telemetryCount24h,
       telemetryDevices,
-      etollAccountCount,
-      etollLastSync,
       linktAccountCount,
       linktLastSync,
       notificationsSent,
@@ -3509,8 +3507,6 @@ export const adminRouter = createTRPCRouter({
         by: ["deviceId"],
         where: { createdAt: { gte: weekAgo } },
       }),
-      ctx.prisma.etollAccount.count({ where: { isActive: true } }),
-      ctx.prisma.etollSync.findFirst({ orderBy: { startedAt: "desc" } }),
       ctx.prisma.linktAccount.count({ where: { isActive: true } }),
       ctx.prisma.linktSync.findFirst({ orderBy: { startedAt: "desc" } }),
       ctx.prisma.notification.count({ where: { createdAt: { gte: weekAgo }, status: "SENT" } }),
@@ -3553,12 +3549,6 @@ export const adminRouter = createTRPCRouter({
       },
       regoCheck: {
         configured: true,
-      },
-      etoll: {
-        configured: etollAccountCount > 0,
-        accountCount: etollAccountCount,
-        lastSyncAt: etollLastSync?.startedAt ?? null,
-        lastSyncStatus: etollLastSync?.status ?? null,
       },
       linkt: {
         configured: linktAccountCount > 0,

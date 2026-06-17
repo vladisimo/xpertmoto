@@ -22,8 +22,7 @@ test("admin uploads a Linkt CSV export and rows land in the unmatched queue", as
 
   // One account per run — unique name so repeats don't collide.
   const accountName = `E2E Linkt ${Date.now().toString(36)}`;
-  // Both Linkt and eToll render add-account forms on this tab — scope
-  // everything to the Linkt (Transurban) section.
+  // Scope everything to the Linkt (Transurban) section.
   const linkt = page.locator("section").filter({ hasText: "Linkt (Transurban)" });
   await expect(linkt.getByText("Add account").first()).toBeVisible({ timeout: 15_000 });
   await linkt.getByPlaceholder(/account label/i).fill(accountName);

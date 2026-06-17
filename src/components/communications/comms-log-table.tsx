@@ -29,7 +29,13 @@ const CHANNEL_ICON: Record<CommsLogRow["channel"], typeof Mail> = {
   PUSH: Smartphone,
 };
 
-export function CommsLogTable({ data }: { data: CommsLogRow[] }) {
+export function CommsLogTable({
+  data,
+  isLoading,
+}: {
+  data: CommsLogRow[] | undefined;
+  isLoading?: boolean;
+}) {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   const columns: DataTableColumn<CommsLogRow>[] = [
@@ -118,9 +124,14 @@ export function CommsLogTable({ data }: { data: CommsLogRow[] }) {
       <DataTable<CommsLogRow>
         columns={columns}
         data={data}
+        isLoading={isLoading}
         getRowId={(r) => r.id}
         onRowClick={(r) => setSelectedId(r.id)}
         empty="No communications match these filters."
+        fillHeight
+        pageSize={25}
+        pageSizeOptions={[25, 50, 100]}
+        paginationEmptyLabel="No communications"
       />
       <CommsLogDetailDrawer
         id={selectedId}

@@ -8,7 +8,7 @@ import { TRPCError } from "@trpc/server";
 const { upsertInfringementFromRow } = vi.hoisted(() => ({
   upsertInfringementFromRow: vi.fn(),
 }));
-vi.mock("@/server/services/etoll", () => ({
+vi.mock("@/server/services/linkt", () => ({
   upsertInfringementFromRow,
 }));
 
@@ -56,7 +56,7 @@ describe("devTools.injectToll", () => {
         vehicle: {
           findUniqueOrThrow: vi.fn().mockResolvedValue({ rego: "ESG40" }),
         },
-        etollAccount: {
+        linktAccount: {
           findFirst: vi.fn().mockResolvedValue(opts.account),
           create: vi.fn().mockResolvedValue(TEST_ACCOUNT),
         },
@@ -67,7 +67,7 @@ describe("devTools.injectToll", () => {
     };
   }
 
-  test("forwards an EtollTripRow to the production matching pipeline", async () => {
+  test("forwards a LinktTripRow to the production matching pipeline", async () => {
     upsertInfringementFromRow.mockResolvedValueOnce("created");
     const ctx = makeCtx({ account: TEST_ACCOUNT });
     const c = devToolsRouter.createCaller(ctx as never);
@@ -77,16 +77,15 @@ describe("devTools.injectToll", () => {
       vehicleId: "veh_esg40",
       eventAt,
       amountCents: 450,
-      gantryCode: "M4-EAST",
+      tollpoint: "M4-EAST",
     });
 
     expect(upsertInfringementFromRow).toHaveBeenCalledTimes(1);
     const [, row, account] = upsertInfringementFromRow.mock.calls[0]!;
     expect(row).toMatchObject({
       eventAt,
-      rego: "ESG40",
-      gantryCode: "M4-EAST",
-      concession: "TEST",
+      plate: "ESG40",
+      tollpoint: "M4-EAST",
       amountCents: 450,
       rawDetails: "Injected by test-data panel",
     });
@@ -94,7 +93,7 @@ describe("devTools.injectToll", () => {
     expect(row.externalHash).toMatch(/^test-/);
     expect(account).toBe(TEST_ACCOUNT);
     expect(out).toEqual({ result: "created", externalHash: row.externalHash });
-    expect(ctx.prisma.etollAccount.create).not.toHaveBeenCalled();
+    expect(ctx.prisma.linktAccount.create).not.toHaveBeenCalled();
   });
 
   test("creates the dedicated test account on first use", async () => {
@@ -108,7 +107,7 @@ describe("devTools.injectToll", () => {
       amountCents: 450,
     });
 
-    expect(ctx.prisma.etollAccount.create).toHaveBeenCalledWith(
+    expect(ctx.prisma.linktAccount.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           name: "Test injections",
@@ -116,9 +115,9 @@ describe("devTools.injectToll", () => {
         }),
       }),
     );
-    // gantryCode defaults to "TEST" so unmatched rows still display a value.
+    // tollpoint defaults to "TEST" so unmatched rows still display a value.
     const [, row] = upsertInfringementFromRow.mock.calls[0]!;
-    expect(row.gantryCode).toBe("TEST");
+    expect(row.tollpoint).toBe("TEST");
     expect(out.result).toBe("unmatched");
   });
 });

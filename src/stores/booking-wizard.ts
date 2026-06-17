@@ -9,6 +9,68 @@ export type WizardStep = 1 | 2 | 3 | 4 | 5 | 6;
 export type WizardAddon = { addonId: string; quantity: number };
 
 /**
+ * H-4: a draft created at step 6 (a PENDING_PAYMENT booking + its Stripe
+ * PaymentIntents). Persisted so a refresh / back-forward on the payment step
+ * reuses the same booking + intents instead of firing `booking.create` again
+ * and orphaning another "Pending payment" row. Reused only while the cart is
+ * unchanged (`signature`) and the intents are still alive (`expiresAt`, kept
+ * just under Stripe's 24h PaymentIntent lifetime). Cleared on completion via
+ * `flushBookingWizard()` / `reset()`.
+ */
+export type WizardDraft = {
+  signature: string;
+  expiresAt: number;
+  bookingId: string;
+  bookingReference: string;
+  paymentClientSecret: string | null;
+  paymentIntentId: string | null;
+  bondClientSecret: string | null;
+  bondIntentId: string | null;
+  stripeEnabled: boolean;
+  payOnlineAmount: number;
+  bondAmount: number;
+};
+
+/** Stripe PaymentIntents live ~24h; reuse a draft for a touch less. */
+export const DRAFT_TTL_MS = 23 * 60 * 60 * 1000;
+
+/**
+ * Stable signature of the pricing-relevant cart fields — the exact inputs
+ * `booking.create` consumes. A persisted draft is only reused when this
+ * matches the current cart; any change (dates, category, addons, insurance,
+ * discount, delivery) invalidates it and forces a fresh draft.
+ */
+export function bookingCartSignature(state: {
+  categoryId: string | null;
+  pickupDepotId: string | null;
+  returnDepotId: string | null;
+  pickupDateTime: string | null;
+  returnDateTime: string | null;
+  addons: WizardAddon[];
+  insuranceOptionId: string | null;
+  discountCode: string;
+  isDelivery: boolean;
+  deliveryFee: number;
+}): string {
+  const addons = [...state.addons]
+    .map((a) => `${a.addonId}:${a.quantity}`)
+    .sort()
+    .join(",");
+  return [
+    state.categoryId ?? "",
+    state.pickupDepotId ?? "",
+    state.returnDepotId ?? "",
+    state.pickupDateTime ?? "",
+    state.returnDateTime ?? "",
+    addons,
+    state.insuranceOptionId ?? "",
+    state.discountCode ?? "",
+    state.isDelivery ? "1" : "0",
+    String(state.deliveryFee ?? 0),
+  ].join("|");
+}
+
+/**
  * Primary "Continue" CTA registered by whichever step is mounted. The
  * mobile shell reads this slice and renders the button in its sticky
  * bottom bar; the desktop shell ignores it because steps render their
@@ -80,6 +142,11 @@ export type WizardState = {
   agreedToTerms: boolean;
   signatureDataUrl: string | null;
   /**
+   * H-4: the step-6 payment draft (booking + Stripe intents), reused across
+   * remounts for an unchanged cart. Persisted; cleared on completion.
+   */
+  draft: WizardDraft | null;
+  /**
    * Registered at mount by the active step; cleared on unmount. Never
    * persisted — belongs in-memory only (functions can't serialise).
    */
@@ -100,6 +167,7 @@ export type WizardState = {
   waiveAddon: (addonId: string) => void;
   unwaiveAddon: (addonId: string) => void;
   setStepContinueAction: (action: WizardContinueAction | null) => void;
+  setDraft: (draft: WizardDraft | null) => void;
   reset: () => void;
 };
 
@@ -255,6 +323,7 @@ export const useBookingWizard = create<WizardState>()(
       identityPath: null,
       agreedToTerms: false,
       signatureDataUrl: null,
+      draft: null,
       stepContinueAction: null,
 
       setStep: (step) => {
@@ -290,6 +359,7 @@ export const useBookingWizard = create<WizardState>()(
         });
       },
       setStepContinueAction: (action) => set({ stepContinueAction: action }),
+      setDraft: (draft) => set({ draft }),
       reset: () =>
         set({
           step: 1,
@@ -311,6 +381,7 @@ export const useBookingWizard = create<WizardState>()(
           identityPath: null,
           agreedToTerms: false,
           signatureDataUrl: null,
+          draft: null,
           stepContinueAction: null,
         }),
     }),

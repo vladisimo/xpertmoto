@@ -116,7 +116,7 @@ export const PageShell = React.forwardRef<HTMLDivElement, PageShellProps>(
     <div
       ref={ref}
       className={cn(
-        "mx-auto w-full max-w-screen-2xl p-3 sm:p-6 lg:p-8",
+        "w-full max-w-screen-2xl p-3 sm:p-6 lg:p-8",
         full
           ? "flex h-full flex-col gap-4 sm:gap-6 overflow-hidden"
           : "space-y-5 sm:space-y-6 lg:space-y-8",

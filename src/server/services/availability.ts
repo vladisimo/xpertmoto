@@ -143,6 +143,11 @@ export async function listAvailableVehicles(
     include: {
       category: true,
       depot: true,
+      // M-6: per-unit engine capacity for the booking card. The category's
+      // engineCapacity is coarse (every unit in a category shares it), so the
+      // card prefers the linked catalogue model's cc and hides the field when
+      // unavailable rather than showing a misleading shared figure.
+      catalogueModel: { select: { engineCapacityCc: true } },
       images: { where: { isPrimary: true }, take: 1 },
     },
     orderBy: [{ depotId: "asc" }, { currentOdometerKm: "asc" }],

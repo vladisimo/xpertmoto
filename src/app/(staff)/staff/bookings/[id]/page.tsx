@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -23,9 +24,10 @@ import { BondAgeBanner } from "@/components/staff/bond-age-banner";
 import { BookingDocumentsSection } from "@/components/booking/booking-documents-section";
 import { DisputePanel } from "@/components/staff/dispute-panel";
 import { DocumentViewerButton } from "@/components/shared/document-viewer-dialog";
+import { BookingTripPanel } from "@/components/staff/booking-trip-panel";
 import type { StatusKey } from "@/components/ui/status-badge";
 
-const VALID_TABS = ["overview", "payments", "agreements", "activity", "notes"] as const;
+const VALID_TABS = ["overview", "payments", "agreements", "activity", "trip", "notes"] as const;
 type BookingTab = (typeof VALID_TABS)[number];
 
 export default async function StaffBookingDetail({
@@ -90,6 +92,13 @@ export default async function StaffBookingDetail({
     },
   });
   if (!b) notFound();
+
+  // The authoritative GPS51 track pull is a managerProcedure — gate the button
+  // so staff don't see an action that would just error.
+  const session = await auth();
+  const canFetchAuthoritative = ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(
+    session?.user?.role ?? "",
+  );
 
   const bondDeductions = Array.isArray(b.bondLedger?.deductions)
     ? (b.bondLedger!.deductions as Array<{ reason?: string; amount?: number }>)
@@ -277,6 +286,7 @@ export default async function StaffBookingDetail({
             Activity
             {activityCount > 0 && <Badge variant="outline">{activityCount}</Badge>}
           </TabsTrigger>
+          {b.vehicleId && <TabsTrigger value="trip">Trip</TabsTrigger>}
           <TabsTrigger value="notes" className="gap-1.5">
             Notes & audit
             {b.bookingNotes.length > 0 && <Badge variant="outline">{b.bookingNotes.length}</Badge>}
@@ -780,6 +790,12 @@ export default async function StaffBookingDetail({
             </Card>
           </div>
         </TabsContent>
+
+        {b.vehicleId && (
+          <TabsContent value="trip" className="space-y-6">
+            <BookingTripPanel bookingId={b.id} canFetchAuthoritative={canFetchAuthoritative} />
+          </TabsContent>
+        )}
 
         <TabsContent value="notes" className="space-y-6">
           <div className="space-y-6">

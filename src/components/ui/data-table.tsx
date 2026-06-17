@@ -12,6 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { DataTablePagination } from "@/components/ui/data-table-pagination";
 
 export interface DataTableColumn<T> {
   /** Stable id — used for sort state and React keys. */
@@ -71,6 +72,20 @@ export interface DataTableProps<T> {
   /** Make the header sticky to the nearest scrolling ancestor. The caller
    *  is responsible for the scroll container. */
   stickyHeader?: boolean;
+  /** Fill the parent's available height: the table renders inside a bordered
+   *  card whose body scrolls (with a sticky header) while the card itself
+   *  flexes to `flex-1`. Use under a `<PageShell full>` so the page never
+   *  scrolls — only the table body does. Implies `stickyHeader`. */
+  fillHeight?: boolean;
+  /** Enable built-in client-side pagination over the (already-fetched) rows.
+   *  Renders a `<DataTablePagination>` footer pinned below the table body.
+   *  Set to the number of rows per page. */
+  pageSize?: number;
+  /** Row-count options offered in the pagination footer's "Rows per page"
+   *  control. Omit to hide the selector. */
+  pageSizeOptions?: number[];
+  /** Label shown in the pagination footer when there are no rows. */
+  paginationEmptyLabel?: string;
   /** Mobile rendering strategy below the `md` breakpoint.
    *  - `"scroll"` (default): keep the table; rely on horizontal scroll.
    *  - `"cards"`: stack one card per row, using `primary`/`secondary`/
@@ -107,6 +122,10 @@ export function DataTable<T>({
   onSortChange,
   className,
   stickyHeader,
+  fillHeight,
+  pageSize,
+  pageSizeOptions,
+  paginationEmptyLabel,
   mobileMode = "scroll",
   onMobileRowOpen,
   mobileRender,
@@ -114,6 +133,15 @@ export function DataTable<T>({
   const [uncontrolledSort, setUncontrolledSort] = React.useState<DataTableSortState | null>(null);
   const sort = controlledSort !== undefined ? controlledSort : uncontrolledSort;
   const setSort = onSortChange ?? setUncontrolledSort;
+
+  const paginated = typeof pageSize === "number" && pageSize > 0;
+  const [page, setPage] = React.useState(1);
+  const [currentPageSize, setCurrentPageSize] = React.useState(pageSize ?? 25);
+  React.useEffect(() => {
+    if (typeof pageSize === "number" && pageSize > 0) setCurrentPageSize(pageSize);
+  }, [pageSize]);
+
+  const effectiveSticky = stickyHeader || fillHeight;
 
   const columnsWithActions = React.useMemo(() => {
     if (!rowActions) return columns;
@@ -148,6 +176,19 @@ export function DataTable<T>({
     return copy;
   }, [data, sort, columns, onSortChange]);
 
+  const totalCount = sortedData?.length ?? 0;
+  const pageCount = paginated ? Math.max(1, Math.ceil(totalCount / currentPageSize)) : 1;
+  const safePage = Math.min(page, pageCount);
+  React.useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  const visibleData = React.useMemo(() => {
+    if (!paginated || !sortedData) return sortedData;
+    const start = (safePage - 1) * currentPageSize;
+    return sortedData.slice(start, start + currentPageSize);
+  }, [paginated, sortedData, safePage, currentPageSize]);
+
   function toggleSort(id: string) {
     if (sort?.id === id) {
       if (sort.dir === "asc") setSort({ id, dir: "desc" });
@@ -158,8 +199,8 @@ export function DataTable<T>({
   }
 
   const tableEl = (
-    <Table wrapperClassName={stickyHeader ? "overflow-visible" : undefined}>
-      <TableHeader className={stickyHeader ? "sticky top-0 z-10" : undefined}>
+    <Table wrapperClassName={effectiveSticky ? "overflow-visible" : undefined}>
+      <TableHeader className={effectiveSticky ? "sticky top-0 z-10" : undefined}>
         <TableRow>
           {columnsWithActions.map((col) => {
             const isSorted = sort?.id === col.id;
@@ -198,8 +239,8 @@ export function DataTable<T>({
       <TableBody>
         {isLoading || data === undefined ? (
           <SkeletonRows columns={columnsWithActions.length} />
-        ) : sortedData && sortedData.length > 0 ? (
-          sortedData.map((row) => {
+        ) : visibleData && visibleData.length > 0 ? (
+          visibleData.map((row) => {
             const href = getRowHref?.(row);
             const clickable = href || onRowClick;
             return (
@@ -242,6 +283,29 @@ export function DataTable<T>({
     </Table>
   );
 
+  const footer =
+    paginated && data !== undefined && !isLoading ? (
+      <div className="shrink-0 border-t px-3 py-2.5 sm:px-4">
+        <DataTablePagination
+          page={safePage}
+          pageSize={currentPageSize}
+          totalCount={totalCount}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          onPageSizeChange={
+            pageSizeOptions
+              ? (next) => {
+                  setCurrentPageSize(next);
+                  setPage(1);
+                }
+              : undefined
+          }
+          pageSizeOptions={pageSizeOptions}
+          emptyLabel={paginationEmptyLabel ?? "No results"}
+        />
+      </div>
+    ) : null;
+
   const wrapperClasses = cn(
     "rounded-md border bg-card text-card-foreground shadow-sm",
     stickyHeader ? "overflow-auto" : "overflow-hidden",
@@ -249,24 +313,54 @@ export function DataTable<T>({
   );
 
   if (mobileMode !== "cards") {
+    // Fill-height and/or paginated: wrap the table body in a scrolling region
+    // and pin the pagination footer beneath it inside one bordered card.
+    if (fillHeight || footer) {
+      return (
+        <div
+          className={cn(
+            "flex flex-col overflow-hidden rounded-md border bg-card text-card-foreground shadow-sm",
+            fillHeight && "min-h-0 flex-1",
+            className,
+          )}
+        >
+          <div className={fillHeight ? "min-h-0 flex-1 overflow-auto" : "overflow-auto"}>
+            {tableEl}
+          </div>
+          {footer}
+        </div>
+      );
+    }
     return <div className={wrapperClasses}>{tableEl}</div>;
   }
 
   return (
     <>
-      <div className={cn(wrapperClasses, "hidden md:block")}>{tableEl}</div>
-      <MobileCardList
-        columns={columns}
-        data={sortedData}
-        isLoading={isLoading}
-        empty={empty}
-        getRowId={getRowId}
-        getRowHref={onMobileRowOpen ? undefined : getRowHref}
-        onRowClick={onMobileRowOpen ?? onRowClick}
-        rowActions={rowActions}
-        mobileRender={mobileRender}
-        className={cn("md:hidden", className)}
-      />
+      <div className={cn(wrapperClasses, "hidden md:block")}>
+        {fillHeight || footer ? (
+          <div className="flex flex-col">
+            <div className="overflow-auto">{tableEl}</div>
+            {footer}
+          </div>
+        ) : (
+          tableEl
+        )}
+      </div>
+      <div className="md:hidden">
+        <MobileCardList
+          columns={columns}
+          data={visibleData}
+          isLoading={isLoading}
+          empty={empty}
+          getRowId={getRowId}
+          getRowHref={onMobileRowOpen ? undefined : getRowHref}
+          onRowClick={onMobileRowOpen ?? onRowClick}
+          rowActions={rowActions}
+          mobileRender={mobileRender}
+          className={className}
+        />
+        {footer}
+      </div>
     </>
   );
 }

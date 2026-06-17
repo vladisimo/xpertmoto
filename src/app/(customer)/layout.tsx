@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { capturePageView } from "@/server/services/audit";
 import { prisma } from "@/lib/prisma";
 import { needsOnboarding } from "@/lib/onboarding-status";
+import { VerifyEmailBanner } from "@/components/customer/verify-email-banner";
 
 export default async function CustomerLayout({ children }: { children: React.ReactNode }) {
   const h = new Headers(await headers());
@@ -18,6 +19,7 @@ export default async function CustomerLayout({ children }: { children: React.Rea
       avatarUrl: true,
       firstName: true,
       lastName: true,
+      emailVerified: true,
       customerProfile: { select: { onboardedAt: true, onboardingVersion: true } },
     },
   });
@@ -26,13 +28,17 @@ export default async function CustomerLayout({ children }: { children: React.Rea
   // completed onboarding (no signature, no signed PDFs, or a stale joint
   // version) is routed to /onboarding before any portal page renders.
   //
-  // CUSTOMER sessions carry the global requiresOnboarding flag; back-office
-  // users (who now also carry a CustomerProfile so they can rent) never get
-  // that flag — so this is also the enforcement point that catches a staff
-  // member entering the customer portal un-onboarded. needsOnboarding(null)
-  // is true, so a pre-backfill profile-less user is routed here too, where
-  // onboarding.updateProfile's upsert creates the row.
-  if (session.requiresOnboarding === true || needsOnboarding(me?.customerProfile)) {
+  // R2-M3: gate purely on the DB profile (needsOnboarding), NOT on the JWT's
+  // session.requiresOnboarding flag. The JWT flag lags a just-completed
+  // onboarding — it only refreshes on the next session.update()/sign-in — so
+  // trusting it here bounced freshly-onboarded users back to /onboarding in a
+  // redirect loop with /dashboard. The profile we read above is the
+  // authoritative, up-to-the-request source of truth. needsOnboarding(null) is
+  // true, so a profile-less user (a back-office user who never carries the
+  // flag, or a pre-backfill row) is still routed here, where
+  // onboarding.updateProfile's upsert creates the row. protectedProcedure
+  // continues to enforce the JWT flag server-side for API calls.
+  if (needsOnboarding(me?.customerProfile)) {
     const next = path && path.startsWith("/") ? path : "/dashboard";
     redirect(`/onboarding?next=${encodeURIComponent(next)}`);
   }
@@ -59,6 +65,13 @@ export default async function CustomerLayout({ children }: { children: React.Rea
       signOutAction={handleSignOut}
     >
       <div className="contents [&_.page-header-lead]:hidden md:[&_.page-header-lead]:block">
+        {/* R2-M4: nudge a public customer to confirm their email before they
+            hit the payment-step hard gate. Back-office renters are exempt. */}
+        {session.user.role === "CUSTOMER" &&
+          !me?.emailVerified &&
+          session.user.email && (
+            <VerifyEmailBanner email={session.user.email} />
+          )}
         {children}
       </div>
     </PortalShell>

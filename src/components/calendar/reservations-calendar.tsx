@@ -91,7 +91,7 @@ export function ReservationsCalendar() {
         : `${categoryIds.length} types`;
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-screen-2xl flex-col overflow-hidden p-6 lg:p-8">
+    <div className="flex h-full w-full max-w-screen-2xl flex-col overflow-hidden p-6 lg:p-8">
       <PageHeader
         className="shrink-0 pb-4"
         eyebrow="Operations"

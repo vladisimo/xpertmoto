@@ -48,6 +48,7 @@ const identitySchema = z.object({
   colour: z.string().min(1, "Required"),
   fuelType: z.string(),
   currentOdometerKm: z.coerce.number().int().min(0),
+  gpsTrackerId: z.string(),
 });
 
 const complianceSchema = z.object({
@@ -217,6 +218,7 @@ function IdentityForm({ vehicle: v, onDone }: { vehicle: VehicleWithRelations; o
       colour: v.colour,
       fuelType: v.fuelType ?? "",
       currentOdometerKm: v.currentOdometerKm,
+      gpsTrackerId: v.gpsTrackerId ?? "",
     },
   });
 
@@ -239,6 +241,7 @@ function IdentityForm({ vehicle: v, onDone }: { vehicle: VehicleWithRelations; o
           colour: values.colour,
           fuelType: strOrNull(values.fuelType),
           currentOdometerKm: values.currentOdometerKm,
+          gpsTrackerId: strOrNull(values.gpsTrackerId),
         });
       }}
     >
@@ -274,6 +277,13 @@ function IdentityForm({ vehicle: v, onDone }: { vehicle: VehicleWithRelations; o
       )} />
       <FormField control={form.control} name="currentOdometerKm" render={({ field }) => (
         <FormItem><FormLabel>Odometer (km)</FormLabel><FormControl><Input type="number" min={0} {...field} /></FormControl><FormMessage /></FormItem>
+      )} />
+      <FormField control={form.control} name="gpsTrackerId" render={({ field }) => (
+        <FormItem className="md:col-span-2">
+          <FormLabel>GPS tracker ID</FormLabel>
+          <FormControl><Input placeholder="GPS51 device serial (e.g. 19210047052)" {...field} /></FormControl>
+          <FormMessage />
+        </FormItem>
       )} />
     </FormShell>
   );

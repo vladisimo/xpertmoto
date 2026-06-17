@@ -49,13 +49,12 @@ type StatusFilter = (typeof STATUS_OPTIONS)[number];
 
 function parseTollNotes(notes: string | null): {
   location: string | null;
-  gantryCode: string | null;
 } {
-  if (!notes) return { location: null, gantryCode: null };
-  const locMatch = notes.match(/^Toll:\s*(.+?)\s*\(([^)]+)\)\./);
+  if (!notes) return { location: null };
+  // Linkt infringement notes read "Toll: <tollpoint>. Source: <...>".
+  const locMatch = notes.match(/^Toll:\s*(.+?)\.\s*Source:/);
   return {
     location: locMatch?.[1] ?? null,
-    gantryCode: locMatch?.[2] ?? null,
   };
 }
 
@@ -73,11 +72,11 @@ export function FleetTollsTab() {
     router.replace(url.pathname + url.search, { scroll: false });
   };
 
-  const { data: accounts } = trpc.etoll.listAccounts.useQuery();
+  const { data: accounts } = trpc.linkt.listAccounts.useQuery();
   const selectedAccount =
     accountId === "all" ? null : accounts?.find((a) => a.id === accountId) ?? null;
 
-  const { data: unmatchedCount } = trpc.etoll.unmatchedCount.useQuery({
+  const { data: unmatchedCount } = trpc.linkt.unmatchedCount.useQuery({
     accountId: accountId === "all" ? undefined : accountId,
   });
 
@@ -136,11 +135,11 @@ function AccountSelector({
   onSelect: (id: string) => void;
 }) {
   const util = trpc.useUtils();
-  const sync = trpc.etoll.runSyncNow.useMutation({
+  const sync = trpc.linkt.runSyncNow.useMutation({
     onSuccess: () => {
-      util.etoll.listAccounts.invalidate();
-      util.etoll.listSyncs.invalidate();
-      util.etoll.listTransactions.invalidate();
+      util.linkt.listAccounts.invalidate();
+      util.linkt.listSyncs.invalidate();
+      util.linkt.listTransactions.invalidate();
     },
   });
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
@@ -247,7 +246,7 @@ function TransactionsTab({ accountId }: { accountId?: string }) {
   const debouncedSearch = useDebouncedValue(search, 300);
 
   const { data, fetchNextPage, hasNextPage, isFetching, isLoading } =
-    trpc.etoll.listTransactions.useInfiniteQuery(
+    trpc.linkt.listTransactions.useInfiniteQuery(
       {
         accountId,
         status: status ?? undefined,
@@ -376,14 +375,7 @@ function TransactionsTab({ accountId }: { accountId?: string }) {
                     </td>
                     <td className="px-4 py-2.5">
                       {trip.location ? (
-                        <>
-                          <div>{trip.location}</div>
-                          {trip.gantryCode && (
-                            <div className="text-xs text-muted-foreground">
-                              Gantry {trip.gantryCode}
-                            </div>
-                          )}
-                        </>
+                        <div>{trip.location}</div>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
@@ -446,7 +438,7 @@ function HistoryTab({
 }
 
 function AccountSyncHistory({ accountId, accountName }: { accountId: string; accountName: string }) {
-  const { data: syncs, isLoading } = trpc.etoll.listSyncs.useQuery({ accountId, limit: 25 });
+  const { data: syncs, isLoading } = trpc.linkt.listSyncs.useQuery({ accountId, limit: 25 });
 
   return (
     <Card>
@@ -502,9 +494,8 @@ type UnmatchedRow = {
   accountId: string;
   externalHash: string;
   eventAt: Date;
-  rego: string;
-  concession: string;
-  gantryCode: string | null;
+  plate: string;
+  tollpoint: string;
   rawDetails: string | null;
   amountCents: number;
   resolvedAt: Date | null;
@@ -520,7 +511,7 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
 
   const util = trpc.useUtils();
   const { data, fetchNextPage, hasNextPage, isFetching, isLoading } =
-    trpc.etoll.listUnmatched.useInfiniteQuery(
+    trpc.linkt.listUnmatched.useInfiniteQuery(
       {
         accountId,
         includeResolved,
@@ -530,10 +521,10 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
       { getNextPageParam: (last) => last.nextCursor ?? undefined },
     );
 
-  const dismiss = trpc.etoll.dismissUnmatched.useMutation({
+  const dismiss = trpc.linkt.dismissUnmatched.useMutation({
     onSuccess: () => {
-      util.etoll.listUnmatched.invalidate();
-      util.etoll.unmatchedCount.invalidate();
+      util.linkt.listUnmatched.invalidate();
+      util.linkt.unmatchedCount.invalidate();
     },
   });
 
@@ -543,7 +534,7 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2 items-center">
         <Input
-          placeholder="Search rego, tag, location…"
+          placeholder="Search plate, location…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-72"
@@ -575,7 +566,7 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
               <thead className="sticky top-0 z-10 bg-primary text-primary-foreground">
                 <tr className="border-b border-primary/40 text-left">
                   <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Date / Time</th>
-                  <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Rego / Tag</th>
+                  <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Plate</th>
                   <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Location</th>
                   <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Account</th>
                   <th className="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide text-primary-foreground/80">Status</th>
@@ -591,12 +582,9 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         {formatDateTime(row.eventAt)}
                       </td>
-                      <td className="px-4 py-2.5 font-mono text-xs">{row.rego}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs">{row.plate}</td>
                       <td className="px-4 py-2.5">
-                        <div>{row.concession || "—"}</div>
-                        {row.gantryCode && (
-                          <div className="text-xs text-muted-foreground">Gantry {row.gantryCode}</div>
-                        )}
+                        <div>{row.tollpoint || "—"}</div>
                       </td>
                       <td className="px-4 py-2.5 text-xs text-muted-foreground">{row.account.name}</td>
                       <td className="px-4 py-2.5">
@@ -670,9 +658,9 @@ function UnmatchedTab({ accountId }: { accountId?: string }) {
         onClose={(resolved) => {
           setResolving(null);
           if (resolved) {
-            util.etoll.listUnmatched.invalidate();
-            util.etoll.unmatchedCount.invalidate();
-            util.etoll.listTransactions.invalidate();
+            util.linkt.listUnmatched.invalidate();
+            util.linkt.unmatchedCount.invalidate();
+            util.linkt.listTransactions.invalidate();
           }
         }}
       />
@@ -718,7 +706,7 @@ function ResolveUnmatchedSheetBody({
 
   const { data: vehicles } = trpc.vehicle.list.useQuery({ take: 200 });
 
-  const { data: suggestion } = trpc.etoll.suggestBookingsForUnmatched.useQuery(
+  const { data: suggestion } = trpc.linkt.suggestBookingsForUnmatched.useQuery(
     { id: row.id, vehicleId },
     { enabled: !!vehicleId && linkMode === "booking" },
   );
@@ -736,7 +724,7 @@ function ResolveUnmatchedSheetBody({
     { enabled: linkMode === "customer" && debouncedCustomerSearch.length >= 2 },
   );
 
-  const resolve = trpc.etoll.resolveUnmatched.useMutation();
+  const resolve = trpc.linkt.resolveUnmatched.useMutation();
 
   const selectedVehicle = useMemo(
     () => vehicles?.items.find((v) => v.id === vehicleId) ?? null,
@@ -780,17 +768,12 @@ function ResolveUnmatchedSheetBody({
           <span>{formatDateTime(row.eventAt)}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-muted-foreground">Tag / rego</span>
-          <span className="font-mono text-xs">{row.rego}</span>
+          <span className="text-muted-foreground">Plate</span>
+          <span className="font-mono text-xs">{row.plate}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">Location</span>
-          <span className="text-right">
-            {row.concession || "—"}
-            {row.gantryCode && (
-              <span className="text-xs text-muted-foreground"> · {row.gantryCode}</span>
-            )}
-          </span>
+          <span className="text-right">{row.tollpoint || "—"}</span>
         </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">Amount</span>
@@ -812,10 +795,10 @@ function ResolveUnmatchedSheetBody({
             ))}
           </SelectContent>
         </Select>
-        {selectedVehicle && selectedVehicle.rego.toUpperCase() !== row.rego.toUpperCase() && (
+        {selectedVehicle && selectedVehicle.rego.toUpperCase() !== row.plate.toUpperCase() && (
           <p className="text-xs text-muted-foreground">
             Heads up: selected rego <span className="font-mono">{selectedVehicle.rego}</span>{" "}
-            doesn&apos;t match the toll&apos;s <span className="font-mono">{row.rego}</span>
+            doesn&apos;t match the toll&apos;s <span className="font-mono">{row.plate}</span>
             {" "}— the toll account may be using the tag number rather than a rego.
           </p>
         )}
