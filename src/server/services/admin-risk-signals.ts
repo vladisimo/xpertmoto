@@ -34,17 +34,20 @@ const TYPES: IncidentType[] = [
 export async function incidentsSummary(
   db: PrismaLike = sharedPrisma,
 ): Promise<IncidentsSummary> {
+  // Prerender contract (cacheComponents): the current time may only be read
+  // after the first uncached data access, or `next build` fails prerendering
+  // /admin/dashboard/risk — issue the date-independent count first.
+  const openThefts = await db.incident.count({
+    where: { type: "THEFT", status: { notIn: ["RESOLVED", "CLOSED"] } },
+  });
   const now = new Date();
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
 
-  const [mtd, openThefts, trendRows] = await Promise.all([
+  const [mtd, trendRows] = await Promise.all([
     db.incident.findMany({
       where: { dateTime: { gte: startOfMonth } },
       select: { type: true, severity: true },
-    }),
-    db.incident.count({
-      where: { type: "THEFT", status: { notIn: ["RESOLVED", "CLOSED"] } },
     }),
     db.incident.findMany({
       where: { dateTime: { gte: twelveMonthsAgo } },

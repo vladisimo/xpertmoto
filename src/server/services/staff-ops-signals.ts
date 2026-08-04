@@ -168,24 +168,28 @@ export async function findCalendarMistakes(
   depotId?: string,
   db: PrismaLike = sharedPrisma,
 ): Promise<CalendarMistakes> {
-  const now = new Date();
   const depotClause = depotId ? Prisma.sql`AND b."depotId" = ${depotId}` : Prisma.empty;
   const vehicleDepotClause = depotId ? Prisma.sql`AND v."depotId" = ${depotId}` : Prisma.empty;
 
-  const [unallocatedRaw, maintenanceRaw, docsRaw, mismatchRaw] = await Promise.all([
-    db.booking.findMany({
-      where: {
-        status: { in: ["ACTIVE", "CHECKED_OUT"] },
-        vehicleId: null,
-        ...(depotId ? { depotId } : {}),
-      },
-      include: {
-        category: { select: { name: true } },
-        customer: { select: { firstName: true, lastName: true } },
-      },
-      orderBy: { pickupDateTime: "asc" },
-      take: 20,
-    }),
+  // The remaining queries interpolate `now` into raw SQL, so run the one
+  // date-independent query first and only then read the clock — prerender
+  // contract, see incidentsSummary in admin-risk-signals.ts.
+  const unallocatedRaw = await db.booking.findMany({
+    where: {
+      status: { in: ["ACTIVE", "CHECKED_OUT"] },
+      vehicleId: null,
+      ...(depotId ? { depotId } : {}),
+    },
+    include: {
+      category: { select: { name: true } },
+      customer: { select: { firstName: true, lastName: true } },
+    },
+    orderBy: { pickupDateTime: "asc" },
+    take: 20,
+  });
+  const now = new Date();
+
+  const [maintenanceRaw, docsRaw, mismatchRaw] = await Promise.all([
     db.$queryRaw<MaintenanceConflictRawRow[]>(Prisma.sql`
       SELECT
         b.id AS "bookingId",
@@ -318,7 +322,6 @@ export async function findTyreAlerts(
   depotId?: string,
   db: PrismaLike = sharedPrisma,
 ): Promise<TyreAlert[]> {
-  const now = new Date();
   const vehicles = await db.vehicle.findMany({
     where: {
       isActive: true,
@@ -347,6 +350,9 @@ export async function findTyreAlerts(
   });
 
   const alerts: TyreAlert[] = [];
+  // Read the clock only after the query above — prerender contract, see
+  // incidentsSummary in admin-risk-signals.ts.
+  const now = new Date();
   const staleCutoff = new Date(now.getTime() - TYRE_RULES.inspectionStaleDays * 86_400_000);
 
   for (const v of vehicles) {
