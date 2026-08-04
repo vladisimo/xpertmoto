@@ -3,6 +3,7 @@ import * as React from "react";
 import { Check, CheckCircle2, Circle } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
 import { useBookingWizard } from "@/stores/booking-wizard";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn, formatCurrency } from "@/lib/utils";
 import { AddonIcon } from "./addon-icon";
@@ -260,9 +261,9 @@ export function StepExtras() {
                       <div className="flex min-w-0 items-center gap-1.5">
                         <span className="truncate text-sm font-semibold">{i.name}</span>
                         {Number(i.dailyRate) === 0 && (
-                          <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[0.6rem] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                          <Badge variant="secondary" className="shrink-0 px-1.5 py-0.5 text-[0.6rem]">
                             Free
-                          </span>
+                          </Badge>
                         )}
                       </div>
                       <div className="whitespace-nowrap text-sm font-semibold text-primary">
@@ -299,9 +300,9 @@ export function StepExtras() {
                 <div className="flex items-center gap-2">
                   <span className="font-semibold">{i.name}</span>
                   {Number(i.dailyRate) === 0 && (
-                    <span className="rounded-full bg-emerald-50 px-1.5 py-0.5 text-[0.65rem] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+                    <Badge variant="secondary" className="px-1.5 py-0.5 text-[0.65rem]">
                       Free
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <div className="text-xs text-muted-foreground mt-1">{i.description}</div>
