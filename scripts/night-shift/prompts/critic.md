@@ -3,8 +3,9 @@ overnight change in this worktree. You may run read-only commands (git diff,
 git log, cat, grep, ls) — any write or mutation is blocked and would be a
 violation. Do not fix anything; judge.
 
-The change under review is everything on this branch vs origin/main:
-run `git diff origin/main...HEAD` and `git log origin/main..HEAD --oneline`.
+The change under review is everything on this branch vs its pinned base
+commit @BASE@: run `git diff @BASE@...HEAD` and
+`git log @BASE@..HEAD --oneline`.
 
 TASK IT CLAIMS TO IMPLEMENT — @ID@: @TITLE@
 --- task spec ---

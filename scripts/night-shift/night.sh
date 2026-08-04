@@ -77,12 +77,27 @@ git -C "$REPO" fetch origin --prune >/dev/null 2>&1 || abort_night "git fetch fa
 [ -z "$(git -C "$REPO" status --porcelain 2>/dev/null)" ] \
   || abort_night "canonical working tree is dirty — never run the night over live WIP"
 
-CI_STATE=$(timeout 30 gh run list --repo "$GITHUB_REPO" --branch main --limit 1 \
-             --json conclusion -q '.[0].conclusion' 2>/dev/null || echo unknown)
+# CI gate. The audit step runs LAST in the test job, so a run whose only
+# failure is `npm audit` (plus the e2e job it cancels) still proves
+# typecheck/lint/tests/build green — treat that as pass-with-warning
+# (dep advisories are a human decision, not a reason to lose a night).
+CI_RUN=$(timeout 30 gh run list --repo "$GITHUB_REPO" --branch main --limit 1 \
+           --json databaseId,conclusion 2>/dev/null || echo '')
+CI_STATE=$(jq -r '.[0].conclusion // "unknown"' <<<"$CI_RUN" 2>/dev/null || echo unknown)
 case "$CI_STATE" in
-  failure) abort_night "latest main CI run is RED — fix main first" ;;
   success) nlog "preflight: main CI green" ;;
-  *)       nlog "preflight: main CI status '$CI_STATE' (PAT may lack actions:read) — proceeding" ;;
+  failure)
+    CI_ID=$(jq -r '.[0].databaseId' <<<"$CI_RUN" 2>/dev/null)
+    NON_AUDIT_FAILS=$(timeout 30 gh run view "$CI_ID" --repo "$GITHUB_REPO" --json jobs \
+      -q '[.jobs[].steps[] | select(.conclusion=="failure") | .name | select(test("npm audit") | not)] | length' \
+      2>/dev/null || echo unknown)
+    if [ "$NON_AUDIT_FAILS" = "0" ]; then
+      nlog "preflight: main CI red ONLY at npm audit — proceeding with warning (dep bumps await approval)"
+    else
+      abort_night "latest main CI run is RED beyond npm audit — fix main first"
+    fi
+    ;;
+  *) nlog "preflight: main CI status '$CI_STATE' (PAT may lack actions:read) — proceeding" ;;
 esac
 
 AVAIL_GB=$(df --output=avail -BG /home 2>/dev/null | tail -1 | tr -dc '0-9')

@@ -70,12 +70,13 @@ move_task() { # move_task <lane-dir-name>
 
 bundle_branch() {
   [ -e "$WT/.git" ] || return 0
+  local base="${BASE_SHA:-origin/main}"
   if ! git -C "$WT" diff --quiet 2>/dev/null || ! git -C "$WT" diff --cached --quiet 2>/dev/null; then
     git -C "$WT" add -A >/dev/null 2>&1
     git -C "$WT" commit -q -m "WIP night $ID (not shipped)" >/dev/null 2>&1 || true
   fi
-  if [ -n "$(git -C "$WT" log origin/main..HEAD --oneline 2>/dev/null)" ]; then
-    git -C "$WT" bundle create "$BUNDLES/${ID}-${DATE}.bundle" origin/main..HEAD >/dev/null 2>&1 \
+  if [ -n "$(git -C "$WT" log "$base"..HEAD --oneline 2>/dev/null)" ]; then
+    git -C "$WT" bundle create "$BUNDLES/${ID}-${DATE}.bundle" "$base"..HEAD >/dev/null 2>&1 \
       && nlog "worker $ID: unshipped work bundled to bundles/${ID}-${DATE}.bundle"
   fi
 }
@@ -117,12 +118,16 @@ finish_fail() { # <reason>
 
 nlog "worker START $ID ($TITLE) model=$MODEL timeout=${SESSION_TIMEOUT}s dry=$DRY"
 
-# ── 1. fresh worktree off origin/main ────────────────────────────────────────
+# ── 1. fresh worktree off a PINNED base ──────────────────────────────────────
+# Resolve origin/main exactly once: if the ref moves mid-task (daytime push,
+# dependabot merge), a later `reset --soft origin/main` would re-base the diff
+# against a commit the worktree never contained → phantom staged changes.
+BASE_SHA=$(git -C "$REPO" rev-parse origin/main) || finish_fail "cannot resolve origin/main"
 git -C "$REPO" worktree prune >/dev/null 2>&1 || true
 git -C "$REPO" worktree remove --force "$WT" >/dev/null 2>&1 || true
 rm -rf "$WT" 2>/dev/null || true
 git -C "$REPO" branch -D "$BR" >/dev/null 2>&1 || true
-git -C "$REPO" worktree add -b "$BR" "$WT" origin/main >>"$CONSOLE" 2>&1 \
+git -C "$REPO" worktree add -b "$BR" "$WT" "$BASE_SHA" >>"$CONSOLE" 2>&1 \
   || finish_fail "worktree add failed"
 
 for f in .env .env.local .env.e2e; do
@@ -233,7 +238,7 @@ run_build_session "$SESSION_TIMEOUT" "$PROMPT" "$SESSION_JSON"
 # ── 5. normalise + hard gates ────────────────────────────────────────────────
 run_gates() { # sets GATE_FAIL on failure
   GATE_FAIL=""
-  git -C "$WT" reset -q --soft origin/main 2>>"$CONSOLE" || true
+  git -C "$WT" reset -q --soft "$BASE_SHA" 2>>"$CONSOLE" || true
   git -C "$WT" add -A >/dev/null 2>&1
   if git -C "$WT" diff --cached --quiet 2>/dev/null; then
     GATE_FAIL="no changes produced"; return 1
@@ -323,6 +328,7 @@ git -C "$WT" commit -q \
 CPROMPT=$(cat "$NIGHT_BIN/prompts/critic.md")
 CPROMPT=${CPROMPT//@ID@/$ID}
 CPROMPT=${CPROMPT//@TITLE@/$TITLE}
+CPROMPT=${CPROMPT//@BASE@/$BASE_SHA}
 CPROMPT=${CPROMPT//@TASKBODY@/$TASKBODY}
 run_session "$CRITIC_TIMEOUT" "$MODEL_CRITIC" "$CPROMPT" "$LOGS/${ID}.critic.json" 1 || true
 if is_ratelimit_error "$LOGS/${ID}.critic.json"; then
