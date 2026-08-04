@@ -1,0 +1,28 @@
+{
+  "$comment": "Passed via `claude --settings` to NIGHT-SHIFT sessions only. ADDS to the project .claude/settings.json hooks (all merged sources run) and fires even under --dangerously-skip-permissions. Absolute paths point at the canonical checkout so worktree copies of these scripts are inert.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/vlad/scootering/scripts/night-shift/hooks/night-safety.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/vlad/scootering/scripts/night-shift/hooks/night-stop.sh",
+            "timeout": 360
+          }
+        ]
+      }
+    ]
+  }
+}

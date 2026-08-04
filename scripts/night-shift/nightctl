@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# nightctl — control CLI for the XPERT Moto night shift.
+#   init      create the ~/xpertmoto-night state tree
+#   status    lanes, timer state, current task, recent log
+#   plan      queued tasks in run order with budgets
+#   stop      touch STOP + stop any in-flight night service run
+#   resume    remove STOP
+#   logs [ID] tail the night log, or a task's console/dod logs
+#   report    show the latest morning report
+#   enable    enable + start the 00:05 timer
+#   disable   disable the timer
+#   run       run a whole night NOW (manual window)
+#   dry-run ID  run one queued task through the full flow, no push/PR
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$HERE/config.env"
+# shellcheck source=/dev/null
+source "$HERE/lib.sh"
+
+cmd="${1:-status}"; shift || true
+
+case "$cmd" in
+  init)
+    mkdir -p "$QUEUE" "$RUNNING" "$DONE_LANE" "$FAILED_LANE" "$SKIPPED_LANE" \
+             "$WORKTREES" "$LOGS" "$REPORTS" "$BUNDLES" "$LOCKS" "$STATE"
+    echo "initialised $NIGHT"
+    ;;
+  status)
+    echo "── XPERT Moto night shift ──"
+    echo "queue: $(count_lane queue) · running: $(count_lane running) · done: $(count_lane done) · failed: $(count_lane failed) · skipped: $(count_lane skipped)"
+    [ -f "$NIGHT/STOP" ] && echo "⚠ STOP file present — nights will not run (nightctl resume)"
+    timer=$(systemctl --user is-enabled xpertmoto-night.timer 2>/dev/null || echo "not installed")
+    active=$(systemctl --user is-active xpertmoto-night.service 2>/dev/null || echo inactive)
+    echo "timer: $timer · service: $active"
+    systemctl --user list-timers xpertmoto-night.timer --no-pager 2>/dev/null | sed -n 2p || true
+    for f in "$RUNNING"/*.md; do
+      [ -f "$f" ] && echo "running now: $(task_id "$f") — $(tfield "$f" title)"
+    done
+    last=$(ls -1t "$REPORTS"/night-*.md 2>/dev/null | head -1 || true)
+    [ -n "${last:-}" ] && echo "latest report: $last"
+    echo "── log tail ──"
+    tail -8 "$LOGS/night.log" 2>/dev/null || echo "(no log yet)"
+    ;;
+  plan)
+    echo "── queued tasks (run order) ──"
+    n=0
+    for f in $(ls -1 "$QUEUE"/*.md 2>/dev/null | sort); do
+      n=$((n+1))
+      printf '%2d. %s — %s [%s, %sm, e2e:%s]\n' "$n" "$(task_id "$f")" "$(tfield "$f" title)" \
+        "$(tfield "$f" category)" "$(tfield "$f" timeout_minutes)" "$(tfield "$f" e2e)"
+    done
+    [ "$n" = 0 ] && echo "(queue empty)"
+    echo "max per night: $NIGHT_MAX_TASKS"
+    ;;
+  stop)
+    touch "$NIGHT/STOP"
+    systemctl --user stop xpertmoto-night.service 2>/dev/null || true
+    echo "STOP set (and any in-flight run stopped). nightctl resume to clear."
+    ;;
+  resume)
+    rm -f "$NIGHT/STOP"
+    echo "STOP cleared — next timer firing will run."
+    ;;
+  logs)
+    id="${1:-}"
+    if [ -z "$id" ]; then
+      tail -50 "$LOGS/night.log" 2>/dev/null || echo "(no log)"
+    else
+      for l in console dod critic.json session.json; do
+        f="$LOGS/$id.$l"; [ -f "$f" ] && { echo "── $f ──"; tail -30 "$f"; }
+      done
+    fi
+    ;;
+  report)
+    last=$(ls -1t "$REPORTS"/night-*.md 2>/dev/null | head -1 || true)
+    [ -n "${last:-}" ] && cat "$last" || echo "(no reports yet)"
+    ;;
+  enable)
+    systemctl --user daemon-reload
+    systemctl --user enable --now xpertmoto-night.timer
+    systemctl --user list-timers xpertmoto-night.timer --no-pager | sed -n '1,2p'
+    ;;
+  disable)
+    systemctl --user disable --now xpertmoto-night.timer
+    echo "timer disabled"
+    ;;
+  run)
+    NIGHT_MANUAL=1 bash "$HERE/night.sh"
+    ;;
+  dry-run)
+    id="${1:?usage: nightctl dry-run <TASK-ID>}"
+    f=""
+    for c in "$QUEUE"/*.md; do
+      [ -f "$c" ] && [ "$(task_id "$c")" = "$id" ] && { f="$c"; break; }
+    done
+    [ -n "$f" ] || { echo "task $id not found in queue/"; exit 1; }
+    dest="$RUNNING/$(basename "$f")"
+    mv -f "$f" "$dest"
+    echo "dry-running $id (full flow, no push/PR; worktree kept)…"
+    NIGHT_MANUAL=1 NIGHT_DRY_RUN=1 bash "$HERE/worker.sh" "$dest"
+    echo "── result ──"
+    jq . "$STATE/results-$(date +%Y%m%d)/$id.json" 2>/dev/null || echo "(no result json)"
+    ;;
+  *)
+    sed -n '2,14p' "$0"
+    ;;
+esac
