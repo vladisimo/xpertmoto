@@ -11,6 +11,14 @@ import { describe, expect, it, vi } from "vitest";
 const extractLicenceData = vi.fn();
 const extractPassportData = vi.fn();
 
+// extractLicenceFromImage carries a 20-per-hour trpcRateLimit bucket backed by
+// Redis. Left live, repeated local runs drain the developer's real bucket and
+// the spec starts failing with TOO_MANY_REQUESTS — stub it like the sibling
+// specs for other rate-limited procedures do.
+vi.mock("@/lib/rate-limit", () => ({
+  rateLimit: vi.fn().mockResolvedValue({ ok: true, remaining: 10, resetAt: 0 }),
+}));
+
 vi.mock("@/lib/storage", () => ({
   downloadFile: vi.fn().mockResolvedValue(Buffer.from([1, 2, 3])),
 }));
