@@ -20,8 +20,9 @@ const NEUTRAL = {
   surface: "#F8FAFC", // table header band, side panels
   paper: "#FFFFFF", // page background
   alertBg: "#FFFBEB", // bond callout band
-  alertBorder: "#F59E0B", // bond callout edge
-  errorInk: "#B91C1C",
+  alertBorder: "#F59E0B", // bond callout edge / MINOR severity (amber)
+  warnStrong: "#EA580C", // MODERATE severity (orange) — between amber and red
+  errorInk: "#B91C1C", // MAJOR severity (red)
   successInk: "#15803D",
 } as const;
 
@@ -78,6 +79,7 @@ export interface PdfTheme {
     paper: string;
     alertBg: string;
     alertBorder: string;
+    warnStrong: string;
     errorInk: string;
     successInk: string;
     /** Operator-configured brand colour, used for accents and rules. */

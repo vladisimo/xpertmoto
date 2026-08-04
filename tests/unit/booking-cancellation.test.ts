@@ -29,6 +29,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     vehicle: { update: vehicleUpdate },
     auditLog: { create: auditLogCreate },
+    // Gift-card refund split reads redemptions before deciding the card slice.
+    payment: { aggregate: vi.fn().mockResolvedValue({ _sum: { amount: null } }) },
+    user: { findMany: vi.fn().mockResolvedValue([]) },
     $transaction: transaction,
   },
 }));
@@ -132,6 +135,8 @@ function txStubCaptures() {
         calls.push({ table: "booking", op: "update", args });
         return {};
       }),
+      // amountPaid mirror on settled refunds re-reads the row inside the tx.
+      findUniqueOrThrow: vi.fn(async () => ({ amountPaid: 500 })),
     },
     bookingStatusLog: {
       create: vi.fn(async (args: unknown) => {
@@ -149,6 +154,7 @@ function txStubCaptures() {
       create: vi.fn(async (args: unknown) => {
         calls.push({ table: "payment", op: "create", args });
         paymentCreate(args);
+        return { id: "pay_refund_row" };
       }),
     },
     bookingBillingPlan: {

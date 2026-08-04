@@ -4,7 +4,13 @@ import { useState } from "react";
 import dynamic from "next/dynamic";
 import { trpc } from "@/lib/trpc/client";
 import { Button } from "@/components/ui/button";
-import type { LivePin } from "@/components/maps/fleet-live-map";
+import {
+  pinState,
+  pinStateColor,
+  PIN_STATE_LABEL,
+  type LivePin,
+  type PinState,
+} from "@/components/maps/fleet-live-map";
 
 // MapLibre is heavy — load it only on the client when this tab is opened.
 const FleetLiveMap = dynamic(
@@ -29,7 +35,10 @@ function relativeTime(ts: string | Date): string {
 
 export function FleetLiveTab() {
   const [selected, setSelected] = useState<string | null>(null);
-  const live = trpc.fleet.liveLocations.useQuery(undefined, { refetchInterval: 30_000 });
+  // Poll at 60s to match the server-side GPS51 poll cadence — a tighter interval
+  // just re-queries the same 60s-fresh snapshot. The server also caches the
+  // payload for ~10s so concurrent staff tabs collapse onto one DB read.
+  const live = trpc.fleet.liveLocations.useQuery(undefined, { refetchInterval: 60_000 });
   const utils = trpc.useUtils();
   const sync = trpc.fleet.gps51SyncNow.useMutation({
     onSettled: () => utils.fleet.liveLocations.invalidate(),
@@ -56,11 +65,34 @@ export function FleetLiveTab() {
     timestamp: r.timestamp,
   }));
 
+  // Sort trouble to the top (offline → stale → live) so a tracker that dropped
+  // off is the first thing staff see, then count them for the header summary.
+  const stateRank: Record<PinState, number> = { offline: 0, stale: 1, moving: 2, idle: 3 };
+  const withState = pins
+    .map((p) => ({ pin: p, state: pinState(p) }))
+    .sort((a, b) => stateRank[a.state] - stateRank[b.state]);
+  const offlineCount = withState.filter((x) => x.state === "offline").length;
+  const staleCount = withState.filter((x) => x.state === "stale").length;
+
   return (
     <div className="flex min-h-0 flex-1 gap-4 overflow-hidden p-1">
       <aside className="flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border">
         <div className="space-y-2 border-b p-3">
           <div className="text-sm font-semibold">Tracked vehicles ({pins.length})</div>
+          {(offlineCount > 0 || staleCount > 0) && (
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {offlineCount > 0 && (
+                <span className="rounded bg-red-50 px-1.5 py-0.5 font-medium text-red-700">
+                  {offlineCount} offline
+                </span>
+              )}
+              {staleCount > 0 && (
+                <span className="rounded bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+                  {staleCount} stale
+                </span>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <Button
               size="sm"
@@ -101,29 +133,33 @@ export function FleetLiveTab() {
                 : "No tracked vehicles yet. Assign a GPS tracker ID on a vehicle (Fleet → Vehicles → edit) and make sure the GPS51 poller is configured."}
             </div>
           )}
-          {pins.map((p) => {
-            const r = rows.find((x) => x.deviceId === p.deviceId)!;
-            return (
-              <button
-                key={p.deviceId}
-                onClick={() => setSelected(p.deviceId)}
-                className={`flex w-full flex-col gap-0.5 border-b p-3 text-left text-sm hover:bg-muted/50 ${
-                  selected === p.deviceId ? "bg-muted" : ""
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{p.label}</span>
-                  <span className={`text-xs ${p.moving ? "text-emerald-600" : "text-muted-foreground"}`}>
-                    {p.moving ? "Moving" : "Idle"}
-                  </span>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  {p.speedKph != null ? `${Math.round(p.speedKph)} km/h • ` : ""}
-                  {relativeTime(r.timestamp)}
-                </div>
-              </button>
-            );
-          })}
+          {withState.map(({ pin: p, state }) => (
+            <button
+              key={p.deviceId}
+              onClick={() => setSelected(p.deviceId)}
+              className={`flex w-full flex-col gap-0.5 border-b p-3 text-left text-sm hover:bg-muted/50 ${
+                selected === p.deviceId ? "bg-muted" : ""
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium">{p.label}</span>
+                <span
+                  className="flex items-center gap-1 text-xs"
+                  style={{ color: pinStateColor(state) }}
+                >
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ backgroundColor: pinStateColor(state) }}
+                  />
+                  {PIN_STATE_LABEL[state]}
+                </span>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {p.speedKph != null ? `${Math.round(p.speedKph)} km/h • ` : ""}
+                {relativeTime(p.timestamp)}
+              </div>
+            </button>
+          ))}
         </div>
       </aside>
       <div className="min-h-0 flex-1 overflow-hidden rounded-lg border">

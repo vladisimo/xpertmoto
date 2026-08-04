@@ -93,6 +93,11 @@ async function lastStageFired(customerId: string): Promise<{ stage: DunningStage
 }
 
 function nextStageFor(last: DunningStage | 0, daysSinceLast: number): DunningStage | null {
+  // Stage 5 is no longer terminal: it re-fires every 30 days until the
+  // balance clears (payment) or a manager forgives it (writeOffBalance).
+  // Previously the ladder went silent here and unresolved debt simply
+  // aged off everyone's radar.
+  if (last === 5) return daysSinceLast >= STAGE_GAP_DAYS[5] ? 5 : null;
   const next = (last + 1) as DunningStage;
   if (next > 5) return null;
   if (daysSinceLast >= STAGE_GAP_DAYS[next]) return next;
@@ -144,7 +149,9 @@ export async function runDunningLadder(): Promise<{ progressed: number; stages: 
       });
       await notifyManagers(
         `Write-off candidate — ${d.firstName}`,
-        `Balance ${AUD.format(d.totalOwed)} is >60 days overdue. Manager approval required for write-off or legal action.`,
+        `Balance ${AUD.format(d.totalOwed)} is >60 days overdue. Decide: pursue externally, or forgive via ` +
+          `the booking's payment console → "Write off balance" (books the debt closed and stops this ladder). ` +
+          `Stage 5 repeats every 30 days until the balance clears one way or the other.`,
         d.customerId,
       );
     }

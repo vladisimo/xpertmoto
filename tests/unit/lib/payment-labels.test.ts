@@ -74,7 +74,9 @@ describe("payment type sets", () => {
     );
   });
 
-  it("classifies bond hold/release as non-cash", () => {
-    expect([...PAYMENT_NONCASH_TYPES].sort()).toEqual(["BOND_HOLD", "BOND_RELEASE"].sort());
+  it("classifies bond hold/release and gift-card redemption as non-cash", () => {
+    expect([...PAYMENT_NONCASH_TYPES].sort()).toEqual(
+      ["BOND_HOLD", "BOND_RELEASE", "GIFT_CARD_REDEMPTION"].sort(),
+    );
   });
 });

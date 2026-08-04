@@ -2,8 +2,9 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
-import { capturePaymentIntent } from "@/lib/stripe";
+import { cancelPaymentIntent, capturePaymentIntent } from "@/lib/stripe";
 import { getSettings } from "@/lib/settings";
+import { gstFromInclusive } from "@/lib/money";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { sendNotification } from "@/server/services/notification-sender";
 import { trackServer } from "@/lib/analytics";
@@ -25,10 +26,18 @@ import { getQueue, monitorCron, registerWorker } from "./queue";
  *   - `cancellation.noShowFee`          (default 50; only used as a
  *                                        fallback when no bond was held)
  *
- * Bond handling:
- *   - HELD bond → fully captured as `No-show forfeiture`. Mirrors the
- *     captureBond pattern in booking-settlement.ts (ledger update +
- *     BOND_CAPTURE Payment row).
+ * Bond handling (policy: "no refund + no-show fee", NOT full forfeiture —
+ * the bond is security, not a penalty pool):
+ *   - HELD bond → capture ONLY the configured no-show fee from the hold
+ *     (partial capture; Stripe auto-releases the remainder — a manual-
+ *     capture PI is single-capture, so this is one terminal operation).
+ *     Ledger lands FULLY_CAPTURED with the remainder recorded released,
+ *     plus a BOND_RELEASE Payment row so the customer ledger shows the
+ *     money coming back.
+ *   - Fee exceeds the capturable hold → capture what's there and raise the
+ *     shortfall as a PENDING MANUAL_CHARGE (collected off-session by
+ *     capture-pending-payments).
+ *   - Fee is zero / nothing capturable → cancel the hold outright.
  *   - No bond ledger (cash / walk-in) → MANUAL_CHARGE Payment row for
  *     the configured no-show fee, since there's no existing auth to
  *     capture from.
@@ -80,37 +89,54 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
     },
   });
 
+  const round2 = (x: number) => Math.round(x * 100) / 100;
+
   let marked = 0;
   for (const b of candidates) {
     const ledger = b.bondLedger;
-    const canForfeitBond = !!ledger && ledger.status === "HELD";
-    // Forfeit only the still-capturable remainder so a bond that was already
-    // part-released can't push captured+released over heldAmount (DB CHECK).
-    const forfeitedAmount =
-      canForfeitBond && ledger
+    const hasHeldBond = !!ledger && ledger.status === "HELD";
+    // Only the still-capturable remainder is in play so a bond that was
+    // already part-released can't push captured+released over heldAmount
+    // (DB CHECK).
+    const capturable =
+      hasHeldBond && ledger
         ? Math.max(
             0,
-            Number(ledger.heldAmount) -
-              Number(ledger.capturedAmount) -
-              Number(ledger.releasedAmount),
+            round2(
+              Number(ledger.heldAmount) -
+                Number(ledger.capturedAmount) -
+                Number(ledger.releasedAmount),
+            ),
           )
         : 0;
+    // Policy: capture only the no-show FEE from the bond, release the rest.
+    const captureTarget = round2(Math.min(feeAud, capturable));
+    const releaseRemainder = round2(capturable - captureTarget);
+    // Fee not covered by the bond (short hold, or no bond at all) → residual
+    // raised as a PENDING card charge below.
+    const residualFee = b.customerId ? round2(Math.max(0, feeAud - captureTarget)) : 0;
 
-    // Capture the bond hold at Stripe BEFORE the DB transaction. On a Stripe
-    // failure, skip this booking entirely — the CONFIRMED filter makes the
-    // next run retry rather than leaving a phantom forfeiture on the books.
+    // Talk to Stripe BEFORE the DB transaction. On a Stripe failure, skip
+    // this booking entirely — the CONFIRMED filter makes the next run retry
+    // rather than leaving a phantom forfeiture on the books.
     let bondChargeId: string | null = null;
-    if (canForfeitBond && forfeitedAmount > 0 && ledger) {
+    if (hasHeldBond && ledger) {
       try {
-        const capture = await capturePaymentIntent(ledger.stripePaymentIntentId, {
-          amountToCaptureCents: Math.round(forfeitedAmount * 100),
-          idempotencyKey: `bond-capture-noshow-${b.id}`,
-        });
-        bondChargeId = capture.latestChargeId;
+        if (captureTarget > 0) {
+          // Partial capture is terminal: Stripe auto-releases the remainder.
+          const capture = await capturePaymentIntent(ledger.stripePaymentIntentId, {
+            amountToCaptureCents: Math.round(captureTarget * 100),
+            idempotencyKey: `bond-capture-noshow-${b.id}`,
+          });
+          bondChargeId = capture.latestChargeId;
+        } else if (capturable > 0) {
+          // Nothing to collect (fee configured to 0) — release the hold.
+          await cancelPaymentIntent(ledger.stripePaymentIntentId);
+        }
       } catch (err) {
         logger.warn(
           { err, bookingId: b.id, bookingReference: b.bookingReference },
-          "no-show-detector: bond capture failed at Stripe; skipping this booking (will retry next run)",
+          "no-show-detector: bond capture/release failed at Stripe; skipping this booking (will retry next run)",
         );
         continue;
       }
@@ -142,44 +168,69 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           data: { status: "CANCELLED", cancelReason: "Booking marked as no-show" },
         });
 
-        if (canForfeitBond && forfeitedAmount > 0 && ledger) {
+        if (hasHeldBond && ledger && (captureTarget > 0 || capturable > 0)) {
           const existingDeductions = Array.isArray(ledger.deductions)
             ? [...(ledger.deductions as Array<{ reason: string; amount: number }>)]
             : [];
-          existingDeductions.push({ reason: "No-show forfeiture", amount: forfeitedAmount });
-          // A single capture finalises the hold — land terminal so the DB
-          // CHECK (captured + released == held) holds.
-          const newCaptured = Number(ledger.capturedAmount) + forfeitedAmount;
-          const newReleased = Number(ledger.heldAmount) - newCaptured;
+          if (captureTarget > 0) {
+            existingDeductions.push({ reason: "No-show fee", amount: captureTarget });
+          }
+          // A single capture (or cancel) finalises the hold — land terminal
+          // so the DB CHECK (captured + released == held) holds.
+          const newCaptured = round2(Number(ledger.capturedAmount) + captureTarget);
+          const newReleased = round2(Number(ledger.heldAmount) - newCaptured);
           await tx.bondLedger.update({
             where: { id: ledger.id },
             data: {
-              status: "FULLY_CAPTURED",
+              status: captureTarget > 0 ? "FULLY_CAPTURED" : "RELEASED",
               capturedAmount: newCaptured,
               releasedAmount: newReleased,
               deductions: existingDeductions as unknown as Prisma.InputJsonValue,
             },
           });
-          await tx.payment.create({
-            data: {
-              reference: `BOND-CAP-NOSHOW-${b.id}`,
-              customerId: b.customerId,
-              bookingId: b.id,
-              type: "BOND_CAPTURE",
-              method: "STRIPE",
-              amount: forfeitedAmount,
-              gstAmount: 0,
-              status: "SUCCEEDED",
-              // Link the Stripe ids so reconcile matches this to the charge.
-              stripePaymentIntentId: ledger.stripePaymentIntentId,
-              stripeChargeId: bondChargeId,
-              processedAt: new Date(),
-              notes: "Bond capture: no-show forfeiture",
-            },
-          });
-        } else if (feeAud > 0 && b.customerId) {
-          // No bond auth to capture against — fall back to a manual
-          // charge for the configured no-show fee.
+          if (captureTarget > 0) {
+            await tx.payment.create({
+              data: {
+                reference: `BOND-CAP-NOSHOW-${b.id}`,
+                customerId: b.customerId,
+                bookingId: b.id,
+                type: "BOND_CAPTURE",
+                method: "STRIPE",
+                amount: captureTarget,
+                // A captured bond is consideration for a taxable supply (the
+                // no-show fee) — GST-inclusive like the equivalent card charge.
+                gstAmount: gstFromInclusive(captureTarget),
+                status: "SUCCEEDED",
+                // Link the Stripe ids so reconcile matches this to the charge.
+                stripePaymentIntentId: ledger.stripePaymentIntentId,
+                stripeChargeId: bondChargeId,
+                processedAt: new Date(),
+                notes: "Bond capture: no-show fee",
+              },
+            });
+          }
+          if (releaseRemainder > 0) {
+            // Mirror bond-auto-release bookkeeping so the customer ledger
+            // (and reconcile) shows the remainder coming back off the card.
+            await tx.payment.create({
+              data: {
+                reference: `NOSHOW-RELEASE-${b.id}`,
+                customerId: b.customerId,
+                bookingId: b.id,
+                type: "BOND_RELEASE",
+                method: "STRIPE",
+                amount: releaseRemainder,
+                status: "SUCCEEDED",
+                processedAt: new Date(),
+                notes: "Bond remainder released after no-show fee",
+              },
+            });
+          }
+        }
+
+        if (residualFee > 0 && b.customerId) {
+          // Fee not covered by a bond hold (short hold / no bond) — raise it
+          // as a PENDING charge the capture-pending job collects off-session.
           await tx.payment.create({
             data: {
               reference: `NOSHOW-${b.id}`,
@@ -187,7 +238,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
               bookingId: b.id,
               type: "MANUAL_CHARGE",
               method: "STRIPE",
-              amount: feeAud,
+              amount: residualFee,
               status: "PENDING",
               notes: `No-show fee (pickup ${b.pickupDateTime.toISOString()})`,
             },
@@ -197,7 +248,7 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           // raise→add / collect→remove invariant (see balance-due.ts).
           await tx.booking.update({
             where: { id: b.id },
-            data: { balanceDue: { increment: feeAud } },
+            data: { balanceDue: { increment: residualFee } },
           });
         }
 
@@ -219,16 +270,30 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           bookingReference: b.bookingReference,
           pickupDateTime: b.pickupDateTime.toISOString(),
           graceHours,
-          bondForfeitedAud: canForfeitBond ? forfeitedAmount : 0,
-          fallbackFeeAud: canForfeitBond ? 0 : feeAud,
+          bondFeeCapturedAud: captureTarget,
+          bondReleasedAud: releaseRemainder,
+          residualFeeAud: residualFee,
           vehicleReleased: !!b.vehicleId,
         },
       });
 
       if (b.customerId) {
-        const body = canForfeitBond
-          ? `We're sorry we missed you. Booking ${b.bookingReference} was scheduled to start at ${b.pickupDateTime.toISOString()}; we waited ${graceHours} hours before marking it as a no-show. Your A$${forfeitedAmount.toFixed(2)} bond has been forfeited per our cancellation policy.\n\nIf this is a mistake or you'd like to rebook, please contact us.`
-          : `We're sorry we missed you. Booking ${b.bookingReference} was scheduled to start at ${b.pickupDateTime.toISOString()}; we waited ${graceHours} hours before marking it as a no-show. A no-show fee of A$${feeAud.toFixed(2)} has been applied.\n\nIf this is a mistake or you'd like to rebook, please contact us.`;
+        const intro = `We're sorry we missed you. Booking ${b.bookingReference} was scheduled to start at ${b.pickupDateTime.toISOString()}; we waited ${graceHours} hours before marking it as a no-show.`;
+        const feeLine =
+          captureTarget > 0
+            ? ` The A$${captureTarget.toFixed(2)} no-show fee was charged against your bond${
+                releaseRemainder > 0
+                  ? `, and the remaining A$${releaseRemainder.toFixed(2)} hold has been released back to your card`
+                  : ""
+              }.`
+            : "";
+        const residualLine =
+          residualFee > 0
+            ? ` A no-show fee of A$${residualFee.toFixed(2)} has been applied${
+                captureTarget > 0 ? " for the portion not covered by your bond" : ""
+              } and will be charged to your card on file.`
+            : "";
+        const body = `${intro}${feeLine}${residualLine}\n\nIf this is a mistake or you'd like to rebook, please contact us.`;
         await sendNotification({
           userId: b.customerId,
           type: "BOOKING_CANCELLED",
@@ -239,8 +304,9 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
           bookingId: b.id,
           data: {
             bookingReference: b.bookingReference,
-            bondForfeitedAud: canForfeitBond ? forfeitedAmount : 0,
-            fallbackFeeAud: canForfeitBond ? 0 : feeAud,
+            bondFeeCapturedAud: captureTarget,
+            bondReleasedAud: releaseRemainder,
+            residualFeeAud: residualFee,
           },
         });
         await trackServer({
@@ -250,8 +316,9 @@ export async function runNoShowDetector(opts: { graceHours?: number; feeAud?: nu
             bookingId: b.id,
             reference: b.bookingReference,
             graceHours,
-            bondForfeitedAud: canForfeitBond ? forfeitedAmount : 0,
-            noShowFeeAud: canForfeitBond ? 0 : feeAud,
+            bondFeeCapturedAud: captureTarget,
+            bondReleasedAud: releaseRemainder,
+            noShowFeeAud: residualFee,
           },
           groups: { depot: b.pickupDepot.slug },
         });

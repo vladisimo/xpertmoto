@@ -1,13 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getBranding } from "@/lib/branding";
+import { buildMetadata } from "@/lib/seo/metadata";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { siteName } = await getBranding();
-  return {
-    title: `Trust & Security | ${siteName}`,
+  return buildMetadata({
+    title: "Trust & Security",
     description: `How ${siteName} protects your data: Essential Eight maturity, encryption, access controls, backups, and breach response.`,
-  };
+    path: "/trust",
+  });
 }
 
 const LAST_REVIEWED = "21 April 2026";

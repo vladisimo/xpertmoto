@@ -31,6 +31,7 @@ import {
   previewBookingChange,
   applyBookingChange,
   BookingChangeNotAllowedError,
+  BookingChangeConflictError,
 } from "@/server/services/booking-change";
 
 // Far-future window so the real Date.now() "pickup not in the past" guard holds.
@@ -66,18 +67,30 @@ function makeBooking(over: Record<string, unknown> = {}) {
   };
 }
 
-function makePrisma(booking: Record<string, unknown>) {
+function makePrisma(booking: Record<string, unknown>, opts: { casMatches?: boolean } = {}) {
+  // The commit path runs inside $transaction with a CAS updateMany guard;
+  // casMatches=false simulates a concurrent change landing between preview
+  // and commit (the CAS matches zero rows).
+  const tx = {
+    booking: {
+      updateMany: vi.fn().mockResolvedValue({ count: opts.casMatches === false ? 0 : 1 }),
+      findUniqueOrThrow: vi.fn().mockResolvedValue(booking),
+    },
+    bookingNote: { create: vi.fn() },
+    bookingStatusLog: { create: vi.fn() },
+    payment: {
+      count: vi.fn().mockResolvedValue(0),
+      create: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => data),
+    },
+  };
   const prisma = {
     booking: {
       findUniqueOrThrow: vi.fn().mockResolvedValue(booking),
-      update: vi.fn().mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({
-        ...booking,
-        ...data,
-      })),
     },
     payment: { findFirst: vi.fn().mockResolvedValue({ id: "pay_chg" }) },
+    $transaction: vi.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)),
   };
-  return prisma as never;
+  return { prisma: prisma as never, tx };
 }
 
 beforeEach(() => {
@@ -87,7 +100,7 @@ beforeEach(() => {
 
 describe("previewBookingChange — guards", () => {
   it("rejects a non-CONFIRMED booking", async () => {
-    const prisma = makePrisma(makeBooking({ status: "ACTIVE" }));
+    const { prisma } = makePrisma(makeBooking({ status: "ACTIVE" }));
     await expect(
       previewBookingChange(prisma, {
         bookingId: "b1",
@@ -98,7 +111,7 @@ describe("previewBookingChange — guards", () => {
   });
 
   it("rejects a discounted booking (code not stored — can't re-quote faithfully)", async () => {
-    const prisma = makePrisma(makeBooking({ discountAmount: 20 }));
+    const { prisma } = makePrisma(makeBooking({ discountAmount: 20 }));
     await expect(
       previewBookingChange(prisma, {
         bookingId: "b1",
@@ -109,7 +122,7 @@ describe("previewBookingChange — guards", () => {
   });
 
   it("rejects a subscription / long-term-plan booking", async () => {
-    const prisma = makePrisma(makeBooking({ subscriptionId: "sub1" }));
+    const { prisma } = makePrisma(makeBooking({ subscriptionId: "sub1" }));
     await expect(
       previewBookingChange(prisma, {
         bookingId: "b1",
@@ -120,7 +133,7 @@ describe("previewBookingChange — guards", () => {
   });
 
   it("rejects an unchanged window", async () => {
-    const prisma = makePrisma(makeBooking());
+    const { prisma } = makePrisma(makeBooking());
     await expect(
       previewBookingChange(prisma, {
         bookingId: "b1",
@@ -134,7 +147,7 @@ describe("previewBookingChange — guards", () => {
 describe("previewBookingChange — repricing & settlement maths", () => {
   it("computes an INCREASE delta and raised balance", async () => {
     quoteMock.mockResolvedValue({ totalAmount: 405, durationDays: 5 });
-    const prisma = makePrisma(makeBooking());
+    const { prisma } = makePrisma(makeBooking());
 
     const { preview } = await previewBookingChange(prisma, {
       bookingId: "b1",
@@ -150,7 +163,7 @@ describe("previewBookingChange — repricing & settlement maths", () => {
 
   it("computes a DECREASE within the balance (no credit)", async () => {
     quoteMock.mockResolvedValue({ totalAmount: 162, durationDays: 2 });
-    const prisma = makePrisma(makeBooking());
+    const { prisma } = makePrisma(makeBooking());
 
     const { preview } = await previewBookingChange(prisma, {
       bookingId: "b1",
@@ -167,7 +180,7 @@ describe("previewBookingChange — repricing & settlement maths", () => {
   it("retains the surplus as account credit when a reduction overpays the balance", async () => {
     // Fully-paid booking (balanceDue 0); a big reduction overpays it.
     quoteMock.mockResolvedValue({ totalAmount: 162, durationDays: 2 });
-    const prisma = makePrisma(makeBooking({ totalAmount: 483, amountPaid: 483, balanceDue: 0 }));
+    const { prisma } = makePrisma(makeBooking({ totalAmount: 483, amountPaid: 483, balanceDue: 0 }));
 
     const { preview } = await previewBookingChange(prisma, {
       bookingId: "b1",
@@ -185,7 +198,7 @@ describe("previewBookingChange — repricing & settlement maths", () => {
 describe("applyBookingChange — settlement side effects", () => {
   it("raises a PENDING EXTENSION charge and an INCREASE adjustment on an increase", async () => {
     quoteMock.mockResolvedValue({ totalAmount: 405, durationDays: 5 });
-    const prisma = makePrisma(makeBooking());
+    const { prisma, tx } = makePrisma(makeBooking());
 
     await applyBookingChange(prisma, {
       bookingId: "b1",
@@ -194,15 +207,28 @@ describe("applyBookingChange — settlement side effects", () => {
       actorUserId: "cust1",
     });
 
-    const update = (prisma as never as {
-      booking: { update: { mock: { calls: [{ data: Record<string, unknown> }][] } } };
-    }).booking.update.mock.calls[0]![0]!.data;
-    expect(update.balanceDue).toBe(301.5);
-    expect((update.payments as { create: Record<string, unknown> }).create).toMatchObject({
-      type: "EXTENSION",
-      status: "PENDING",
-      amount: 162,
+    const cas = tx.booking.updateMany.mock.calls[0]![0]! as {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    };
+    // CAS keyed on the exact previewed state — a concurrent change loses.
+    expect(cas.where).toMatchObject({
+      id: "b1",
+      status: "CONFIRMED",
+      pickupDateTime: OLD_PICKUP,
+      returnDateTime: OLD_RETURN,
     });
+    expect(cas.data.balanceDue).toBe(301.5);
+    expect(tx.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "EXTENSION",
+          status: "PENDING",
+          amount: 162,
+          reference: "CHG-b1-1", // deterministic per-booking sequence, not Date.now()
+        }),
+      }),
+    );
     expect(tryIssueAdjustmentForBooking).toHaveBeenCalledWith(
       expect.objectContaining({ type: "INCREASE", bookingId: "b1" }),
     );
@@ -210,7 +236,7 @@ describe("applyBookingChange — settlement side effects", () => {
 
   it("creates no Payment and issues a DECREASE adjustment on a reduction", async () => {
     quoteMock.mockResolvedValue({ totalAmount: 162, durationDays: 2 });
-    const prisma = makePrisma(makeBooking());
+    const { prisma, tx } = makePrisma(makeBooking());
 
     await applyBookingChange(prisma, {
       bookingId: "b1",
@@ -219,13 +245,30 @@ describe("applyBookingChange — settlement side effects", () => {
       actorUserId: "cust1",
     });
 
-    const update = (prisma as never as {
-      booking: { update: { mock: { calls: [{ data: Record<string, unknown> }][] } } };
-    }).booking.update.mock.calls[0]![0]!.data;
-    expect(update.payments).toBeUndefined();
-    expect(update.balanceDue).toBe(58.5);
+    expect(tx.payment.create).not.toHaveBeenCalled();
+    const cas = tx.booking.updateMany.mock.calls[0]![0]! as {
+      data: Record<string, unknown>;
+    };
+    expect(cas.data.balanceDue).toBe(58.5);
     expect(tryIssueAdjustmentForBooking).toHaveBeenCalledWith(
       expect.objectContaining({ type: "DECREASE", bookingId: "b1" }),
     );
+  });
+
+  it("throws a conflict (and raises no charge) when the CAS loses a concurrent change", async () => {
+    quoteMock.mockResolvedValue({ totalAmount: 405, durationDays: 5 });
+    const { prisma, tx } = makePrisma(makeBooking(), { casMatches: false });
+
+    await expect(
+      applyBookingChange(prisma, {
+        bookingId: "b1",
+        newPickupDateTime: OLD_PICKUP,
+        newReturnDateTime: new Date("2027-07-13T09:00:00Z"),
+        actorUserId: "cust1",
+      }),
+    ).rejects.toBeInstanceOf(BookingChangeConflictError);
+    // The loser must not create a second chargeable Payment row.
+    expect(tx.payment.create).not.toHaveBeenCalled();
+    expect(tryIssueAdjustmentForBooking).not.toHaveBeenCalled();
   });
 });

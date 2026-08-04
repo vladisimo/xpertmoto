@@ -9,13 +9,9 @@ import { ExploreTours } from "@/components/marketing/explore-tours";
 import { ToursCarousel } from "@/components/marketing/tours-carousel";
 import { BrandsGrid } from "@/components/marketing/brands-grid";
 import { PublicDepotMap, getDirectionsUrl } from "@/components/maps/public-depot-map";
-import {
-  HomeFleetPreview,
-  type HomeFleetPreviewModel,
-} from "@/components/fleet/home-fleet-preview";
-import { prisma } from "@/lib/prisma";
+import { HomeFleetPreview } from "@/components/fleet/home-fleet-preview";
 import { getBranding } from "@/lib/branding";
-import { RENTABLE_MODEL_WHERE } from "@/lib/fleet/consumer-visibility";
+import { getHomeDepots, getFleetPreview } from "@/lib/home/home-data";
 import { getSiteUrl, absoluteUrl } from "@/lib/seo/site-url";
 import { organizationLd } from "@/lib/seo/json-ld";
 import { JsonLd } from "@/components/seo/json-ld";
@@ -42,82 +38,9 @@ const HERO_SLIDES = [
   { imageSrc: "/landing_hero_sllides/xpert-motorcycle-mechanic-desktop.webp",         imageAlt: "Motorcycle mechanic workshop" },
 ];
 
-async function getFleetPreview(): Promise<HomeFleetPreviewModel[]> {
-  const models = await prisma.vehicleModel.findMany({
-    where: {
-      ...RENTABLE_MODEL_WHERE,
-      useCases: { isEmpty: false },
-    },
-    select: {
-      id: true,
-      slug: true,
-      make: true,
-      model: true,
-      year: true,
-      tagline: true,
-      useCases: true,
-      riderLevels: true,
-      category: {
-        select: {
-          id: true,
-          licenceRequired: true,
-          baseDailyRate: true,
-        },
-      },
-      vehicles: {
-        where: { isActive: true },
-        select: {
-          status: true,
-          images: {
-            where: { isPrimary: true },
-            orderBy: { displayOrder: "asc" },
-            take: 1,
-            select: { url: true },
-          },
-        },
-      },
-    },
-  });
-
-  return models
-    .map((m) => {
-      const availableCount = m.vehicles.filter((v) => v.status === "AVAILABLE").length;
-      const primaryImageUrl =
-        m.vehicles.flatMap((v) => v.images).find((img) => Boolean(img?.url))?.url ?? null;
-      return {
-        id: m.id,
-        slug: m.slug,
-        make: m.make,
-        model: m.model,
-        year: m.year,
-        tagline: m.tagline,
-        useCases: m.useCases,
-        riderLevels: m.riderLevels,
-        category: {
-          id: m.category?.id ?? "",
-          licenceRequired: m.category?.licenceRequired ?? "",
-          baseDailyRate: m.category ? m.category.baseDailyRate.toNumber() : 0,
-        },
-        availableCount,
-        primaryImageUrl,
-      };
-    })
-    .filter((m) => m.primaryImageUrl !== null);
-}
-
 export default async function HomePage() {
   const [depots, branding, fleetPreview] = await Promise.all([
-    prisma.depot.findMany({
-      where: { isActive: true, deletedAt: null },
-      orderBy: { name: "asc" },
-      include: {
-        _count: { select: { vehicles: { where: { status: "AVAILABLE" } } } },
-        operatingHours: {
-          where: { holidayDate: null },
-          orderBy: { dayOfWeek: "asc" },
-        },
-      },
-    }),
+    getHomeDepots(),
     getBranding(),
     getFleetPreview(),
   ]);
@@ -326,7 +249,7 @@ export default async function HomePage() {
                     href={`/locations#${d.id}`}
                     className="group rounded-md border border-border bg-card p-5 transition-shadow hover:shadow-md"
                   >
-                    <div className="h3">{d.name}</div>
+                    <h3 className="h3">{d.name}</h3>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {d.suburb}, {d.state} {d.postcode}
                     </p>

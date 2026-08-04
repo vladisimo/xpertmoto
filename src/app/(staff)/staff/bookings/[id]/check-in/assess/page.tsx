@@ -31,6 +31,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     { assessmentId: assessment?.id ?? "" },
     { enabled: !!assessment },
   );
+  const { data: inspections } = trpc.inspection.byBooking.useQuery({ bookingId: id });
 
   const upsertCharge = trpc.return.upsertDamageCharge.useMutation();
   const removeCharge = trpc.return.removeDamageCharge.useMutation();
@@ -43,6 +44,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     amount: string;
     quoteCap: string;
     note: string;
+    inspectionIssueId: string | null;
   }>({
     description: "",
     severity: "MINOR",
@@ -51,6 +53,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     amount: "",
     quoteCap: "",
     note: "",
+    inspectionIssueId: null,
   });
   const [err, setErr] = useState<string | null>(null);
 
@@ -64,6 +67,34 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     );
   }
 
+  const postHire = inspections?.find((i) => i.type === "POST_HIRE");
+  const issues = postHire?.issues ?? [];
+  const linkedIssueIds = new Set(
+    (assessment.damageCharges ?? []).map((c) => c.inspectionIssueId).filter((x): x is string => !!x),
+  );
+
+  /** Prefill the damage-line form from a pinned inspection issue (one tap). */
+  function raiseFromIssue(issue: {
+    id: string;
+    label: string;
+    severity: "MINOR" | "MODERATE" | "MAJOR";
+    damageTariffId: string | null;
+    note: string | null;
+  }) {
+    setErr(null);
+    const t = tariffs?.find((x) => x.id === issue.damageTariffId);
+    setDraft({
+      description: issue.label,
+      severity: issue.severity,
+      resolution: "STANDARD",
+      tariffId: issue.damageTariffId,
+      amount: t ? t.defaultPrice.toString() : "",
+      quoteCap: "",
+      note: issue.note ?? "",
+      inspectionIssueId: issue.id,
+    });
+  }
+
   async function addCharge() {
     if (!assessment || !draft.description) {
       setErr("Add a description for the damage.");
@@ -75,6 +106,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     try {
       await upsertCharge.mutateAsync({
         assessmentId: assessment.id,
+        inspectionIssueId: draft.inspectionIssueId ?? undefined,
         description: draft.description,
         severity: draft.severity,
         resolution: draft.resolution,
@@ -92,6 +124,7 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
         amount: "",
         quoteCap: "",
         note: "",
+        inspectionIssueId: null,
       });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to add charge");
@@ -122,16 +155,63 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
           { label: "2. Assess" },
         ]}
         title="Damage assessment"
-        description="Add one line per damage item. Standard tariff bills on the spot; quote-pending opens a work order."
+        description="Raise a charge from each identified issue, or add a line manually. Standard tariff bills on the spot; quote-pending opens a work order."
         back={`/staff/bookings/${id}/check-in`}
         mobileCompact
       />
+
+      {issues.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">Identified issues</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="caption mb-3">
+              Damage pinned during the return inspection. Tap “Raise charge” to bill it — a catalogue label pre-fills the
+              price and attaches the photo.
+            </p>
+            <ul className="divide-y">
+              {issues.map((iss) => {
+                const linked = linkedIssueIds.has(iss.id);
+                return (
+                  <li key={iss.id} className="flex items-center gap-3 py-2">
+                    {iss.inspectionPhoto?.url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={iss.inspectionPhoto.url} alt="" className="h-12 w-12 shrink-0 rounded object-cover" />
+                    ) : (
+                      <div className="h-12 w-12 shrink-0 rounded bg-muted" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{iss.label}</div>
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <StatusBadge status={iss.severity as StatusKey} />
+                        {iss.side ? <span>· {sideLabel(iss.side)}</span> : null}
+                        {iss.note ? <span className="truncate">· {iss.note}</span> : null}
+                      </div>
+                    </div>
+                    {linked ? (
+                      <span className="caption shrink-0">Charged ✓</span>
+                    ) : (
+                      <Button type="button" size="sm" variant="secondary" onClick={() => raiseFromIssue(iss)}>
+                        Raise charge
+                      </Button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
           <CardTitle className="h3">Add a damage line</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {draft.inspectionIssueId && (
+            <p className="caption">Linked to a pinned issue — its photo attaches to this charge automatically.</p>
+          )}
           <div>
             <Label>Description</Label>
             <Input
@@ -329,6 +409,10 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
       </MobileBottomBar>
     </PageShell>
   );
+}
+
+function sideLabel(s: string): string {
+  return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
 function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {

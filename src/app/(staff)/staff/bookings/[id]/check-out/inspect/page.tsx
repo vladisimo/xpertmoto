@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
@@ -12,8 +12,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
 import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { LoadingBlock } from "@/components/ui/spinner";
-import { DamageMapCanvas, normalizeMarkers, type DamageMarker } from "@/components/agreement/damage-map-canvas";
-import { PhotoCaptureGrid } from "@/components/agreement/photo-capture-grid";
+import { PhotoIssueCapture } from "@/components/agreement/photo-issue-capture";
 
 export default function CheckOutInspectPage(props: { params: Promise<{ id: string }> }) {
   const { id } = use(props.params);
@@ -34,18 +33,8 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
   const [overall, setOverall] = useState<"EXCELLENT" | "GOOD" | "FAIR" | "POOR">(
     (existingPre?.overallCondition as "EXCELLENT" | "GOOD" | "FAIR" | "POOR" | undefined) ?? "GOOD",
   );
-  const [severity, setSeverity] = useState<"MINOR" | "MODERATE" | "MAJOR">("MINOR");
-  const [markers, setMarkers] = useState<DamageMarker[]>(() => {
-    const src = (existingPre?.bodyDamageMap as unknown as { markers?: unknown[] } | null)?.markers ?? [];
-    return normalizeMarkers(src);
-  });
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  const photos = useMemo(
-    () => (existingPre?.photos ?? []).map((p) => ({ id: p.id, url: p.url, caption: p.caption ?? undefined })),
-    [existingPre?.photos],
-  );
 
   if (!b) return <PageShell><LoadingBlock padded="lg" /></PageShell>;
 
@@ -64,15 +53,6 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
         odometerKm: Number(odometer || 0),
         fuelLevel: Number(fuel),
         overallCondition: overall,
-        damageMarkers: markers.map((m) => ({
-          id: m.id,
-          x: m.x,
-          y: m.y,
-          severity: m.severity,
-          note: m.note,
-          source: m.source,
-          view: m.view ?? "LEFT",
-        })),
         status: "DRAFT",
       });
       setCreatedInspectionId(draft.id);
@@ -94,16 +74,6 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
         odometerKm: Number(odometer || 0),
         fuelLevel: Number(fuel),
         overallCondition: overall,
-        damageMarkers: markers.map((m) => ({
-          id: m.id,
-          x: m.x,
-          y: m.y,
-          severity: m.severity,
-          note: m.note,
-          source: m.source,
-          view: m.view ?? "LEFT",
-          addedAt: m.addedAt,
-        })),
       });
       await utils.inspection.byBooking.invalidate({ bookingId: b!.id });
       setErr(null);
@@ -130,7 +100,7 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
           { label: "1. Pre-hire inspection" },
         ]}
         title="Pre-hire inspection"
-        description="Run this before the customer arrives. Photos and the damage map become the reference for the return assessment."
+        description="Run this before the customer arrives. The photos and the issues you pin on them become the reference for the return assessment."
         back={`/staff/bookings/${id}/check-out`}
         mobileCompact
       />
@@ -193,16 +163,10 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
       {inspectionId ? (
         <Card>
           <CardHeader>
-            <CardTitle className="h3">Photos</CardTitle>
+            <CardTitle className="h3">Photos &amp; pre-existing damage</CardTitle>
           </CardHeader>
           <CardContent>
-            <PhotoCaptureGrid
-              uploadUrl="/api/upload/inspection-photo"
-              extraFields={{ inspectionId }}
-              initial={photos}
-              onUploaded={() => utils.inspection.byBooking.invalidate({ bookingId: b.id })}
-              onRemoved={() => utils.inspection.byBooking.invalidate({ bookingId: b.id })}
-            />
+            <PhotoIssueCapture inspectionId={inspectionId} categoryId={b.categoryId} />
           </CardContent>
         </Card>
       ) : (
@@ -212,39 +176,6 @@ export default function CheckOutInspectPage(props: { params: Promise<{ id: strin
           </CardContent>
         </Card>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="h3">Existing damage</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2 text-sm">
-            <span>Severity:</span>
-            {(["MINOR", "MODERATE", "MAJOR"] as const).map((s) => (
-              <Button
-                key={s}
-                type="button"
-                variant={severity === s ? "default" : "secondary"}
-                size="sm"
-                onClick={() => setSeverity(s)}
-              >
-                {s.slice(0, 1) + s.slice(1).toLowerCase()}
-              </Button>
-            ))}
-          </div>
-          <DamageMapCanvas
-            markers={markers}
-            onChange={setMarkers}
-            activeSeverity={severity}
-            source="staff"
-          />
-          <p className="caption">
-            {markers.length === 0
-              ? "No existing damage marked. Tap the silhouette to add a marker."
-              : `${markers.length} marker(s) recorded.`}
-          </p>
-        </CardContent>
-      </Card>
 
       {err && (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">

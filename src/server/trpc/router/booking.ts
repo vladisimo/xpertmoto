@@ -51,6 +51,7 @@ import {
   previewBookingChange,
   applyBookingChange,
   BookingChangeNotAllowedError,
+  BookingChangeConflictError,
 } from "@/server/services/booking-change";
 import {
   skipAutoAudit,
@@ -779,6 +780,27 @@ export const bookingRouter = createTRPCRouter({
         }
       }
 
+      // Claim the discount code atomically BEFORE the booking exists: the
+      // conditional usedCount increment is the arbiter, so an exhausted /
+      // expired / concurrent-final-use code rejects cleanly instead of
+      // discounting forever (usedCount was previously never written at all).
+      if (input.discountCode && pricing.discountAmount > 0) {
+        const claimed = await ctx.prisma.discount.updateMany({
+          where: {
+            code: input.discountCode,
+            isActive: true,
+            OR: [{ maxUses: null }, { usedCount: { lt: ctx.prisma.discount.fields.maxUses } }],
+          },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (claimed.count === 0) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "That discount code is no longer valid — remove it and try again.",
+          });
+        }
+      }
+
       const booking = await withUniqueRetry(
         () =>
           ctx.prisma.booking.create({
@@ -890,6 +912,19 @@ export const bookingRouter = createTRPCRouter({
               customerId: stripeCustomerId,
             })
           : null;
+
+      // Persist the server-created PI ids so confirmPayment can verify the
+      // client-supplied ids against them — a forged or foreign PI (right
+      // status, wrong booking/amount) must never confirm this booking.
+      if (paymentIntent || bondIntent) {
+        await ctx.prisma.booking.update({
+          where: { id: booking.id },
+          data: {
+            stripePaymentIntentId: paymentIntent?.id ?? undefined,
+            bondPaymentIntentId: bondIntent?.id ?? undefined,
+          },
+        });
+      }
 
       // Lever 5 + Lever 4: best-effort attribution. Never blocks the
       // booking if lookup fails.
@@ -1160,41 +1195,82 @@ export const bookingRouter = createTRPCRouter({
       const newDuration =
         booking.durationDays + extensionQuote.extensionDays;
 
-      const updated = await ctx.prisma.booking.update({
-        where: { id: booking.id },
-        data: {
-          returnDateTime: input.newReturnDateTime,
-          durationDays: newDuration,
-          totalAmount: newTotal,
-          balanceDue: newBalance,
-          bookingNotes: {
-            create: {
-              userId: ctx.user.id,
-              note: `Extended return by ${extensionQuote.extensionDays} day(s) → ${input.newReturnDateTime.toLocaleString("en-AU")}. Extension charge A$${extensionQuote.totalAmount.toFixed(2)} (current rates).`,
-              isInternal: false,
-            },
+      // Commit as a CAS keyed on the return time the quote priced: a
+      // double-clicked submit (or a concurrent staff extension) would
+      // otherwise create two PENDING EXTENSION rows, each charged
+      // off-session — a double charge for one extension. The loser matches
+      // zero rows and gets a CONFLICT. Deterministic per-booking sequence
+      // reference is the second line of defence (unique constraint).
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const guard = await tx.booking.updateMany({
+          where: {
+            id: booking.id,
+            status: booking.status,
+            returnDateTime: oldReturn,
+            totalAmount: booking.totalAmount,
           },
-          statusLog: {
-            create: {
-              previousStatus: booking.status,
-              newStatus: booking.status,
-              changedById: ctx.user.id,
-              reason: `Extended by ${extensionQuote.extensionDays} day(s) — delta A$${extensionQuote.totalAmount.toFixed(2)}`,
-            },
+          data: {
+            returnDateTime: input.newReturnDateTime,
+            durationDays: newDuration,
+            totalAmount: newTotal,
+            balanceDue: newBalance,
           },
-          payments: {
-            create: {
-              reference: `EXT-${Date.now()}`,
-              customerId: booking.customerId,
-              type: "EXTENSION",
-              method: "STRIPE",
-              amount: extensionQuote.totalAmount,
-              gstAmount: extensionQuote.gstAmount,
-              status: "PENDING",
-              notes: `Extension +${extensionQuote.extensionDays} day(s)`,
-            },
+        });
+        if (guard.count === 0) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message:
+              "This booking changed while your extension was in flight — please review the details and try again.",
+          });
+        }
+        await tx.bookingNote.create({
+          data: {
+            bookingId: booking.id,
+            userId: ctx.user.id,
+            note: `Extended return by ${extensionQuote.extensionDays} day(s) → ${input.newReturnDateTime.toLocaleString("en-AU")}. Extension charge A$${extensionQuote.totalAmount.toFixed(2)} (current rates).`,
+            isInternal: false,
           },
-        },
+        });
+        await tx.bookingStatusLog.create({
+          data: {
+            bookingId: booking.id,
+            previousStatus: booking.status,
+            newStatus: booking.status,
+            changedById: ctx.user.id,
+            reason: `Extended by ${extensionQuote.extensionDays} day(s) — delta A$${extensionQuote.totalAmount.toFixed(2)}`,
+          },
+        });
+        const priorExtensions = await tx.payment.count({
+          where: { bookingId: booking.id, reference: { startsWith: `EXT-${booking.id}-` } },
+        });
+        await tx.payment.create({
+          data: {
+            reference: `EXT-${booking.id}-${priorExtensions + 1}`,
+            customerId: booking.customerId,
+            bookingId: booking.id,
+            type: "EXTENSION",
+            method: "STRIPE",
+            amount: extensionQuote.totalAmount,
+            gstAmount: extensionQuote.gstAmount,
+            status: "PENDING",
+            notes: `Extension +${extensionQuote.extensionDays} day(s)`,
+          },
+        });
+        // Narrow select on purpose: no client reads the booking from this
+        // mutation's result (both extend surfaces just refresh), and
+        // returning the full model from inside $transaction pushed tRPC's
+        // AppRouter type inference over a limit that degraded UNRELATED
+        // router outputs (fleet.liveLocations) to `any`.
+        return tx.booking.findUniqueOrThrow({
+          where: { id: booking.id },
+          select: {
+            id: true,
+            returnDateTime: true,
+            durationDays: true,
+            totalAmount: true,
+            balanceDue: true,
+          },
+        });
       });
 
       // Issue an ATO §29-75 adjustment note for the extension delta. The
@@ -1388,6 +1464,9 @@ export const bookingRouter = createTRPCRouter({
       } catch (err) {
         if (err instanceof BookingChangeNotAllowedError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        if (err instanceof BookingChangeConflictError) {
+          throw new TRPCError({ code: "CONFLICT", message: err.message });
         }
         throw err;
       }

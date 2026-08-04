@@ -127,10 +127,22 @@ describe("dunning ladder", () => {
     );
   });
 
-  it("stops at stage 5 — no stage 6 exists", async () => {
+  it("stage 5 re-fires every 30 days — unresolved debt never goes silent", async () => {
     debtorsList.mockResolvedValue([mkDebtor({ id: "c6", owed: 2000 })]);
     commFindMany.mockResolvedValue([
       { templateUsed: "DUNNING_STAGE_5", sentAt: new Date(Date.now() - 120 * 86_400_000) },
+    ]);
+    const { runDunningLadder } = await import("@/server/jobs/dunning-ladder");
+    const r = await runDunningLadder();
+    // Re-escalates at stage 5 (write-off-or-pursue decision), no stage 6.
+    expect(r.progressed).toBe(1);
+    expect(r.stages[5]).toBe(1);
+  });
+
+  it("stage 5 does NOT re-fire inside its 30-day window", async () => {
+    debtorsList.mockResolvedValue([mkDebtor({ id: "c7", owed: 2000 })]);
+    commFindMany.mockResolvedValue([
+      { templateUsed: "DUNNING_STAGE_5", sentAt: new Date(Date.now() - 10 * 86_400_000) },
     ]);
     const { runDunningLadder } = await import("@/server/jobs/dunning-ladder");
     const r = await runDunningLadder();

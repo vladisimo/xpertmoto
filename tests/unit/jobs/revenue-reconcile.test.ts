@@ -9,7 +9,11 @@ const { queryRaw, dailyRevenueUpsert } = vi.hoisted(() => ({
 vi.mock("../../../src/lib/prisma", () => ({
   prisma: {
     $queryRaw: queryRaw,
-    dailyRevenue: { upsert: dailyRevenueUpsert },
+    dailyRevenue: {
+      upsert: dailyRevenueUpsert,
+      // Clobber-fix reads existing live deltas before rebuilding totals.
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
   },
 }));
 

@@ -48,7 +48,12 @@ function makeMockPrisma(paymentCreate: ReturnType<typeof vi.fn>, pickupDateTime?
     extensions: [],
   };
   const tx = {
-    booking: { updateMany: vi.fn().mockResolvedValue({ count: 1 }), update: vi.fn() },
+    booking: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      update: vi.fn(),
+      // amountPaid decrement on settled refunds reads the fresh row first.
+      findUniqueOrThrow: vi.fn().mockResolvedValue({ amountPaid: 300 }),
+    },
     bookingBillingPlan: { findUnique: vi.fn().mockResolvedValue(null), update: vi.fn() },
     bookingStatusLog: { create: vi.fn() },
     bondLedger: { update: vi.fn() },
@@ -57,7 +62,11 @@ function makeMockPrisma(paymentCreate: ReturnType<typeof vi.fn>, pickupDateTime?
   return {
     booking: { findUniqueOrThrow: vi.fn().mockResolvedValue(booking) },
     vehicle: { update: vi.fn() },
-    payment: { findFirst: vi.fn().mockResolvedValue({ id: "ref1" }) },
+    payment: {
+      findFirst: vi.fn().mockResolvedValue({ id: "ref1" }),
+      // Gift-card split: no redemptions in these fixtures.
+      aggregate: vi.fn().mockResolvedValue({ _sum: { amount: null } }),
+    },
     $transaction: vi.fn(async (fn: (t: unknown) => unknown) => fn(tx)),
   } as never;
 }

@@ -67,6 +67,7 @@ export type QueueName =
   | "telemetry-processor"
   | "gps51-sync"
   | "gps51-daily-sync"
+  | "gps51-alerts"
   | "price-recommender"
   | "subscription-billing"
   | "capture-pending-payments"
@@ -88,7 +89,8 @@ export type QueueName =
   | "analytics-alert"
   | "analytics-weekly-digest"
   | "swap-draft-cleanup"
-  | "platform-sentry-stats";
+  | "platform-sentry-stats"
+  | "refund-retry";
 
 export function getConnection(): Redis | null {
   return getRedis();

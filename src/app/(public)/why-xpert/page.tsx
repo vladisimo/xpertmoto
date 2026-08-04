@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import React from "react";
+import Link from "next/link";
 import { Check, X } from "lucide-react";
 import { getBranding } from "@/lib/branding";
 import { DividedTitle } from "@/components/marketing/divided-title";
@@ -14,10 +15,12 @@ import {
 
 export async function generateMetadata(): Promise<Metadata> {
   const { siteName } = await getBranding();
-  const title = `Why ${siteName} — Scooter & Motorbike Hire Platform (Australia) | eFleetPass & Shopify Alternative`;
-  const description = `Replace Shopify, eFleetPass and your helpdesk with one Australian-built scooter and motorbike hire platform. Native bookings, fleet, AI support, GST/ABN-compliant invoicing, and automated toll and infringement admin you can rebill to hirers. Includes a live fleet toll-cost calculator.`;
+  const title = `Why ${siteName} — Scooter & Motorbike Hire Platform`;
+  const description = `Replace Shopify, eFleetPass and your helpdesk with one Australian-built scooter & motorbike hire platform — native bookings, fleet, AI support and toll admin.`;
   return {
-    title,
+    // `absolute` bypasses the root layout's "%s · {siteName}" template so the
+    // title (which already names the brand) isn't double-branded.
+    title: { absolute: title },
     description,
     keywords: [
       "scooter rental software Australia",
@@ -404,7 +407,10 @@ export default async function WhyXpertPage() {
           <p className="caption uppercase tracking-[0.14em] text-muted-foreground">
             Platform comparison · Scooter & motorbike hire (Australia)
           </p>
-          <h1 className="h-display">Why {siteName}</h1>
+          {/* Decorative rotated rail — the real <h1> lives in the in-flow
+              mobile/SnapSection block below, so this stays a styled <p> to
+              keep exactly one <h1> in the document. */}
+          <p className="h-display">Why {siteName}</p>
           <p className="text-muted-foreground">
             One Australian-built platform replacing Shopify, eFleetPass and a
             third-party helpdesk — plus AI, analytics, GST and ABN-compliant
@@ -785,7 +791,7 @@ export default async function WhyXpertPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {GROWTH_CARDS.map((c) => (
             <div key={c.title} className="flex flex-col rounded-md border border-border bg-card p-5">
-              <div className="h3">{c.title}</div>
+              <h3 className="h3">{c.title}</h3>
               <p className="mt-2 text-sm text-muted-foreground">{c.body}</p>
             </div>
           ))}
@@ -803,6 +809,25 @@ export default async function WhyXpertPage() {
       <SnapSection className="space-y-4">
         <DividedTitle>Frequently asked questions</DividedTitle>
         <FaqList items={faqItems} />
+      </SnapSection>
+
+      {/* This page hides the global header/footer, so it would otherwise be an
+          internal-link dead end (flagged by SEO crawlers). A small in-content
+          nav links back into the consumer site. */}
+      <SnapSection className="space-y-4">
+        <DividedTitle>Explore {siteName}</DividedTitle>
+        <nav
+          aria-label="Site"
+          className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm"
+        >
+          <Link href="/" className="text-foreground hover:underline">Home</Link>
+          <Link href="/fleet" className="text-foreground hover:underline">Fleet</Link>
+          <Link href="/tours" className="text-foreground hover:underline">Tours</Link>
+          <Link href="/pricing" className="text-foreground hover:underline">Pricing</Link>
+          <Link href="/locations" className="text-foreground hover:underline">Locations</Link>
+          <Link href="/faq" className="text-foreground hover:underline">FAQ</Link>
+          <Link href="/contact" className="text-foreground hover:underline">Contact</Link>
+        </nav>
       </SnapSection>
 
       <div className="pointer-events-none fixed inset-y-0 right-0 z-20 hidden w-[18rem] items-center justify-center overflow-hidden lg:flex">

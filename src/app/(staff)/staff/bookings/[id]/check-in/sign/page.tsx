@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
@@ -10,7 +10,6 @@ import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
 import { LoadingBlock } from "@/components/ui/spinner";
 import { AgreementSigner, type AgreementPage } from "@/components/agreement/agreement-signer";
-import { normalizeMarkers, type DamageMarker } from "@/components/agreement/damage-map-canvas";
 import { ReturnCoverPage } from "@/components/agreement/return/cover-page";
 import { ReturnConditionPage } from "@/components/agreement/return/condition-page";
 import { ReturnChargesPage } from "@/components/agreement/return/charges-page";
@@ -35,17 +34,7 @@ export default function CheckInSignPage(props: { params: Promise<{ id: string }>
 
   const [err, setErr] = useState<string | null>(null);
 
-  const preHire = inspections?.find((i) => i.type === "PRE_HIRE");
   const postHire = inspections?.find((i) => i.type === "POST_HIRE");
-
-  const preHireMarkers: DamageMarker[] = useMemo(
-    () => normalizeMarkers((preHire?.bodyDamageMap as unknown as { markers?: unknown[] } | null)?.markers ?? []),
-    [preHire?.bodyDamageMap],
-  );
-  const postHireMarkers: DamageMarker[] = useMemo(
-    () => normalizeMarkers((postHire?.bodyDamageMap as unknown as { markers?: unknown[] } | null)?.markers ?? []),
-    [postHire?.bodyDamageMap],
-  );
 
   if (!booking || isLoading || !assessment) {
     return <PageShell><LoadingBlock padded="lg" /></PageShell>;
@@ -168,13 +157,7 @@ export default function CheckInSignPage(props: { params: Promise<{ id: string }>
     {
       id: "condition",
       title: "Condition report",
-      content: (
-        <ReturnConditionPage
-          preHireMarkers={preHireMarkers}
-          postHireMarkers={postHireMarkers}
-          photos={(postHire?.photos ?? []).map((p) => ({ id: p.id, url: p.url, caption: p.caption ?? null }))}
-        />
-      ),
+      content: <ReturnConditionPage inspectionId={postHire?.id ?? null} />,
     },
     {
       id: "charges",

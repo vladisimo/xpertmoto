@@ -47,6 +47,8 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn().mockResolvedValue([]),
     },
     booking: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+    // payment_intent.succeeded now checks for a gift-card purchase PI.
+    giftCard: { findUnique: vi.fn().mockResolvedValue(null) },
     bondLedger: { updateMany: bondUpdateMany },
     customerProfile: { updateMany: profileUpdateMany },
     incident: { findFirst: vi.fn(), create: vi.fn() },

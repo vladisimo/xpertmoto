@@ -12,8 +12,15 @@
  *   - depreciation-calc  · monthly 01:00 1st (update currentBookValue)
  *   - ops-summary        · daily 07:00  (manager depot recap)
  *   - revenue-summary    · Monday 08:00 (admin weekly revenue)
+ *   - gps51-sync         · every 1min   (live-position poll → live-map snapshot)
+ *   - gps51-daily-sync   · daily 03:20  (querytracks → VehicleTelemetry history)
+ *   - gps51-alerts       · every 30min  (offline / low-battery tracker alerts)
+ *   - telemetry-processor· every 5min   (zone/speed events for active rentals)
  *
- * Run with `npm run worker`. No-ops when REDIS_URL is not set.
+ * The above is illustrative — the authoritative schedule list is the
+ * start*Scheduler() calls in main(); see docs/ops/gps-telemetry-runbook.md for
+ * the GPS/telemetry subsystem specifics. Run with `npm run worker`. No-ops when
+ * REDIS_URL is not set.
  */
 
 import { createServer, type Server } from "node:http";
@@ -59,10 +66,13 @@ import { startPostTripReviewScheduler } from "./post-trip-review";
 import { startTelemetryProcessorScheduler } from "./telemetry-processor";
 import { startGps51SyncScheduler } from "./gps51-sync";
 import { startGps51DailySyncScheduler } from "./gps51-daily-sync";
+import { startFleetAlertsScheduler } from "./gps51-alerts";
+import { assertTelemetryHypertable } from "@/server/services/gps51";
 import { startPriceRecommenderScheduler } from "./price-recommender";
 import { startSubscriptionBillingScheduler } from "./subscription-billing";
 import { startCapturePendingPaymentsScheduler } from "./capture-pending-payments";
 import { startCaptureRetryWorker } from "./capture-retry";
+import { startRefundRetryWorker } from "./refund-retry";
 import { startStripeReconcileScheduler } from "./stripe-reconcile";
 import { startDunningLadderScheduler } from "./dunning-ladder";
 import { startInvoiceGenerateScheduler } from "./invoice-generate";
@@ -196,12 +206,23 @@ async function main() {
   await startGps51SyncScheduler();
   // GPS51 full-track history sync (daily 03:20 Brisbane — querytracks per vehicle)
   await startGps51DailySyncScheduler();
+  // Fleet GPS operational alerts (offline trackers, low battery) — every 30 min.
+  startFleetAlertsScheduler();
+  // Provisioning guard: telemetry silently degrades if this isn't a hypertable.
+  void assertTelemetryHypertable(prisma).then((ok) => {
+    if (!ok && process.env.SENTRY_DSN) {
+      Sentry.captureMessage("VehicleTelemetry is not a TimescaleDB hypertable", { level: "error" });
+    }
+  });
   startPriceRecommenderScheduler();
   startSubscriptionBillingScheduler();
   // G5 — every 5 min, capture PENDING ancillary Payment rows off-session
   startCapturePendingPaymentsScheduler();
   // G8 — exponential-backoff retries for transient Stripe failures
   startCaptureRetryWorker();
+  // Refund-side mirror of the capture retry ladder — settles FAILED
+  // cancellation refunds or pages managers when retries exhaust.
+  startRefundRetryWorker();
   // G3 — nightly Stripe reconciliation
   startStripeReconcileScheduler();
   // G7 — dunning ladder (superset of the single-shot debt reminder)

@@ -1,10 +1,13 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Prisma } from "@prisma/client";
-import { createTRPCRouter, staffProcedure } from "../trpc";
+import { createTRPCRouter, managerProcedure, staffProcedure } from "../trpc";
 import { cancelPaymentIntent, capturePaymentIntent, refundCharge } from "@/lib/stripe";
 import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
-import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
+import {
+  applyCaptureToBalanceDue,
+  BALANCE_AFFECTING_CHARGE_TYPES,
+} from "@/server/services/balance-due";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { captureBookingId, readCapturedBookingId } from "@/server/services/audit";
 import { writePaymentEvent } from "@/server/services/payment-events";
@@ -209,15 +212,21 @@ export const bookingSettlementRouter = createTRPCRouter({
           message: "Payment has no customer on file — capture not possible.",
         });
       }
+      // Key + params are VERBATIM the capture-pending-payments first-attempt
+      // request (see attemptKey there): a staff click racing the 5-minute
+      // sweep must collapse to one PaymentIntent at Stripe, and Stripe only
+      // dedupes when key AND params match — hence no staffId in metadata
+      // (the audit log carries the actor).
       const charge = await chargeOffSessionForUser({
         userId: p.customerId,
         amount: Number(p.amount),
-        description: `Manual capture — ${p.reference}`,
-        idempotencyKey: `manual-capture-${p.id}`,
+        description: `${p.type} — ${p.booking?.bookingReference ?? p.reference}`,
+        idempotencyKey: `payment-capture:${p.id}`,
         metadata: {
           paymentId: p.id,
+          paymentReference: p.reference,
+          paymentType: p.type,
           bookingId: p.bookingId ?? "",
-          staffId: ctx.user.id,
         },
       });
       if (!charge) {
@@ -475,7 +484,9 @@ export const bookingSettlementRouter = createTRPCRouter({
               type: "BOND_CAPTURE",
               method: "STRIPE",
               amount: fromBond,
-              gstAmount: 0,
+              // Bond-funded damage recovery is taxable consideration — same GST
+              // treatment as the card-overflow slice of the identical recovery.
+              gstAmount: gstFromInclusive(fromBond),
               status: "SUCCEEDED",
               // Link the Stripe ids so stripe-reconcile's SYSTEM_LEDGER
               // cross-check matches this row to the captured charge.
@@ -773,5 +784,120 @@ export const bookingSettlementRouter = createTRPCRouter({
       });
 
       return refundPayment;
+    }),
+
+  /**
+   * Bad-debt write-off — the terminal lever for money that will never be
+   * collected (dunning stage 5's "write-off proposal" previously dead-ended
+   * with no way to act). Managers only. Flips the booking's open charge rows
+   * (PENDING/FAILED) to WRITTEN_OFF, zeroes balanceDue (the debtors list and
+   * dunning key off it), and issues a DECREASE adjustment note so the ATO
+   * paper trail reflects the forgiven consideration.
+   */
+  writeOffBalance: managerProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        reason: z.string().min(5, "A written reason is required for a write-off"),
+      }),
+    )
+    .meta({ audit: { bookingIdPath: "bookingId" } })
+    .mutation(async ({ ctx, input }) => {
+      const booking = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: {
+          id: true,
+          bookingReference: true,
+          customerId: true,
+          balanceDue: true,
+        },
+      });
+      const balance = Number(booking.balanceDue);
+      if (balance <= 0.009) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Nothing to write off — the booking balance is already zero.",
+        });
+      }
+
+      const writtenOff = await ctx.prisma.$transaction(async (tx) => {
+        // Terminal-ise every open charge row so no sweep / retry /
+        // reactivation path can resurrect the forgiven debt.
+        const rows = await tx.payment.findMany({
+          where: {
+            bookingId: booking.id,
+            status: { in: ["PENDING", "FAILED"] },
+            type: { in: [...BALANCE_AFFECTING_CHARGE_TYPES, "BOOKING_PAYMENT"] },
+          },
+          select: { id: true, notes: true },
+        });
+        for (const row of rows) {
+          await tx.payment.update({
+            where: { id: row.id },
+            data: {
+              status: "WRITTEN_OFF",
+              notes: `${row.notes ? `${row.notes}\n` : ""}[written-off] ${input.reason}`,
+            },
+          });
+        }
+        await tx.booking.update({
+          where: { id: booking.id },
+          data: {
+            balanceDue: 0,
+            bookingNotes: {
+              create: {
+                userId: ctx.user.id,
+                note: `Bad-debt write-off: A$${balance.toFixed(2)} forgiven — ${input.reason}`,
+                isInternal: true,
+              },
+            },
+          },
+        });
+        return { amount: balance, rowsClosed: rows.length };
+      });
+
+      // ATO §29-75 decreasing adjustment for the forgiven consideration.
+      // Best-effort — the write-off stands even if the document fails.
+      try {
+        const { tryIssueAdjustmentForBooking } = await import(
+          "@/server/services/invoice-lifecycle"
+        );
+        await tryIssueAdjustmentForBooking({
+          bookingId: booking.id,
+          type: "DECREASE",
+          reason: "OTHER",
+          description: `Bad-debt write-off — ${input.reason}`,
+          lineItems: [
+            {
+              description: "Uncollectable balance written off",
+              quantity: 1,
+              unitPrice: writtenOff.amount,
+              totalPrice: writtenOff.amount,
+              gstAmount: gstFromInclusive(writtenOff.amount).toNumber(),
+              gstIncluded: true,
+            },
+          ],
+          paymentId: null,
+          issuedById: ctx.user.id,
+        });
+      } catch {
+        // tryIssueAdjustmentForBooking swallows + logs its own failures.
+      }
+
+      await writePaymentAudit(ctx.prisma, {
+        action: "payment.balance_written_off",
+        entity: "Payment",
+        entityId: `booking:${booking.id}`,
+        userId: ctx.user.id,
+        status: "SUCCESS",
+        newData: {
+          bookingReference: booking.bookingReference,
+          amountAud: writtenOff.amount,
+          rowsClosed: writtenOff.rowsClosed,
+          reason: input.reason,
+        },
+      });
+
+      return writtenOff;
     }),
 });

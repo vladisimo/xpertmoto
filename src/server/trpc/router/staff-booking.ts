@@ -41,6 +41,7 @@ import {
 import { trackServer } from "@/lib/analytics";
 import { BOOKING_RULES, CANCELLATION_POLICY } from "@/lib/constants";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
+import { gstFromInclusive } from "@/lib/money";
 import {
   recordBookingCompletion,
   recordAdditionalCharges,
@@ -588,6 +589,19 @@ export const staffBookingRouter = createTRPCRouter({
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: `Cannot record payment from ${b.status}`,
+        });
+      }
+      // recordPayment documents money that arrived OUTSIDE Stripe (terminal
+      // EFTPOS "CARD", cash, bank transfer). Accepting method STRIPE here
+      // wrote a SUCCEEDED "Stripe" row that no Stripe charge ever backed —
+      // invisible money that reconciliation flags forever. Real Stripe
+      // charges go through the checkout, the off-session sweep, or
+      // bookingSettlement.captureNow.
+      if (input.method === "STRIPE") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "Record payment is for money taken outside Stripe (terminal/cash/bank transfer). To charge the saved card, use Capture now in the payment console.",
         });
       }
       const newPaid = Number(b.amountPaid) + input.amount;
@@ -1666,6 +1680,15 @@ export const staffBookingRouter = createTRPCRouter({
         customerIdVerified: z.boolean(),
         agreementId: z.string().optional(),
         notes: z.string().optional(),
+        /** Proceed with handover despite the remainder auto-charge failing —
+         *  staff collect at the terminal instead. Audited with the reason. */
+        remainderOverride: z
+          .object({ skip: z.literal(true), reason: z.string().min(1) })
+          .optional(),
+        /** Proceed with handover despite the bond re-hold failing. Audited. */
+        bondOverride: z
+          .object({ skip: z.literal(true), reason: z.string().min(1) })
+          .optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -1794,6 +1817,84 @@ export const staffBookingRouter = createTRPCRouter({
             message: "A signed rental agreement is required before check-out.",
           });
         }
+      }
+
+      // Auto-charge the pay-at-pickup remainder to the saved card while the
+      // customer is at the counter. A paid remainder with a later allocation
+      // failure is safe: the booking stays CONFIRMED and the retry recomputes
+      // the remainder to zero. Decline/no-card blocks handover unless staff
+      // explicitly override (take the terminal payment via Record payment,
+      // or a reasoned skip — both audited).
+      const { chargePickupRemainder } = await import(
+        "@/server/services/pickup-remainder"
+      );
+      const remainderResult = await chargePickupRemainder(ctx.prisma, {
+        bookingId: b.id,
+        staffUserId: ctx.user.id,
+      });
+      if (
+        remainderResult.outcome !== "charged" &&
+        remainderResult.outcome !== "not_required"
+      ) {
+        if (!input.remainderOverride?.skip) {
+          const detail =
+            remainderResult.outcome === "no_pm"
+              ? "No card on file"
+              : remainderResult.outcome === "requires_action"
+                ? "The card requires authentication"
+                : `Card declined (${remainderResult.errorCode ?? "error"})`;
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              `${detail} — A$${remainderResult.amount.toFixed(2)} balance is still due. ` +
+              "Take payment at the terminal (Record payment) and retry, or override with a reason to collect later.",
+          });
+        }
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "BOOKING_CHECKOUT_REMAINDER_OVERRIDDEN",
+          entity: "Booking",
+          entityId: b.id,
+          newData: {
+            reason: input.remainderOverride.reason,
+            outcome: remainderResult.outcome,
+            amountAud: remainderResult.amount,
+          },
+        });
+      }
+
+      // Refresh the bond hold while the customer is present: an advance
+      // booking's checkout-time auth may already be dead (Visa ~7 days), and
+      // handing over on a dead hold means zero security for the whole hire.
+      const { ensureFreshBondHold } = await import("@/server/services/bond");
+      const bondResult = await ensureFreshBondHold(ctx.prisma, {
+        bookingId: b.id,
+        actorUserId: ctx.user.id,
+        reason: "check-out",
+      });
+      if (!bondResult.ok) {
+        if (!input.bondOverride?.skip) {
+          const detail =
+            bondResult.action === "no_pm"
+              ? "No card on file for the bond hold"
+              : bondResult.action === "requires_action"
+                ? "The bond hold needs the customer to authenticate the card"
+                : `Bond hold failed (${("errorCode" in bondResult && bondResult.errorCode) || "card declined"})`;
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `${detail}. Resolve the card with the customer and retry, or override with a reason to hand over without bond security.`,
+          });
+        }
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "BOOKING_CHECKOUT_BOND_OVERRIDDEN",
+          entity: "Booking",
+          entityId: b.id,
+          newData: {
+            reason: input.bondOverride.reason,
+            outcome: bondResult.action,
+          },
+        });
       }
 
       // A1-a: allocation + handover inside one transaction under a
@@ -2133,6 +2234,12 @@ export const staffBookingRouter = createTRPCRouter({
       // for bookings that predate the new flow.
       let assessmentDamageTotal = 0;
       let hasPendingQuotes = false;
+      // return.finalise now raises every fee (bond-funded + card residual)
+      // itself; when this check-in follows a finalised assessment, the money
+      // pass below must be a no-op or every charge would be raised twice and
+      // the bond double-touched. `customerTotalDueNow` is only ever written
+      // by finalise.
+      let settledByFinalise = false;
       if (input.returnAssessmentId) {
         const assessment = await ctx.prisma.returnAssessment.findUnique({
           where: { id: input.returnAssessmentId },
@@ -2147,9 +2254,12 @@ export const staffBookingRouter = createTRPCRouter({
             message: "Return assessment must be signed before check-in can settle.",
           });
         }
-        assessmentDamageTotal = assessment.damageCharges
-          .filter((c) => c.resolution === "STANDARD")
-          .reduce((acc, c) => acc + Number(c.amount), 0);
+        settledByFinalise = assessment.customerTotalDueNow !== null;
+        assessmentDamageTotal = settledByFinalise
+          ? 0
+          : assessment.damageCharges
+              .filter((c) => c.resolution === "STANDARD")
+              .reduce((acc, c) => acc + Number(c.amount), 0);
         hasPendingQuotes = assessment.damageCharges.some((c) => c.resolution === "QUOTE_PENDING");
       }
 
@@ -2189,10 +2299,36 @@ export const staffBookingRouter = createTRPCRouter({
         (now.getTime() - scheduledRet.getTime()) / (1000 * 60 * 60) - graceHours,
       );
       const hourlyRate = Number(b.category.baseDailyRate) / 8;
-      const lateFee = Math.min(
-        Math.floor(lateHours) * hourlyRate,
-        Math.ceil(lateHours / 24) * Number(b.category.baseDailyRate),
-      );
+      // Subtract the daily LATE_FEE rows the overdue job already accrued
+      // (`LATE-<bookingId>-D<n>`) so completed late days aren't billed twice.
+      const priorLateRaised = settledByFinalise
+        ? 0
+        : Number(
+            (
+              await ctx.prisma.payment.aggregate({
+                where: {
+                  bookingId: b.id,
+                  type: "LATE_FEE",
+                  reference: { startsWith: `LATE-${b.id}-D` },
+                  status: { in: ["PENDING", "SUCCEEDED"] },
+                },
+                _sum: { amount: true },
+              })
+            )._sum.amount ?? 0,
+          );
+      const lateFee = settledByFinalise
+        ? 0
+        : Math.max(
+            0,
+            Math.round(
+              (Math.min(
+                Math.floor(lateHours) * hourlyRate,
+                Math.ceil(lateHours / 24) * Number(b.category.baseDailyRate),
+              ) -
+                priorLateRaised) *
+                100,
+            ) / 100,
+          );
 
       // B5: read pickup fuel from the most recent pre-hire inspection so
       // we don't over-charge when the tank was handed over below full.
@@ -2209,8 +2345,9 @@ export const staffBookingRouter = createTRPCRouter({
       const fuelPerLitre =
         returnPolicy["booking.fuelChargePerLitre"] ??
         SETTING_DEFAULTS["booking.fuelChargePerLitre"];
-      const fuelCharge =
-        Math.round(missingL * (input.fuelChargePerLitre ?? fuelPerLitre) * 100) / 100;
+      const fuelCharge = settledByFinalise
+        ? 0
+        : Math.round(missingL * (input.fuelChargePerLitre ?? fuelPerLitre) * 100) / 100;
 
       const damageChargeAmount = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
 
@@ -2278,7 +2415,9 @@ export const staffBookingRouter = createTRPCRouter({
             returnOdometerKm: input.odometerKm,
             checkedInById: ctx.user.id,
             staffNotes: input.notes,
-            balanceDue: balanceCharges,
+            // finalise already owns the balance when it settled the money —
+            // clobbering it here would erase the card-residual charges.
+            ...(settledByFinalise ? {} : { balanceDue: balanceCharges }),
             statusLog: {
               create: {
                 previousStatus: b.status,
@@ -2287,6 +2426,9 @@ export const staffBookingRouter = createTRPCRouter({
                 reason: hasPendingQuotes ? "Checked in (pending quote)" : "Checked in",
               },
             },
+            // customerId on every row: the capture-pending sweep filters on
+            // `customerId: { not: null }` — a nested create without it is a
+            // charge that can never be auto-collected.
             ...((lateFee > 0 || fuelCharge > 0 || fromCard > 0) && {
               payments: {
                 create: [
@@ -2294,6 +2436,7 @@ export const staffBookingRouter = createTRPCRouter({
                     ? [
                         {
                           reference: `LATE-${Date.now()}`,
+                          customerId: b.customerId,
                           type: "LATE_FEE" as const,
                           method: "STRIPE" as const,
                           amount: lateFee,
@@ -2306,6 +2449,7 @@ export const staffBookingRouter = createTRPCRouter({
                     ? [
                         {
                           reference: `FUEL-${Date.now()}`,
+                          customerId: b.customerId,
                           type: "FUEL_CHARGE" as const,
                           method: "STRIPE" as const,
                           amount: fuelCharge,
@@ -2320,6 +2464,7 @@ export const staffBookingRouter = createTRPCRouter({
                     ? [
                         {
                           reference: `DMG-${Date.now()}`,
+                          customerId: b.customerId,
                           type: "DAMAGE_CHARGE" as const,
                           method: "STRIPE" as const,
                           amount: fromCard,
@@ -2402,7 +2547,9 @@ export const staffBookingRouter = createTRPCRouter({
                 type: "BOND_CAPTURE",
                 method: "STRIPE",
                 amount: fromBond,
-                gstAmount: 0,
+                // Bond-funded damage recovery is taxable consideration — same
+                // GST treatment as the card-funded slice.
+                gstAmount: gstFromInclusive(fromBond),
                 status: "SUCCEEDED",
                 stripePaymentIntentId: existingBond.stripePaymentIntentId,
                 stripeChargeId: bondChargeId,
@@ -2808,6 +2955,9 @@ export const staffBookingRouter = createTRPCRouter({
           payments: {
             create: {
               reference: `PAY-${Date.now()}`,
+              // Without customerId this row is invisible to every
+              // customer-scoped money surface (portal, sweep, debtors).
+              customerId: input.customerId,
               type: "BOOKING_PAYMENT",
               method: input.method,
               amount: input.totalAmount,
@@ -2828,7 +2978,58 @@ export const staffBookingRouter = createTRPCRouter({
       });
       captureBookingId(ctx, booking.id);
       await invalidateRevenueCaches(booking.depotId);
-      return booking;
+      const walkInBondSettings = await getSettings(["payment.walkInBondEnabled"] as const);
+      const walkInBondEnabled =
+        walkInBondSettings["payment.walkInBondEnabled"] ??
+        SETTING_DEFAULTS["payment.walkInBondEnabled"];
+      return {
+        ...booking,
+        // The sheet chains into the card + bond-hold step when true.
+        bondRequired: walkInBondEnabled && Number(input.bondAmount) > 0,
+      };
+    }),
+
+  /** Staff-device SetupIntent so a walk-in customer can save a card at the
+   *  counter (Stripe Elements on the staff tablet). The saved card then
+   *  backs the bond hold and every later off-session charge. */
+  createCustomerSetupIntent: staffProcedure
+    .input(z.object({ customerId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const { createSetupIntentForUser } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const si = await createSetupIntentForUser(input.customerId, {
+        prisma: ctx.prisma,
+      });
+      return { clientSecret: si.clientSecret };
+    }),
+
+  /** Place the walk-in bond hold from the just-saved card. The SetupIntent
+   *  was confirmed seconds ago on the staff device (fresh 3DS), so the
+   *  off-session manual-capture hold is low-risk; a requires_action outcome
+   *  surfaces the client secret for on-device completion. */
+  holdWalkInBond: staffProcedure
+    .input(z.object({ bookingId: z.string(), paymentMethodId: z.string().min(1) }))
+    .meta({ audit: { bookingIdPath: "bookingId" } })
+    .mutation(async ({ ctx, input }) => {
+      const booking = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: { id: true, customerId: true, depotId: true },
+      });
+      assertDepotAccess(ctx.user, booking.depotId);
+      const { persistDefaultPaymentMethod } = await import(
+        "@/server/services/stripe-customer"
+      );
+      await persistDefaultPaymentMethod(booking.customerId, input.paymentMethodId, {
+        prisma: ctx.prisma,
+      });
+      const { ensureFreshBondHold } = await import("@/server/services/bond");
+      const outcome = await ensureFreshBondHold(ctx.prisma, {
+        bookingId: booking.id,
+        actorUserId: ctx.user.id,
+        reason: "walk-in",
+      });
+      return outcome;
     }),
 
   stats: staffProcedure

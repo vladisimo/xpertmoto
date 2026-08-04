@@ -34,7 +34,10 @@ const SERVICES: ServiceCard[] = [
 
 export function XpertServicesGrid() {
   return (
-    <section className="container pt-8 pb-20">
+    <section className="container pt-8 pb-20" aria-labelledby="services-heading">
+      <h2 id="services-heading" className="sr-only">
+        Our services: rentals, tours, mechanic and gear
+      </h2>
       <div className="grid grid-cols-2 gap-3 sm:gap-6 lg:grid-cols-4">
         {SERVICES.map((service) => {
           const linkProps = service.external

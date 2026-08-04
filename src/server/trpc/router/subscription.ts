@@ -6,6 +6,7 @@ import {
   protectedProcedure,
   adminProcedure,
 } from "../trpc";
+import { gstFromInclusive } from "@/lib/money";
 
 /** Status values that block starting a new subscription for the same customer. */
 export const ACTIVE_SUBSCRIPTION_STATUSES: SubscriptionStatus[] = [
@@ -116,10 +117,13 @@ export const subscriptionRouter = createTRPCRouter({
   }),
 
   /**
-   * Subscribe the current user to a plan. No Stripe plumbing here — this
-   * creates the DB record with a 1-month period. A real Stripe-subscription
-   * integration would come from a later mutation that fills in
-   * stripeSubscriptionId after Checkout completes.
+   * Subscribe the current user to a plan. Billing rides the existing
+   * off-session pipeline: the first period's base fee is raised here as a
+   * PENDING SUBSCRIPTION_CHARGE Payment (capture-pending-payments charges
+   * the saved card within minutes), and the subscription-billing job raises
+   * each subsequent period + overage the same way. No Stripe Subscription
+   * object is involved — `stripeSubscriptionId` stays null and the local
+   * scheduler owns the period cadence.
    */
   subscribe: protectedProcedure
     .input(z.object({ planId: z.string(), businessAccountId: z.string().optional() }))
@@ -145,15 +149,35 @@ export const subscriptionRouter = createTRPCRouter({
       const end = new Date(start);
       end.setMonth(end.getMonth() + 1);
 
-      return ctx.prisma.subscription.create({
-        data: {
-          customerId: ctx.user.id,
-          planId: plan.id,
-          businessAccountId: input.businessAccountId,
-          status: "ACTIVE",
-          currentPeriodStart: start,
-          currentPeriodEnd: end,
-        },
+      // Subscription + first-period charge in one transaction: a paid plan
+      // must never exist without its opening charge on the books.
+      return ctx.prisma.$transaction(async (tx) => {
+        const sub = await tx.subscription.create({
+          data: {
+            customerId: ctx.user.id,
+            planId: plan.id,
+            businessAccountId: input.businessAccountId,
+            status: "ACTIVE",
+            currentPeriodStart: start,
+            currentPeriodEnd: end,
+          },
+        });
+        const baseFee = Number(plan.priceMonthlyAud);
+        if (baseFee > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `SUB-${sub.id}-1`,
+              customerId: ctx.user.id,
+              type: "SUBSCRIPTION_CHARGE",
+              method: "STRIPE",
+              amount: baseFee,
+              gstAmount: gstFromInclusive(baseFee),
+              status: "PENDING",
+              notes: `${plan.name} — period 1 (${start.toLocaleDateString("en-AU")} → ${end.toLocaleDateString("en-AU")})`,
+            },
+          });
+        }
+        return sub;
       });
     }),
 

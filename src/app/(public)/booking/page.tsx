@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { buildMetadata } from "@/lib/seo/metadata";
 import { BookingWizardClient } from "@/components/booking/booking-wizard-client";
 import { getFeatureFlags } from "@/server/services/feature-flags";
 import {
@@ -13,12 +14,16 @@ const WIZARD_FLAG_KEYS = [
   "wizard_intl_licence_flow",
 ] as const;
 
-// M-11: per-page title (composed via the root template) + unique description.
-export const metadata: Metadata = {
-  title: "Book your hire",
-  description:
-    "Book your scooter or motorbike hire in a few steps — choose dates and depot, pick a vehicle, add cover, and pay securely online with an instant GST-inclusive quote.",
-};
+// Transactional funnel page (stateful wizard, hidden chrome) — noindex.
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Book your hire",
+    description:
+      "Book your scooter or motorbike hire online — choose dates and depot, pick a vehicle, add cover and pay securely with an instant GST-inclusive quote.",
+    path: "/booking",
+    noindex: true,
+  });
+}
 
 export default async function BookingPage() {
   // Reading `headers()` opts this route out of build-time prerender, which

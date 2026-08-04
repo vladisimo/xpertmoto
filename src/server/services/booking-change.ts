@@ -10,6 +10,7 @@ import { aud, roundCents, gstFromInclusive } from "@/lib/money";
 import { writeAudit, writeCustomerAuditAsync } from "@/server/services/audit";
 import { sendNotification } from "@/server/services/notification-sender";
 import { getBranding } from "@/lib/branding";
+import { logger } from "@/lib/logger";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 
 /**
@@ -21,8 +22,10 @@ import { formatCurrency, formatDateTime } from "@/lib/utils";
  *     capture-pending-payments job picks up `EXTENSION`-type rows) + an
  *     INCREASE adjustment note; balanceDue goes up.
  *   - DECREASE → a DECREASE adjustment note writes the invoice down; balanceDue
- *     is clamped at 0. Any surplus over what's still owed is RETAINED AS
- *     ACCOUNT CREDIT (the invoice write-down), never auto-refunded to the card.
+ *     is clamped at 0. Any surplus over what's still owed is REFUNDED for
+ *     real: gift-card-funded money restores to the gift card, the rest goes
+ *     back to the card via Stripe (with the cancellation refund's
+ *     failure→retry→alert ladder).
  *   - NONE → a free date shift (price unchanged); only the dates move.
  *
  * Out of scope (route to staff): category/extras/insurance changes, and any
@@ -34,6 +37,17 @@ export class BookingChangeNotAllowedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "BookingChangeNotAllowedError";
+  }
+}
+
+/** The booking changed between preview and commit (double-click, second tab,
+ *  or a staff edit racing the customer). The caller should re-preview. */
+export class BookingChangeConflictError extends Error {
+  constructor() {
+    super(
+      "This booking changed while your update was in flight — please review the new details and try again.",
+    );
+    this.name = "BookingChangeConflictError";
   }
 }
 
@@ -55,7 +69,7 @@ export type BookingChangePreview = {
   newDurationDays: number;
   /** balanceDue after the change, clamped at 0. */
   newBalanceDue: number;
-  /** Surplus retained as account credit when a reduction exceeds the balance. */
+  /** Surplus refunded to the original payment method when a reduction exceeds the balance. */
   creditAmount: number;
   /** GST portion of |delta| (GST-inclusive). */
   deltaGst: number;
@@ -232,14 +246,13 @@ export async function applyBookingChange(
 ): Promise<{ booking: LoadedBooking; preview: BookingChangePreview }> {
   const { booking, preview } = await previewBookingChange(prisma, args);
 
-  const reference = `CHG-${Date.now()}`;
   const moneyLine =
     preview.direction === "INCREASE"
       ? `Additional charge ${formatCurrency(preview.delta)} to your card on file.`
       : preview.direction === "DECREASE"
         ? `Your total drops by ${formatCurrency(-preview.delta)}${
             preview.creditAmount > 0
-              ? ` (${formatCurrency(preview.creditAmount)} held as account credit)`
+              ? ` (${formatCurrency(preview.creditAmount)} refunded to your original payment method)`
               : ""
           }.`
         : "No change to the price.";
@@ -249,58 +262,104 @@ export async function applyBookingChange(
     `${formatDateTime(preview.oldReturnDateTime)} → ${formatDateTime(preview.newReturnDateTime)}. ` +
     moneyLine;
 
-  const updated = await prisma.booking.update({
-    where: { id: booking.id },
-    data: {
-      pickupDateTime: preview.newPickupDateTime,
-      returnDateTime: preview.newReturnDateTime,
-      durationDays: preview.newDurationDays,
-      totalAmount: preview.newTotal,
-      balanceDue: preview.newBalanceDue,
-      bookingNotes: {
-        create: {
-          userId: args.actorUserId,
-          note: noteBody,
-          isInternal: false,
-        },
+  // Commit as a compare-and-swap keyed on the exact state the preview priced:
+  // the preview above ran outside any transaction, so a double-clicked
+  // submit, a second tab, or a staff edit can land between preview and
+  // commit. Without the CAS both submits would each raise a PENDING delta
+  // Payment and capture-pending-payments would charge the card twice for one
+  // change. The loser matches zero rows and gets a conflict error instead.
+  let reference: string | null = null;
+  const updated = await prisma.$transaction(async (tx) => {
+    const guard = await tx.booking.updateMany({
+      where: {
+        id: booking.id,
+        status: booking.status,
+        pickupDateTime: booking.pickupDateTime,
+        returnDateTime: booking.returnDateTime,
+        totalAmount: booking.totalAmount,
       },
-      statusLog: {
-        create: {
-          previousStatus: booking.status,
-          newStatus: booking.status,
-          changedById: args.actorUserId,
-          reason: `Date change — delta ${formatCurrency(preview.delta)}`,
-        },
+      data: {
+        pickupDateTime: preview.newPickupDateTime,
+        returnDateTime: preview.newReturnDateTime,
+        durationDays: preview.newDurationDays,
+        totalAmount: preview.newTotal,
+        balanceDue: preview.newBalanceDue,
       },
-      // INCREASE only: raise the extra charge as a PENDING row. The
-      // capture-pending-payments job charges the saved card off-session
-      // (EXTENSION is in its eligible set). A reduction never creates a
-      // Payment — it's settled by the DECREASE adjustment note below.
-      ...(preview.direction === "INCREASE"
-        ? {
-            payments: {
-              create: {
-                reference,
-                customerId: booking.customerId,
-                type: "EXTENSION" as const,
-                method: "STRIPE" as const,
-                amount: preview.delta,
-                gstAmount: preview.deltaGst,
-                status: "PENDING" as const,
-                notes: "Booking date change — additional charge",
-              },
-            },
-          }
-        : {}),
-    },
-    include: {
-      addons: true,
-      insurance: true,
-      billingPlan: { select: { id: true } },
-      category: { select: { id: true, name: true } },
-      customer: { select: { firstName: true } },
-    },
+    });
+    if (guard.count === 0) {
+      throw new BookingChangeConflictError();
+    }
+
+    await tx.bookingNote.create({
+      data: {
+        bookingId: booking.id,
+        userId: args.actorUserId,
+        note: noteBody,
+        isInternal: false,
+      },
+    });
+    await tx.bookingStatusLog.create({
+      data: {
+        bookingId: booking.id,
+        previousStatus: booking.status,
+        newStatus: booking.status,
+        changedById: args.actorUserId,
+        reason: `Date change — delta ${formatCurrency(preview.delta)}`,
+      },
+    });
+
+    // INCREASE only: raise the extra charge as a PENDING row. The
+    // capture-pending-payments job charges the saved card off-session
+    // (EXTENSION is in its eligible set). A reduction never creates a
+    // Payment — it's settled by the DECREASE adjustment note below.
+    // Deterministic per-booking sequence reference (unique constraint) is a
+    // second line of defence behind the CAS: a duplicate that somehow got
+    // this far would collide instead of creating a second chargeable row.
+    if (preview.direction === "INCREASE") {
+      const priorChanges = await tx.payment.count({
+        where: { bookingId: booking.id, reference: { startsWith: `CHG-${booking.id}-` } },
+      });
+      reference = `CHG-${booking.id}-${priorChanges + 1}`;
+      await tx.payment.create({
+        data: {
+          reference,
+          customerId: booking.customerId,
+          bookingId: booking.id,
+          type: "EXTENSION" as const,
+          method: "STRIPE" as const,
+          amount: preview.delta,
+          gstAmount: preview.deltaGst,
+          status: "PENDING" as const,
+          notes: "Booking date change — additional charge",
+        },
+      });
+    }
+
+    return tx.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+      include: {
+        addons: true,
+        insurance: true,
+        billingPlan: { select: { id: true } },
+        category: { select: { id: true, name: true } },
+        customer: { select: { firstName: true } },
+      },
+    });
   });
+
+  // DECREASE overpayment: the customer already paid more than the re-priced
+  // total. This used to be "held as account credit" — a promise with no
+  // ledger behind it (never spendable, never refunded; an ACL problem).
+  // Refund it for real: gift-card-funded money restores to the gift card,
+  // the rest goes back to the card via Stripe, with the same
+  // failure→retry→alert ladder the cancellation refund uses.
+  if (preview.direction === "DECREASE" && preview.creditAmount > 0) {
+    await refundChangeOverpayment(prisma, {
+      booking,
+      amount: preview.creditAmount,
+      actorUserId: args.actorUserId,
+    });
+  }
 
   // ATO §29-75 adjustment note for the delta (skipped for a price-neutral
   // shift). DECREASE writes the invoice down — that write-down IS the retained
@@ -312,7 +371,7 @@ export async function applyBookingChange(
       );
       const magnitude = Math.abs(preview.delta);
       let paymentId: string | null = null;
-      if (preview.direction === "INCREASE") {
+      if (preview.direction === "INCREASE" && reference) {
         const chgPayment = await prisma.payment.findFirst({
           where: { bookingId: booking.id, reference },
           select: { id: true },
@@ -401,4 +460,192 @@ export async function applyBookingChange(
   });
 
   return { booking: updated, preview };
+}
+
+/**
+ * Refund a DECREASE overpayment for real. Split-aware like the cancellation
+ * refund: the slice funded by gift cards restores to the card(s) (atomic —
+ * a rollback undoes the credit), and only the card-funded slice hits
+ * Stripe. A failed card refund is left FAILED with a queued retry and a
+ * manager alert — never silently retained.
+ */
+async function refundChangeOverpayment(
+  prisma: PrismaClient,
+  args: {
+    booking: LoadedBooking;
+    amount: number;
+    actorUserId: string;
+  },
+): Promise<void> {
+  const { booking } = args;
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  const seq =
+    (await prisma.payment.count({
+      where: { bookingId: booking.id, reference: { startsWith: `REF-CHG-${booking.id}-` } },
+    })) + 1;
+
+  // Gift-funded slice first (restores to the voucher, not the card).
+  const giftAgg = await prisma.payment.aggregate({
+    where: { bookingId: booking.id, type: "GIFT_CARD_REDEMPTION", status: "SUCCEEDED" },
+    _sum: { amount: true },
+  });
+  // Redemption rows are stored negative; prior gift restores are CREDIT
+  // transactions and already reduce what's restorable inside the helper.
+  const giftPaid = Math.abs(Number(giftAgg._sum.amount ?? 0));
+  const giftRefund = r2(Math.min(args.amount, giftPaid));
+  const cardRefund = r2(args.amount - giftRefund);
+
+  if (giftRefund > 0) {
+    const { restoreGiftCardForBooking } = await import("./gift-card");
+    await prisma.$transaction(async (tx) => {
+      const { restored } = await restoreGiftCardForBooking(tx, {
+        bookingId: booking.id,
+        amount: giftRefund,
+        reason: `Refund — booking ${booking.bookingReference} date-change reduction`,
+      });
+      await tx.payment.create({
+        data: {
+          reference: `REF-CHG-GC-${booking.id}-${seq}`,
+          bookingId: booking.id,
+          customerId: booking.customerId,
+          type: "REFUND",
+          method: "CARD",
+          amount: giftRefund,
+          gstAmount: gstFromInclusive(giftRefund),
+          status: "SUCCEEDED",
+          processedAt: new Date(),
+          processedById: args.actorUserId,
+          notes:
+            restored >= giftRefund
+              ? "Date-change reduction restored to gift card"
+              : `Date-change reduction restored to gift card (A$${restored.toFixed(2)} of A$${giftRefund.toFixed(2)} — remainder needs manual follow-up)`,
+        },
+      });
+      const fresh = await tx.booking.findUniqueOrThrow({
+        where: { id: booking.id },
+        select: { amountPaid: true },
+      });
+      await tx.booking.update({
+        where: { id: booking.id },
+        data: { amountPaid: Math.max(0, r2(Number(fresh.amountPaid) - giftRefund)) },
+      });
+    });
+  }
+
+  if (cardRefund <= 0) return;
+  const source = await prisma.payment.findFirst({
+    where: {
+      bookingId: booking.id,
+      type: "BOOKING_PAYMENT",
+      status: "SUCCEEDED",
+      stripePaymentIntentId: { not: null },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, stripePaymentIntentId: true, stripeChargeId: true },
+  });
+
+  const { refundCharge } = await import("@/lib/stripe");
+  let refundOk = false;
+  let stripeRefundId: string | null = null;
+  let failNote = "";
+  const idempotencyKey = `refund-chg-${booking.id}-${seq}`;
+  if (source) {
+    try {
+      const res = await refundCharge({
+        paymentIntentId: source.stripePaymentIntentId,
+        chargeId: source.stripeChargeId,
+        amountCents: Math.round(cardRefund * 100),
+        reason: "requested_by_customer",
+        metadata: { bookingId: booking.id, kind: "date-change-reduction" },
+        idempotencyKey,
+      });
+      stripeRefundId = res.id;
+      refundOk = res.status === "succeeded" || res.status === "pending";
+    } catch (err) {
+      failNote = err instanceof Error ? err.message.slice(0, 160) : "Stripe refund failed";
+      logger.error(
+        { err: failNote, bookingId: booking.id, cardRefund },
+        "date-change reduction refund failed at Stripe",
+      );
+    }
+  } else {
+    failNote = "no Stripe charge on file; manual refund required";
+  }
+
+  const row = await prisma.payment.create({
+    data: {
+      reference: `REF-CHG-${booking.id}-${seq}`,
+      bookingId: booking.id,
+      customerId: booking.customerId,
+      type: "REFUND",
+      method: "STRIPE",
+      amount: cardRefund,
+      gstAmount: gstFromInclusive(cardRefund),
+      status: refundOk ? "SUCCEEDED" : "FAILED",
+      stripeChargeId: stripeRefundId,
+      processedAt: refundOk ? new Date() : null,
+      processedById: args.actorUserId,
+      notes: refundOk
+        ? "Date-change reduction refunded to card"
+        : `Date-change reduction refund FAILED — ${failNote}`,
+    },
+  });
+
+  if (refundOk) {
+    const fresh = await prisma.booking.findUniqueOrThrow({
+      where: { id: booking.id },
+      select: { amountPaid: true },
+    });
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { amountPaid: Math.max(0, r2(Number(fresh.amountPaid) - cardRefund)) },
+    });
+    return;
+  }
+
+  // Same recovery ladder as the cancellation refund: automated retry +
+  // manager alert. The retry job decrements amountPaid when it lands.
+  if (source) {
+    try {
+      const { enqueueRefundRetry } = await import("@/server/jobs/refund-retry");
+      await enqueueRefundRetry({
+        paymentId: row.id,
+        paymentIntentId: source.stripePaymentIntentId,
+        chargeId: source.stripeChargeId,
+        amountCents: Math.round(cardRefund * 100),
+        idempotencyKey,
+        attempt: 1,
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },
+        "date-change reduction: could not enqueue refund retry",
+      );
+    }
+  }
+  try {
+    const { prisma: rootPrisma } = await import("@/lib/prisma");
+    const managers = await rootPrisma.user.findMany({
+      where: { role: { in: ["MANAGER", "ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
+      select: { id: true },
+      take: 5,
+    });
+    for (const m of managers) {
+      await sendNotification({
+        userId: m.id,
+        type: "INCIDENT_REPORTED",
+        channels: ["IN_APP", "EMAIL"],
+        subject: `Refund FAILED — ${booking.bookingReference}`,
+        title: "Date-change reduction refund failed",
+        body: `The A$${cardRefund.toFixed(2)} overpayment refund for booking ${booking.bookingReference} failed at Stripe (${failNote}). An automatic retry is queued; if it keeps failing, refund manually from the payment console.`,
+        bookingId: booking.id,
+        data: { refundPaymentId: row.id, amountAud: cardRefund },
+      });
+    }
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },
+      "date-change reduction: manager alert failed",
+    );
+  }
 }

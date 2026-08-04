@@ -24,7 +24,9 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     stripeFeeLedger: { upsert: feeUpsert, updateMany: feeUpdateMany, findMany: feeFindMany },
     payment: { findMany: paymentFindMany },
-    unmatchedTransaction: { upsert: unmatchedUpsert },
+    user: { findMany: vi.fn().mockResolvedValue([]) },
+    unmatchedTransaction: {
+      findUnique: vi.fn().mockResolvedValue(null), upsert: unmatchedUpsert },
   },
 }));
 

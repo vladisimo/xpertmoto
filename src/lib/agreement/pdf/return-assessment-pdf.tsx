@@ -11,6 +11,7 @@ import {
   TwoColRow,
 } from "@/lib/pdf/components/page-shell";
 import { resolvePdfLogoSrc } from "@/lib/pdf/logo-resolver";
+import { PhotoIssues, type PdfPhotoWithIssues } from "@/lib/agreement/pdf/photo-issues";
 import { type PdfTheme, makePdfTheme } from "@/lib/pdf/theme";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
 
@@ -33,9 +34,7 @@ export interface ReturnAssessmentData {
   staffName?: string;
   odometerKm: number;
   fuelLevel: number;
-  preHireMarkers: DamageMarker[];
-  newMarkers: DamageMarker[];
-  photos: { url: string; caption?: string | null }[];
+  photos: PdfPhotoWithIssues[];
   charges: ChargeLine[];
   fees: { lateFee: number; fuelCharge: number };
   totalDueNow: number;
@@ -55,14 +54,6 @@ export interface ReturnAssessmentData {
   supportEmail: string | null;
 }
 
-interface DamageMarker {
-  x: number;
-  y: number;
-  severity: string;
-  note?: string;
-  view?: "LEFT" | "RIGHT" | "FRONT" | "REAR";
-}
-
 interface ChargeLine {
   description: string;
   severity: string;
@@ -70,6 +61,7 @@ interface ChargeLine {
   amount: number;
   quoteCapAmount?: number | null;
   tariffName?: string | null;
+  photoUrl?: string | null;
 }
 
 export async function renderReturnAssessmentPdf(data: ReturnAssessmentData): Promise<Buffer> {
@@ -199,36 +191,11 @@ export async function renderReturnAssessmentPdf(data: ReturnAssessmentData): Pro
       <PageShell theme={theme}>
         {renderHeader()}
         <PdfSection theme={theme} title="Post-hire condition report">
-          {data.photos.length > 0 ? (
-            <PhotoGrid theme={theme} photos={data.photos.slice(0, 6)} />
-          ) : null}
-          <Text
-            style={{
-              fontSize: theme.size.h3,
-              fontFamily: theme.font.bodyBold,
-              color: theme.colors.ink,
-              marginTop: theme.spacing.lg,
-              marginBottom: theme.spacing.sm,
-            }}
-          >
-            Damage map — pre-hire (grey) vs new (red/orange)
+          <Text style={{ fontSize: theme.size.body, marginBottom: theme.spacing.md }}>
+            The return photographs below, with any new damage pinned and labelled on them, record the
+            vehicle&apos;s condition at return. Any charges are itemised on the next page.
           </Text>
-          <View
-            style={{
-              width: "100%",
-              height: 180,
-              borderWidth: 1,
-              borderColor: theme.colors.divider,
-              marginBottom: theme.spacing.sm,
-            }}
-          >
-            <DiffDamageMap theme={theme} pre={data.preHireMarkers} now={data.newMarkers} />
-          </View>
-          <Text style={{ fontSize: theme.size.body }}>
-            {data.newMarkers.length === 0
-              ? "No new damage identified at return."
-              : `${data.newMarkers.length} new marking(s) identified at return.`}
-          </Text>
+          <PhotoIssues theme={theme} photos={data.photos} />
         </PdfSection>
         {renderFooter()}
       </PageShell>
@@ -387,50 +354,6 @@ export async function renderReturnAssessmentPdf(data: ReturnAssessmentData): Pro
   );
 }
 
-function PhotoGrid({
-  theme,
-  photos,
-}: {
-  theme: PdfTheme;
-  photos: { url: string; caption?: string | null }[];
-}) {
-  const styles = StyleSheet.create({
-    grid: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: theme.spacing.sm,
-    },
-    box: {
-      width: "32%",
-      height: 100,
-      borderWidth: 1,
-      borderColor: theme.colors.divider,
-      borderRadius: theme.radii.sm,
-    },
-    image: {
-      width: "100%",
-      height: "100%",
-      objectFit: "cover",
-    },
-    caption: {
-      fontSize: theme.size.micro,
-      color: theme.colors.muted,
-      textAlign: "center",
-      marginTop: theme.spacing.xs,
-    },
-  });
-  return (
-    <View style={styles.grid}>
-      {photos.map((p, i) => (
-        <View key={`ph-${i}`} style={styles.box}>
-          <Image src={p.url} style={styles.image} />
-          {p.caption ? <Text style={styles.caption}>{p.caption}</Text> : null}
-        </View>
-      ))}
-    </View>
-  );
-}
-
 function ChargesTable({ theme, charges }: { theme: PdfTheme; charges: ChargeLine[] }) {
   const head = StyleSheet.create({
     row: {
@@ -458,14 +381,30 @@ function ChargesTable({ theme, charges }: { theme: PdfTheme; charges: ChargeLine
       </View>
       {charges.map((c, i) => (
         <View key={`ch-${i}`} style={chargeRowStyle(theme)}>
-          <View style={{ flex: 3, paddingHorizontal: theme.spacing.sm }}>
-            <Text style={{ fontSize: theme.size.body }}>
-              {c.description}
-              {c.tariffName ? ` · ${c.tariffName}` : ""}
-            </Text>
-            <Text style={{ fontSize: theme.size.caption, color: theme.colors.muted }}>
-              Severity: {c.severity}
-            </Text>
+          <View
+            style={{
+              flex: 3,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: theme.spacing.sm,
+              paddingHorizontal: theme.spacing.sm,
+            }}
+          >
+            {c.photoUrl ? (
+              <Image
+                src={c.photoUrl}
+                style={{ width: 40, height: 30, borderRadius: theme.radii.sm, objectFit: "cover" }}
+              />
+            ) : null}
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: theme.size.body }}>
+                {c.description}
+                {c.tariffName ? ` · ${c.tariffName}` : ""}
+              </Text>
+              <Text style={{ fontSize: theme.size.caption, color: theme.colors.muted }}>
+                Severity: {c.severity}
+              </Text>
+            </View>
           </View>
           <Text
             style={{
@@ -734,111 +673,3 @@ function SignedFixedFooter({
   );
 }
 
-const DAMAGE_VIEWS = ["LEFT", "RIGHT", "FRONT", "REAR"] as const;
-type DamageView = (typeof DAMAGE_VIEWS)[number];
-
-function DiffDamageMap({
-  theme,
-  pre,
-  now,
-}: {
-  theme: PdfTheme;
-  pre: DamageMarker[];
-  now: DamageMarker[];
-}) {
-  const preBy: Record<DamageView, DamageMarker[]> = {
-    LEFT: [],
-    RIGHT: [],
-    FRONT: [],
-    REAR: [],
-  };
-  const nowBy: Record<DamageView, DamageMarker[]> = {
-    LEFT: [],
-    RIGHT: [],
-    FRONT: [],
-    REAR: [],
-  };
-  for (const m of pre) preBy[m.view ?? "LEFT"].push(m);
-  for (const m of now) nowBy[m.view ?? "LEFT"].push(m);
-
-  const severityColour = (severity: string) => {
-    if (severity === "MAJOR") return theme.colors.errorInk;
-    if (severity === "MODERATE") return theme.colors.alertBorder;
-    return theme.colors.alertBorder;
-  };
-
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        flexWrap: "wrap",
-        height: "100%",
-        width: "100%",
-        backgroundColor: theme.colors.surface,
-      }}
-    >
-      {DAMAGE_VIEWS.map((v) => (
-        <View key={v} style={{ width: "50%", height: "50%", padding: 3 }}>
-          <View
-            style={{
-              position: "relative",
-              height: "100%",
-              width: "100%",
-              backgroundColor: theme.colors.paper,
-              borderWidth: 1,
-              borderColor: theme.colors.divider,
-            }}
-          >
-            <Text
-              style={{
-                position: "absolute",
-                top: 4,
-                left: 6,
-                fontSize: theme.size.micro,
-                color: theme.colors.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-              }}
-            >
-              {v}
-              {nowBy[v].length > 0 ? `  ${nowBy[v].length} new` : ""}
-            </Text>
-            {preBy[v].map((m, i) => (
-              <View
-                key={`pre-${v}-${i}`}
-                style={{
-                  position: "absolute",
-                  left: `${m.x * 100}%`,
-                  top: `${m.y * 100}%`,
-                  width: 8,
-                  height: 8,
-                  marginLeft: -4,
-                  marginTop: -4,
-                  borderRadius: 8,
-                  backgroundColor: theme.colors.faint,
-                  opacity: 0.6,
-                }}
-              />
-            ))}
-            {nowBy[v].map((m, i) => (
-              <View
-                key={`now-${v}-${i}`}
-                style={{
-                  position: "absolute",
-                  left: `${m.x * 100}%`,
-                  top: `${m.y * 100}%`,
-                  width: 10,
-                  height: 10,
-                  marginLeft: -5,
-                  marginTop: -5,
-                  borderRadius: 10,
-                  backgroundColor: severityColour(m.severity),
-                }}
-              />
-            ))}
-          </View>
-        </View>
-      ))}
-    </View>
-  );
-}

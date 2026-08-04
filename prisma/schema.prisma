@@ -212,6 +212,9 @@ enum PaymentStatus {
   REFUNDED
   PARTIALLY_REFUNDED
   DISPUTED
+  /// Uncollectable charge forgiven by a manager (bad-debt write-off). Terminal:
+  /// excluded from settled sets, the capture sweep, re-attempts and pay-now.
+  WRITTEN_OFF
 }
 
 enum InvoiceStatus {
@@ -253,6 +256,24 @@ enum InspectionPurpose {
   SWAP_IN
   ROUTINE
   INCIDENT
+}
+
+/// Which face of the vehicle an inspection issue sits on. Normalised from the
+/// photo capture slot; REAR (not BACK) to match existing photo/slot labels.
+enum VehicleSide {
+  FRONT
+  REAR
+  LEFT
+  RIGHT
+  TOP
+  OTHER
+}
+
+/// Severity of a single labelled inspection issue.
+enum DamageSeverity {
+  MINOR
+  MODERATE
+  MAJOR
 }
 
 /// Financial and operational reason for a mid-rental vehicle swap. Drives
@@ -470,6 +491,8 @@ enum NotificationType {
   PARTNER_BOOKING_ATTRIBUTED
   ZONE_BREACH_WARNING
   FUEL_DELIVERY_DISPATCHED
+  TRACKER_OFFLINE
+  TRACKER_LOW_BATTERY
   CUSTOM
 }
 
@@ -1017,6 +1040,12 @@ model Vehicle {
   pricingTiers         PricingTier[]
 
   @@unique([rego, regoState])
+  // One tracker device maps to at most one vehicle. Without this the GPS51
+  // device→vehicle map (gps51.ts) can silently bind one device to two vehicles,
+  // corrupting the live map and the VehicleLivePosition.vehicleId @unique upsert.
+  // Nullable column → Postgres treats multiple NULLs as distinct, so untracked
+  // vehicles are unaffected.
+  @@unique([gpsTrackerId])
   @@index([status])
   @@index([depotId])
   @@index([categoryId])
@@ -1535,6 +1564,12 @@ model Booking {
   // 0). The remainder is carried on balanceDue. Progressive billing uses
   // firstPeriodAmount; see pricingSnapshot for the full breakdown.
   payOnlineAmount      Decimal       @default(0) @db.Decimal(10, 2)
+  /// Server-created deposit PaymentIntent for payOnlineAmount. confirmPayment
+  /// verifies the client-supplied PI id against this (identity + amount) so a
+  /// forged or foreign PI can never confirm the booking.
+  stripePaymentIntentId String?
+  /// Server-created manual-capture bond hold PI — same verification contract.
+  bondPaymentIntentId   String?
   pricingSnapshot      Json          @default("{}")
   notes                String?
   internalNotes        String?
@@ -1994,6 +2029,14 @@ model BondLedger {
   releasedAmount        Decimal    @default(0) @db.Decimal(10, 2)
   status                BondStatus @default(HELD)
   stripePaymentIntentId String?
+  /// When the CURRENT stripePaymentIntentId was successfully authorised —
+  /// the card-network auth-expiry clock starts here, not at createdAt.
+  authorizedAt          DateTime?  @db.Timestamptz
+  /// How many times the hold has been re-authorised (fresh manual-capture PI
+  /// replacing an expiring one).
+  reauthCount           Int        @default(0)
+  /// Chain of superseded auths: [{ paymentIntentId, authorizedAt, canceledAt, reason }]
+  authHistory           Json       @default("[]")
   deductions            Json       @default("[]")
   createdAt             DateTime   @default(now())
   updatedAt             DateTime   @updatedAt
@@ -2118,6 +2161,8 @@ model Inspection {
   odometerKm           Int
   fuelLevel            Int // 0-100
   overallCondition     VehicleCondition
+  /// @deprecated Superseded by InspectionIssue rows (labelled issues pinned to
+  /// photos). Retained read-only for historical inspections + already-signed PDFs.
   bodyDamageMap        Json              @default("{}")
   tyreFrontDepth       Decimal?          @db.Decimal(4, 2)
   tyreRearDepth        Decimal?          @db.Decimal(4, 2)
@@ -2147,6 +2192,7 @@ model Inspection {
   depot            Depot             @relation(fields: [depotId], references: [id])
   photos           InspectionPhoto[]
   items            InspectionItem[]
+  issues           InspectionIssue[]
   rentalAgreements RentalAgreement[]
   returnAssessment ReturnAssessment?
   damageCharges    DamageCharge[]
@@ -2165,12 +2211,44 @@ model InspectionPhoto {
   inspectionId String
   url          String
   caption      String?
+  /// @deprecated Never populated. A photo's side now lives on InspectionIssue.side.
   damageZone   String?
   createdAt    DateTime @default(now())
 
-  inspection Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  inspection Inspection        @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  issues     InspectionIssue[]
 
   @@index([inspectionId])
+}
+
+/// A single labelled damage/condition issue identified against an inspection
+/// photo. Replaces the old bodyDamageMap coordinate markers: the photo is the
+/// anchor, `label` (optionally a DamageTariff) says what it is, and posX/posY
+/// pin it on the photo. A return-time issue can be promoted to a DamageCharge.
+model InspectionIssue {
+  id                String         @id @default(cuid())
+  inspectionId      String
+  inspectionPhotoId String?
+  side              VehicleSide?
+  damageTariffId    String?
+  label             String
+  severity          DamageSeverity @default(MINOR)
+  note              String?
+  posX              Float?
+  posY              Float?
+  source            String         @default("staff") // staff | customer
+  isPreExisting     Boolean        @default(false)
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  inspection      Inspection       @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  inspectionPhoto InspectionPhoto? @relation(fields: [inspectionPhotoId], references: [id], onDelete: SetNull)
+  damageTariff    DamageTariff?    @relation(fields: [damageTariffId], references: [id], onDelete: SetNull)
+  damageCharges   DamageCharge[]
+
+  @@index([inspectionId])
+  @@index([inspectionPhotoId])
+  @@index([damageTariffId])
 }
 
 model InspectionItem {
@@ -2863,13 +2941,18 @@ model VehicleTelemetry {
 
   @@id([deviceId, timestamp])
   @@index([vehicleId, timestamp])
+  // Declares the time index that TimescaleDB's create_hypertable() auto-creates
+  // (see 20260615120000_add_gps51_telemetry_timescale). Without it Prisma treats
+  // the index as drift and every `migrate dev` tries to DROP it. DESC matches
+  // Timescale's default + the compress_orderby setting.
+  @@index([timestamp(sort: Desc)])
 }
 
-/// One row per tracker device — the latest known position plus the movement
-/// watermark used by the GPS51 poller. The live fleet map reads ONLY this table
-/// (never the VehicleTelemetry hypertable), so map latency is O(fleet) and
-/// independent of history size. `hist*` mark the last point persisted to
-/// history so the persist-on-movement check needs no hypertable read.
+/// One row per tracker device — the latest known position from the GPS51 poller.
+/// The live fleet map reads ONLY this table (never the VehicleTelemetry
+/// hypertable), so map latency is O(fleet) and independent of history size.
+/// `timestamp` is the device fix time; staleness/offline detection compares it
+/// against now (see freshness job).
 model VehicleLivePosition {
   deviceId   String    @id
   vehicleId  String?   @unique
@@ -2881,9 +2964,6 @@ model VehicleLivePosition {
   batteryPct Float?
   moving     Boolean?
   timestamp  DateTime
-  histLat    Float?
-  histLon    Float?
-  histAt     DateTime?
   raw        Json?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
@@ -2901,8 +2981,10 @@ enum Gps51SyncStatus {
 }
 
 /// Run-log for the GPS51 poll job (mirrors LinktSync). `cursor` persists the
-/// GPS51 `lastquerypositiontime` between runs (advanced only after records
-/// commit in the same transaction → at-least-once + upsert dedup = safe replay).
+/// GPS51 `lastquerypositiontime` between runs. The batched live-position write
+/// and the cursor advance commit in a single transaction, so a crash mid-run
+/// never advances the cursor past unpersisted fixes → at-least-once + upsert
+/// dedup = safe replay. `recordsWritten` counts live-position rows upserted.
 model Gps51Sync {
   id             String          @id @default(cuid())
   status         Gps51SyncStatus @default(RUNNING)
@@ -3019,6 +3101,7 @@ model DamageTariff {
   updatedAt     DateTime @updatedAt
 
   charges DamageCharge[]
+  issues  InspectionIssue[]
 
   @@index([isActive])
 }
@@ -3028,7 +3111,10 @@ model DamageCharge {
   returnAssessmentId String
   inspectionId       String
   damageTariffId     String?
+  inspectionIssueId  String?
   description        String
+  /// @deprecated Loose text ref to a legacy bodyDamageMap marker. Superseded by
+  /// inspectionIssueId (a real FK to InspectionIssue). Retained for old rows.
   markerRef          String?
   severity           String
   resolution         ChargeResolution
@@ -3049,6 +3135,7 @@ model DamageCharge {
   returnAssessment ReturnAssessment      @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
   inspection       Inspection            @relation(fields: [inspectionId], references: [id])
   damageTariff     DamageTariff?         @relation(fields: [damageTariffId], references: [id])
+  inspectionIssue  InspectionIssue?      @relation(fields: [inspectionIssueId], references: [id], onDelete: SetNull)
   workOrder        MaintenanceWorkOrder? @relation(fields: [workOrderId], references: [id])
   createdBy        User                  @relation("DamageChargeCreatedBy", fields: [createdById], references: [id])
   resolvedBy       User?                 @relation("DamageChargeResolvedBy", fields: [resolvedById], references: [id])
@@ -3057,6 +3144,7 @@ model DamageCharge {
   @@index([status])
   @@index([workOrderId])
   @@index([inspectionId])
+  @@index([inspectionIssueId])
   @@index([createdById])
   @@index([resolvedById])
 }
@@ -4008,6 +4096,8 @@ model PartnerTransaction {
 // ----------------------------------------------------------------------------
 
 enum GiftCardStatus {
+  /// Created, awaiting payment confirmation — not redeemable, not delivered.
+  PENDING
   ACTIVE
   REDEEMED
   EXPIRED
@@ -4027,6 +4117,9 @@ model GiftCard {
   scheduledDeliveryAt DateTime?
   deliveredAt         DateTime?
   status              GiftCardStatus @default(ACTIVE)
+  /// PaymentIntent that pays for this card — set at purchase, matched by the
+  /// payment_intent.succeeded webhook to flip PENDING → ACTIVE.
+  stripePaymentIntentId String?      @unique
   issuedAt            DateTime       @default(now())
   expiresAt           DateTime
   createdAt           DateTime       @default(now())

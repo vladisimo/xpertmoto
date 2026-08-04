@@ -73,6 +73,8 @@ export const SETTING_DEFAULTS = {
   "tax.gstRate": GST_RATE,
   "payment.bondHoldDays": 14,
   "payment.bondReleaseDays": 14,
+  "payment.bondReauthLeadDays": 2,
+  "payment.walkInBondEnabled": true,
   "payment.acceptCash": true,
 
   // Backups
@@ -171,6 +173,8 @@ export const SETTING_GROUP_FOR: Record<SettingKey, string> = {
   "tax.gstRate": "payment",
   "payment.bondHoldDays": "payment",
   "payment.bondReleaseDays": "payment",
+  "payment.bondReauthLeadDays": "payment",
+  "payment.walkInBondEnabled": "payment",
   "payment.acceptCash": "payment",
 
   "backup.schedule": "backup",
@@ -246,6 +250,8 @@ export const SETTING_DESCRIPTIONS: Partial<Record<SettingKey, string>> = {
   "tax.gstRate": "GST rate applied to all quoted prices (Australian default: 0.10).",
   "payment.bondHoldDays": "How many days the Stripe bond authorisation stays valid.",
   "payment.bondReleaseDays": "Days after return before an un-captured bond is auto-released.",
+  "payment.bondReauthLeadDays": "Re-authorise a bond hold when fewer than this many days remain before the card-network auth expires.",
+  "payment.walkInBondEnabled": "Collect a card + bond hold for walk-in bookings (staff-device card entry).",
   "payment.acceptCash": "Allow staff to accept cash payments at the depot counter.",
 
   "loyalty.pointsPerDollar": "Loyalty points awarded per AUD spent on a completed booking.",

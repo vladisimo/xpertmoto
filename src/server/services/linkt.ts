@@ -493,6 +493,76 @@ async function rebuildPendingRowsForRematch(
   }));
 }
 
+/**
+ * Re-attribute previously unattributable tolls. A trip that resolved to a
+ * vehicle but had no booking spanning it at sync time is recorded as a
+ * `RECEIVED` TOLL `Infringement` with no charge (there was no renter to bill).
+ * If a booking for that vehicle+time later exists — a backdated check-out, a
+ * corrected booking, or a late-entered walk-in — this pass links the
+ * infringement to it and raises the recovery charge, so the renter is billed
+ * once an account becomes available.
+ *
+ * Idempotent: `applyInfringementRecoveryCharge` keys on
+ * `INFR-${referenceNumber}`, so re-running never double-charges. Scoped to a
+ * single account by exact issuer match. Returns the number of tolls newly
+ * charged.
+ */
+export async function reconcileReceivedTolls(
+  prisma: PrismaClient,
+  account: LinktAccount,
+): Promise<number> {
+  const received = await prisma.infringement.findMany({
+    where: {
+      type: "TOLL",
+      bookingId: null,
+      status: "RECEIVED",
+      issuer: `Linkt-${account.region} (${account.name})`,
+    },
+    select: {
+      id: true,
+      referenceNumber: true,
+      type: true,
+      issuer: true,
+      amount: true,
+      adminFee: true,
+      vehicleId: true,
+      offenceDate: true,
+    },
+  });
+
+  let charged = 0;
+  for (const inf of received) {
+    const booking = await findBookingForVehicleAt(prisma, inf.vehicleId, inf.offenceDate);
+    if (!booking) continue;
+
+    await prisma.infringement.update({
+      where: { id: inf.id },
+      data: {
+        bookingId: booking.id,
+        customerId: booking.customerId,
+        status: "CUSTOMER_CHARGED",
+      },
+    });
+
+    const { applyInfringementRecoveryCharge } = await import("./infringement-charge");
+    await applyInfringementRecoveryCharge({
+      prisma,
+      infringement: {
+        id: inf.id,
+        referenceNumber: inf.referenceNumber,
+        type: inf.type,
+        issuer: inf.issuer,
+        amount: inf.amount,
+        adminFee: inf.adminFee,
+        bookingId: booking.id,
+        customerId: booking.customerId,
+      },
+    });
+    charged += 1;
+  }
+  return charged;
+}
+
 export async function runLinktSync(
   prisma: PrismaClient,
   accountId: string,
@@ -555,6 +625,13 @@ export async function runLinktSync(
         externalHash: row.externalHash,
       });
     }
+  }
+
+  // Rematch pass only: re-attribute vehicle-only tolls from earlier syncs whose
+  // booking now exists, charging the renter once an account becomes available.
+  // (Scoped to the automatic no-upload cadence, same as the unmatched rematch.)
+  if (!opts?.buffer) {
+    await reconcileReceivedTolls(prisma, account);
   }
 
   const finalStatus = unmatched > 0 ? "PARTIAL" : "SUCCESS";

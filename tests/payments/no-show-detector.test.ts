@@ -3,8 +3,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 /**
  * G22 — no-show detector.
  *
- *   - CONFIRMED bookings past pickup + grace → status NO_SHOW, bond
- *     fully captured (forfeiture), vehicle freed.
+ *   - CONFIRMED bookings past pickup + grace → status NO_SHOW, the
+ *     configured no-show FEE captured from the bond (partial capture),
+ *     remainder of the hold released, vehicle freed.
  *   - When no bond ledger exists, fall back to a MANUAL_CHARGE for the
  *     configured no-show fee.
  *   - Bookings within the grace window stay CONFIRMED (SQL filter).
@@ -44,11 +45,13 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/server/services/notification-sender", () => ({ sendNotification }));
 
-// The forfeiture path now captures the bond hold at Stripe before writing.
+// The fee path captures the bond hold (partially) at Stripe before writing;
+// a zero-fee path cancels the hold instead.
 const capturePaymentIntent = vi
   .fn()
-  .mockResolvedValue({ id: "pi_bond_1", status: "succeeded", amountReceivedCents: 20000, latestChargeId: "ch_bond_1", captured: true });
-vi.mock("@/lib/stripe", () => ({ capturePaymentIntent }));
+  .mockResolvedValue({ id: "pi_bond_1", status: "succeeded", amountReceivedCents: 5000, latestChargeId: "ch_bond_1", captured: true });
+const cancelPaymentIntent = vi.fn().mockResolvedValue(true);
+vi.mock("@/lib/stripe", () => ({ capturePaymentIntent, cancelPaymentIntent }));
 
 vi.mock("@/server/jobs/queue", () => ({
   getQueue: vi.fn().mockReturnValue(null),
@@ -76,7 +79,7 @@ beforeEach(() => {
 });
 
 describe("no-show-detector", () => {
-  it("forfeits the held bond, frees the vehicle, marks NO_SHOW", async () => {
+  it("captures only the no-show FEE from the bond, releases the remainder, frees the vehicle, marks NO_SHOW", async () => {
     const pickup = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago
     bookingFindMany.mockResolvedValue([
       {
@@ -101,9 +104,10 @@ describe("no-show-detector", () => {
     const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
     const r = await runNoShowDetector();
     expect(r.markedNoShow).toBe(1);
-    // The bond hold is actually captured at Stripe (full forfeiture).
+    // Partial capture of the $50 fee — NOT the full $200 bond. Stripe
+    // auto-releases the remainder on a partial capture.
     expect(capturePaymentIntent).toHaveBeenCalledWith("pi_bond_1", {
-      amountToCaptureCents: 20000,
+      amountToCaptureCents: 5000,
       idempotencyKey: "bond-capture-noshow-book_noshow",
     });
     expect(bookingUpdate).toHaveBeenCalledWith(
@@ -111,13 +115,13 @@ describe("no-show-detector", () => {
         data: expect.objectContaining({ status: "NO_SHOW" }),
       }),
     );
-    // Lands terminal: captured 200, released 0 (= held − captured).
+    // Lands terminal: captured 50 (the fee), released 150 (= held − captured).
     expect(bondUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FULLY_CAPTURED",
-          capturedAmount: 200,
-          releasedAmount: 0,
+          capturedAmount: 50,
+          releasedAmount: 150,
         }),
       }),
     );
@@ -125,10 +129,27 @@ describe("no-show-detector", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           type: "BOND_CAPTURE",
-          amount: 200,
+          amount: 50,
           reference: "BOND-CAP-NOSHOW-book_noshow",
           status: "SUCCEEDED",
         }),
+      }),
+    );
+    // The released remainder is visible on the customer ledger.
+    expect(paymentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "BOND_RELEASE",
+          amount: 150,
+          reference: "NOSHOW-RELEASE-book_noshow",
+          status: "SUCCEEDED",
+        }),
+      }),
+    );
+    // Fee fully covered by the bond → no residual MANUAL_CHARGE.
+    expect(paymentCreate).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: "MANUAL_CHARGE" }),
       }),
     );
     expect(vehicleUpdate).toHaveBeenCalledWith({
@@ -136,6 +157,102 @@ describe("no-show-detector", () => {
       data: { status: "AVAILABLE" },
     });
     expect(sendNotification).toHaveBeenCalled();
+  });
+
+  it("captures the whole short bond and raises the shortfall as a PENDING card charge", async () => {
+    // Bond hold ($30) smaller than the $50 fee.
+    bookingFindMany.mockResolvedValue([
+      {
+        id: "book_short",
+        bookingReference: "SCT-0005",
+        customerId: "cust_5",
+        vehicleId: null,
+        pickupDateTime: new Date(Date.now() - 3 * 3600 * 1000),
+        bondAmount: "30.00",
+        pickupDepot: { slug: "gold-coast" },
+        bondLedger: {
+          id: "bond_5",
+          status: "HELD",
+          heldAmount: "30.00",
+          capturedAmount: "0",
+          releasedAmount: "0",
+          deductions: [],
+          stripePaymentIntentId: "pi_bond_5",
+        },
+      },
+    ]);
+    const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
+    await runNoShowDetector();
+    expect(capturePaymentIntent).toHaveBeenCalledWith("pi_bond_5", {
+      amountToCaptureCents: 3000,
+      idempotencyKey: "bond-capture-noshow-book_short",
+    });
+    expect(bondUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FULLY_CAPTURED",
+          capturedAmount: 30,
+          releasedAmount: 0,
+        }),
+      }),
+    );
+    // The uncovered $20 goes to the card via the capture-pending sweep.
+    expect(paymentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "MANUAL_CHARGE",
+          amount: 20,
+          status: "PENDING",
+          customerId: "cust_5",
+        }),
+      }),
+    );
+    expect(bookingUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "book_short" },
+        data: { balanceDue: { increment: 20 } },
+      }),
+    );
+  });
+
+  it("cancels the hold outright when the fee is configured to zero", async () => {
+    getSettings.mockResolvedValue({
+      "booking.noShowGraceHours": 2,
+      "cancellation.noShowFee": 0,
+    });
+    bookingFindMany.mockResolvedValue([
+      {
+        id: "book_zero",
+        bookingReference: "SCT-0006",
+        customerId: "cust_6",
+        vehicleId: null,
+        pickupDateTime: new Date(Date.now() - 3 * 3600 * 1000),
+        bondAmount: "200.00",
+        pickupDepot: { slug: "gold-coast" },
+        bondLedger: {
+          id: "bond_6",
+          status: "HELD",
+          heldAmount: "200.00",
+          capturedAmount: "0",
+          releasedAmount: "0",
+          deductions: [],
+          stripePaymentIntentId: "pi_bond_6",
+        },
+      },
+    ]);
+    const { runNoShowDetector } = await import("@/server/jobs/no-show-detector");
+    await runNoShowDetector();
+    expect(capturePaymentIntent).not.toHaveBeenCalled();
+    expect(cancelPaymentIntent).toHaveBeenCalledWith("pi_bond_6");
+    expect(bondUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RELEASED",
+          capturedAmount: 0,
+          releasedAmount: 200,
+        }),
+      }),
+    );
   });
 
   it("skips the booking (no phantom) when the Stripe bond capture fails", async () => {

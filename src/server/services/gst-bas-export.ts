@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { roundCents } from "@/lib/money";
+import { gstFromInclusive, roundCents } from "@/lib/money";
 import { paymentNetWeight } from "@/lib/payment-labels";
 
 /**
@@ -32,6 +32,8 @@ export interface GstSummary {
   gstOnRefunds: number;
   /** gstCollected − gstOnRefunds — the amount to lodge on the BAS. */
   netGst: number;
+  /** 1B input-tax credit on Stripe processing fees (GST-inclusive in AU). */
+  gstOnStripeFees: number;
   byDepot: GstSummaryDepot[];
 }
 
@@ -58,7 +60,10 @@ export async function computeGstSummary(args: {
   const payments = await prisma.payment.findMany({
     where: {
       status: { in: SETTLED_PAYMENT_STATUSES as unknown as string[] } as never,
-      processedAt: { gte: args.from, lte: args.to },
+      // Half-open window [from, to): quarterBoundaries hands the NEXT
+      // period's first instant as `to`, so an inclusive upper bound counted
+      // a payment landing exactly on the boundary in BOTH quarters.
+      processedAt: { gte: args.from, lt: args.to },
       deletedAt: null,
       ...(args.depotId ? { booking: { depotId: args.depotId } } : {}),
     },
@@ -75,9 +80,27 @@ export async function computeGstSummary(args: {
   let totalRevenueInc = 0;
   const depots = new Map<string, { name: string; revenue: number; gst: number }>();
 
+  const addToDepot = (
+    booking: { depotId: string | null; depot: { name: string } | null } | null,
+    revenueDelta: number,
+    gstDelta: number,
+  ) => {
+    const depotId = booking?.depotId ?? UNASSIGNED_DEPOT_ID;
+    const name = booking?.depot?.name ?? "Unassigned";
+    const bucket = depots.get(depotId) ?? { name, revenue: 0, gst: 0 };
+    bucket.revenue += revenueDelta;
+    bucket.gst += gstDelta;
+    depots.set(depotId, bucket);
+  };
+
   for (const p of payments) {
     const w = paymentNetWeight(p.type);
     if (w === 0) continue; // bond holds/releases are authorisations, not cash
+    // Gift cards get bespoke Div-100 voucher treatment below: the PURCHASE
+    // is not a supply (cash in, but out of G1 until redeemed) and the
+    // REDEMPTION row is a negative internal transfer whose face value would
+    // otherwise corrupt G1 downward.
+    if (p.type === "GIFT_CARD_PURCHASE" || p.type === "GIFT_CARD_REDEMPTION") continue;
     const amount = Number(p.amount);
     const gst = Number(p.gstAmount);
 
@@ -85,13 +108,43 @@ export async function computeGstSummary(args: {
     if (w === 1) gstCollected += gst;
     else gstOnRefunds += gst;
 
-    const depotId = p.booking?.depotId ?? UNASSIGNED_DEPOT_ID;
-    const name = p.booking?.depot?.name ?? "Unassigned";
-    const bucket = depots.get(depotId) ?? { name, revenue: 0, gst: 0 };
-    bucket.revenue += w * amount;
-    bucket.gst += w * gst;
-    depots.set(depotId, bucket);
+    addToDepot(p.booking, w * amount, w * gst);
   }
+
+  // Div 100 vouchers: GST attaches when the voucher is REDEEMED against a
+  // supply, regardless of when the cash came in. Each redemption's face
+  // value enters G1 as a sale with its GST share in 1A — this is the slice
+  // of the booking no card payment ever carried.
+  const redemptions = await prisma.payment.findMany({
+    where: {
+      type: "GIFT_CARD_REDEMPTION",
+      status: "SUCCEEDED",
+      processedAt: { gte: args.from, lt: args.to },
+      deletedAt: null,
+      ...(args.depotId ? { booking: { depotId: args.depotId } } : {}),
+    },
+    select: {
+      amount: true,
+      booking: { select: { depotId: true, depot: { select: { name: true } } } },
+    },
+  });
+  for (const r of redemptions) {
+    const face = Math.abs(Number(r.amount));
+    const gst = gstFromInclusive(face).toNumber();
+    totalRevenueInc += face;
+    gstCollected += gst;
+    addToDepot(r.booking, face, gst);
+  }
+
+  // 1B input-tax credit: Stripe's AU processing fees are GST-inclusive.
+  // Windowed on the balance transaction date (when the fee was levied).
+  const feeAgg = await prisma.stripeFeeLedger.aggregate({
+    where: { balanceTxnCreatedAt: { gte: args.from, lt: args.to } },
+    _sum: { feeAmountCents: true },
+  });
+  const gstOnStripeFees = roundCents(
+    gstFromInclusive((feeAgg._sum.feeAmountCents ?? 0) / 100),
+  ).toNumber();
 
   const netGst = roundCents(gstCollected - gstOnRefunds).toNumber();
   const totalInc = roundCents(totalRevenueInc).toNumber();
@@ -102,6 +155,7 @@ export async function computeGstSummary(args: {
     gstCollected: roundCents(gstCollected).toNumber(),
     gstOnRefunds: roundCents(gstOnRefunds).toNumber(),
     netGst,
+    gstOnStripeFees,
     byDepot: [...depots.entries()].map(([depotId, d]) => ({
       depotId,
       depotName: d.name,
@@ -158,7 +212,8 @@ export async function generateBasCsv(args: {
     "0.00",
     "0.00", // manual entry — not tracked here
     gstCollected.toFixed(2),
-    "0.00", // manual entry — not tracked here
+    // Stripe processing-fee input credits; other purchases remain manual.
+    summary.gstOnStripeFees.toFixed(2),
     "0.00",
   ];
   return [header.join(","), row.join(",")].join("\n") + "\n";
@@ -175,6 +230,9 @@ export function quarterBoundaries(year: number, quarter: 1 | 2 | 3 | 4): {
 } {
   const startMonth = (quarter - 1) * 3;
   const from = new Date(Date.UTC(year, startMonth, 1));
+  // `to` is the NEXT quarter's first instant — computeGstSummary applies it
+  // as a half-open `lt` bound, so boundary-instant payments land in exactly
+  // one quarter.
   const to = new Date(Date.UTC(year, startMonth + 3, 1));
   return { from, to, label: `${year}-Q${quarter}` };
 }

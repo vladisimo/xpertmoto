@@ -12,6 +12,7 @@ vi.mock("@/lib/redis", () => ({ getRedis: () => null }));
 import type { PrismaClient } from "@prisma/client";
 import {
   lastPosition,
+  runGps51Sync,
   runGps51DailyTrackSync,
   normaliseEpoch,
   deriveIgnition,
@@ -125,6 +126,71 @@ describe("speedKphFromRaw", () => {
     expect(speedKphFromRaw(null)).toBeNull();
     expect(speedKphFromRaw(undefined)).toBeNull();
     expect(speedKphFromRaw("44400")).toBeNull();
+  });
+});
+
+describe("runGps51Sync (live poll)", () => {
+  function mockPollPrisma(over: { devices?: Array<{ id: string; gpsTrackerId: string }> } = {}) {
+    const create = vi.fn(async () => ({ id: "sync1" }));
+    const findFirst = vi.fn(async () => ({ cursor: null }));
+    const update = vi.fn(async (_args: { data: Record<string, unknown> }) => ({})); // outer FAILED path
+    const txUpdate = vi.fn(async (_args: { data: Record<string, unknown> }) => ({}));
+    const executeRaw = vi.fn(async () => 1);
+    const vehicleFindMany = vi.fn(
+      async () => over.devices ?? [{ id: "veh1", gpsTrackerId: "dev1" }],
+    );
+    const $transaction = vi.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+      cb({ $executeRaw: executeRaw, gps51Sync: { update: txUpdate } }),
+    );
+    const prisma = {
+      gps51Sync: { create, findFirst, update },
+      vehicle: { findMany: vehicleFindMany },
+      $transaction,
+    } as unknown as PrismaClient;
+    return { prisma, create, findFirst, update, txUpdate, executeRaw, $transaction };
+  }
+
+  it("batches the live-position upsert and advances the cursor in one transaction", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        login: { status: 0, token: "tok-abc", serverid: 7 },
+        lastposition: {
+          status: 0,
+          lastquerypositiontime: 1_718_450_000_000,
+          records: [
+            { deviceid: "dev1", callat: -27.4, callon: 153.0, speed: 42_000, course: 90, voltagepercent: 80 },
+            { deviceid: "dev1x", callat: null, callon: 153.0 }, // no coords → filtered out
+          ],
+        },
+      }) as unknown as typeof fetch,
+    );
+    const { prisma, executeRaw, txUpdate } = mockPollPrisma();
+
+    const res = await runGps51Sync(prisma);
+
+    expect(res.status).toBe("SUCCESS");
+    expect(res.recordsWritten).toBe(1); // one valid fix written
+    expect(executeRaw).toHaveBeenCalledTimes(1); // single batched INSERT
+    const data = txUpdate.mock.calls[0]![0].data;
+    expect(data.status).toBe("SUCCESS");
+    expect(data.recordsWritten).toBe(1);
+    expect(data.cursor).toBe(1_718_450_000_000n); // cursor advanced inside the tx
+  });
+
+  it("marks the run FAILED (outside the tx) on a definitive GPS51 error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        login: { status: 0, token: "tok-abc", serverid: 7 },
+        lastposition: { status: 8904, cause: "ip" },
+      }) as unknown as typeof fetch,
+    );
+    const { prisma, update, executeRaw } = mockPollPrisma();
+
+    await expect(runGps51Sync(prisma)).rejects.toMatchObject({ status: 8904 });
+    expect(executeRaw).not.toHaveBeenCalled();
+    expect(update.mock.calls[0]![0].data.status).toBe("FAILED");
   });
 });
 

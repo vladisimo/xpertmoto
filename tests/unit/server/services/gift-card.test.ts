@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 
-import { generateGiftCardCode, redeemGiftCard } from "@/server/services/gift-card";
+import {
+  activateGiftCardOnPayment,
+  generateGiftCardCode,
+  issueGiftCard,
+  redeemGiftCard,
+} from "@/server/services/gift-card";
 
 const findUnique = vi.fn();
 const updateMany = vi.fn();
@@ -107,5 +112,112 @@ describe("redeemGiftCard", () => {
       code: "BAD_REQUEST",
     });
     expect(findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("issueGiftCard", () => {
+  it("creates purchased cards PENDING by default — never spendable before payment", async () => {
+    const create = vi.fn().mockResolvedValue({ id: "gc_1", code: "SCOOT-TEST" });
+    const p = {
+      giftCard: { findUnique: vi.fn().mockResolvedValue(null), create },
+    } as unknown as PrismaClient;
+    await issueGiftCard(p, {
+      amount: 100,
+      purchaserEmail: "a@b.com",
+      recipientEmail: "c@d.com",
+    });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "PENDING" }),
+      }),
+    );
+  });
+
+  it("honours an explicit ACTIVE status for settled flows", async () => {
+    const create = vi.fn().mockResolvedValue({ id: "gc_1", code: "SCOOT-TEST" });
+    const p = {
+      giftCard: { findUnique: vi.fn().mockResolvedValue(null), create },
+    } as unknown as PrismaClient;
+    await issueGiftCard(p, {
+      amount: 100,
+      purchaserEmail: "a@b.com",
+      recipientEmail: "c@d.com",
+      status: "ACTIVE",
+    });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "ACTIVE" }) }),
+    );
+  });
+});
+
+describe("activateGiftCardOnPayment", () => {
+  const card = {
+    id: "gc_1",
+    code: "SCOOT-TEST",
+    initialAmount: 100,
+    purchasedById: "user_1",
+    status: "PENDING",
+  };
+
+  function makePrisma(flipCount: number) {
+    const paymentCreate = vi.fn().mockResolvedValue({ id: "pay_1" });
+    const p = {
+      giftCard: {
+        findUnique: vi.fn().mockResolvedValue({ ...card }),
+        updateMany: vi.fn().mockResolvedValue({ count: flipCount }),
+      },
+      payment: { create: paymentCreate },
+    } as unknown as PrismaClient;
+    return { p, paymentCreate };
+  }
+
+  it("flips PENDING→ACTIVE once and records the purchase Payment (gstAmount 0 — Div 100 voucher)", async () => {
+    const { p, paymentCreate } = makePrisma(1);
+    const res = await activateGiftCardOnPayment(p, {
+      giftCardId: "gc_1",
+      stripePaymentIntentId: "pi_123",
+      stripeChargeId: "ch_123",
+    });
+    expect(res.activated).toBe(true);
+    expect(paymentCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reference: "GIFT-gc_1",
+          type: "GIFT_CARD_PURCHASE",
+          gstAmount: 0,
+          stripePaymentIntentId: "pi_123",
+          stripeChargeId: "ch_123",
+          status: "SUCCEEDED",
+          customerId: "user_1",
+        }),
+      }),
+    );
+  });
+
+  it("is idempotent — a redelivered webhook (CAS count 0) creates no second Payment", async () => {
+    const { p, paymentCreate } = makePrisma(0);
+    const res = await activateGiftCardOnPayment(p, {
+      giftCardId: "gc_1",
+      stripePaymentIntentId: "pi_123",
+    });
+    expect(res.activated).toBe(false);
+    expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("no-ops on an unknown card id", async () => {
+    const paymentCreate = vi.fn();
+    const p = {
+      giftCard: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        updateMany: vi.fn(),
+      },
+      payment: { create: paymentCreate },
+    } as unknown as PrismaClient;
+    const res = await activateGiftCardOnPayment(p, {
+      giftCardId: "missing",
+      stripePaymentIntentId: "pi_123",
+    });
+    expect(res.activated).toBe(false);
+    expect(paymentCreate).not.toHaveBeenCalled();
   });
 });

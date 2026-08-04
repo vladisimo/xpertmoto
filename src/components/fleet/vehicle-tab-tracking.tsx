@@ -16,6 +16,7 @@ import {
   Navigation,
   CalendarDays,
   AlertTriangle,
+  Play,
   X,
 } from "lucide-react";
 import { trpc } from "@/lib/trpc/client";
@@ -37,6 +38,10 @@ import {
 } from "@/components/ui/select";
 import { formatDateTime } from "@/lib/utils";
 import type { TrackSegment, FixMarker } from "@/components/maps/vehicle-track-map";
+import {
+  TrackReplayControls,
+  type ReplayPoint,
+} from "@/components/maps/track-replay-controls";
 
 // MapLibre is heavy — only load it on the client when the tab renders.
 const VehicleTrackMap = dynamic(
@@ -192,6 +197,8 @@ export function VehicleTabTracking({
   const [sortKey, setSortKey] = useState<"timestamp" | "speedKph" | "batteryPct">("timestamp");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [modal, setModal] = useState<ModalKind>(null);
+  const [replayOn, setReplayOn] = useState(false);
+  const [replayPoint, setReplayPoint] = useState<ReplayPoint | null>(null);
 
   // The tab is map-first and must not introduce page scroll. Rather than guess a
   // CSS offset for the (variable-height) page header, measure the region's top
@@ -463,8 +470,21 @@ export function VehicleTabTracking({
     >
       {/* Map fills the region */}
       <div className="absolute inset-0">
-        <VehicleTrackMap segments={segments} fixes={fixMarkers} />
+        <VehicleTrackMap
+          segments={segments}
+          fixes={fixMarkers}
+          replayMarker={replayOn ? replayPoint : null}
+        />
       </div>
+
+      {/* Replay controls dock (bottom) — only while replay is on */}
+      {replayOn && hasData && (
+        <div
+          className={`pointer-events-auto absolute inset-x-3 bottom-3 z-10 flex items-center gap-2 p-2 ${GLASS}`}
+        >
+          <TrackReplayControls points={visiblePoints} onFrame={setReplayPoint} />
+        </div>
+      )}
 
       {/* Floating overlays — wrapper is click-through; each panel re-enables events */}
       <div className="pointer-events-none absolute inset-0">
@@ -556,6 +576,18 @@ export function VehicleTabTracking({
             />
             Fix points
           </label>
+          <Button
+            type="button"
+            size="sm"
+            variant={replayOn ? "default" : "outline"}
+            onClick={() => setReplayOn((v) => !v)}
+            disabled={!hasData}
+            className="h-8 gap-1.5"
+            title="Animate a marker along the route"
+          >
+            <Play className="h-3.5 w-3.5" />
+            Replay
+          </Button>
           <div className="mx-0.5 h-6 w-px bg-border" aria-hidden />
           {source === "gps51" ? (
             <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary">

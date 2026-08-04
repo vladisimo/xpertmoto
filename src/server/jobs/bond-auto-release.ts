@@ -14,9 +14,17 @@ const QUEUE = "bond-auto-release" as const;
 
 /**
  * Daily at 02:00. Release bond holds that are older than 14 days and
- * haven't been captured — business rule 3 from CLAUDE.md. Stripe auth
- * holds expire naturally after ~7 days, so this is a bookkeeping update
- * plus a confirmation email.
+ * haven't been captured — business rule 3 from CLAUDE.md.
+ *
+ * Guards (a bond that should be captured must never be written off):
+ *   - `balanceDue > 0` or an un-captured CONFIRMED / QUOTE_PENDING damage
+ *     charge → SKIP and alert a manager once per bond per day. Capture is a
+ *     human decision (auto-capturing a possibly-disputed balance invites
+ *     chargebacks); the moment the balance clears, the next nightly run
+ *     releases as normal.
+ *   - The Stripe PI is actually cancelled BEFORE the ledger flips RELEASED —
+ *     with the rolling re-hold job keeping auths alive, "it expired on its
+ *     own" no longer holds.
  */
 export async function runBondAutoRelease(): Promise<number> {
   const autoReleaseDays = await getSetting(
@@ -38,7 +46,49 @@ export async function runBondAutoRelease(): Promise<number> {
     },
   });
 
+  let released = 0;
   for (const bond of candidates) {
+    // Release gate: unpaid balance or an unresolved damage charge means the
+    // bond may still need capturing — a human call, not a nightly write-off.
+    const openDamage = await prisma.damageCharge.count({
+      where: {
+        returnAssessment: { bookingId: bond.bookingId },
+        OR: [
+          { resolution: "QUOTE_PENDING", status: { in: ["PROVISIONAL", "CONFIRMED"] } },
+          { status: "CONFIRMED", capturedPaymentId: null },
+        ],
+      },
+    });
+    const balanceDue = Number(bond.booking.balanceDue);
+    if (balanceDue > 0.009 || openDamage > 0) {
+      await alertReleaseBlockedOnce(bond.id, {
+        bookingId: bond.bookingId,
+        bookingReference: bond.booking.bookingReference,
+        balanceDue,
+        openDamage,
+        heldAud: Number(bond.heldAmount),
+      });
+      continue;
+    }
+
+    // Retire the hold at Stripe first. A cancel failure on a genuinely
+    // expired auth is fine (the money is already back on the card); a
+    // transport error skips the bond so the next run retries.
+    try {
+      const { cancelPaymentIntent } = await import("@/lib/stripe");
+      await cancelPaymentIntent(bond.stripePaymentIntentId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/payment_intent_unexpected_state|already been canceled|canceled/i.test(message)) {
+        const { logger } = await import("@/lib/logger");
+        logger.warn(
+          { err: message, bondLedgerId: bond.id },
+          "bond-auto-release: Stripe cancel failed; will retry next run",
+        );
+        continue;
+      }
+    }
+
     await prisma.$transaction(async (tx) => {
       await tx.bondLedger.update({
         where: { id: bond.id },
@@ -60,6 +110,7 @@ export async function runBondAutoRelease(): Promise<number> {
         },
       });
     });
+    released += 1;
 
     const customer = bond.booking.customer;
     const html = await render(
@@ -97,7 +148,62 @@ export async function runBondAutoRelease(): Promise<number> {
     });
   }
 
-  return candidates.length;
+  return released;
+}
+
+/** One "release blocked" manager alert per bond per 24h (audit-log dedup). */
+async function alertReleaseBlockedOnce(
+  bondLedgerId: string,
+  info: {
+    bookingId: string;
+    bookingReference: string;
+    balanceDue: number;
+    openDamage: number;
+    heldAud: number;
+  },
+): Promise<void> {
+  const recent = await prisma.auditLog.findFirst({
+    where: {
+      action: "bond.release_blocked_alert",
+      entityId: bondLedgerId,
+      timestamp: { gt: new Date(Date.now() - 23 * 60 * 60 * 1000) },
+    },
+    select: { id: true },
+  });
+  if (recent) return;
+
+  const managers = await prisma.user.findMany({
+    where: { role: { in: ["MANAGER", "ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
+    select: { id: true },
+    take: 5,
+  });
+  for (const m of managers) {
+    await sendNotification({
+      userId: m.id,
+      type: "INCIDENT_REPORTED",
+      channels: ["IN_APP", "EMAIL"],
+      subject: `Bond release blocked — ${info.bookingReference}`,
+      title: "Bond auto-release blocked",
+      body:
+        `The ${formatCurrency(info.heldAud)} bond on booking ${info.bookingReference} is due for auto-release ` +
+        `but ${info.balanceDue > 0 ? `${formatCurrency(info.balanceDue)} is still owed` : ""}` +
+        `${info.balanceDue > 0 && info.openDamage > 0 ? " and " : ""}` +
+        `${info.openDamage > 0 ? `${info.openDamage} damage charge(s) are unresolved` : ""}. ` +
+        `Capture from the bond (Booking → Settlement → Capture bond) or resolve the balance — the release runs automatically once clear.`,
+      bookingId: info.bookingId,
+      data: { bondLedgerId, ...info },
+    });
+  }
+  await prisma.auditLog.create({
+    data: {
+      category: "JOB",
+      action: "bond.release_blocked_alert",
+      entity: "BondLedger",
+      entityId: bondLedgerId,
+      status: "SUCCESS",
+      newData: { ...info },
+    },
+  });
 }
 
 export function startBondAutoReleaseScheduler() {

@@ -71,8 +71,31 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
     },
   });
 
+  const { getSettings, SETTING_DEFAULTS } = await import("@/lib/settings");
+  const policy = await getSettings(["booking.lateReturnGraceHours"] as const);
+  const graceHours =
+    policy["booking.lateReturnGraceHours"] ??
+    SETTING_DEFAULTS["booking.lateReturnGraceHours"];
+
   for (const b of candidates) {
     const hoursLate = (now - b.returnDateTime.getTime()) / (1000 * 60 * 60);
+
+    // Accrue late-day fees as the lateness happens, not only if staff run a
+    // return assessment: a bike kept a week late used to owe nothing until
+    // someone formally settled it. Each COMPLETED 24h block past grace is
+    // one daily rate (the hourly = daily/8 ladder caps at the daily rate
+    // after 8h, so a full day is always exactly the cap); the final partial
+    // day settles at return. Deterministic references make re-runs collide
+    // instead of double-billing, and the return flow subtracts what this
+    // raised so the two paths can never double-charge.
+    try {
+      await raiseAccruedLateDayFees(b, hoursLate, graceHours);
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
+        "overdue-check: late-day fee accrual failed",
+      );
+    }
 
     // Walk stages in order so we can catch up a booking that was missed
     // (e.g. worker down for a few hours) without skipping notifications.
@@ -146,6 +169,61 @@ type CandidateBooking = Awaited<ReturnType<typeof prisma.booking.findMany>>[numb
   category: { baseDailyRate: unknown };
   vehicle: { id: string } | null;
 };
+
+/** Auto-raise stops here; a hire this late is a stage-4 incident and the
+ *  remainder is a staff/legal matter, not a card-sweep matter. */
+const MAX_AUTO_LATE_DAYS = 7;
+
+async function raiseAccruedLateDayFees(
+  b: CandidateBooking,
+  hoursLate: number,
+  graceHours: number,
+): Promise<void> {
+  const completedDays = Math.min(
+    MAX_AUTO_LATE_DAYS,
+    Math.floor((hoursLate - graceHours) / 24),
+  );
+  if (completedDays < 1) return;
+  const daily = Math.round(Number(b.category.baseDailyRate) * 100) / 100;
+  if (daily <= 0) return;
+
+  const { gstFromInclusive } = await import("@/lib/money");
+  const { Prisma } = await import("@prisma/client");
+  for (let day = 1; day <= completedDays; day += 1) {
+    const reference = `LATE-${b.id}-D${day}`;
+    try {
+      // Raise + balanceDue increment share a tx (the raise→add half of the
+      // balance-due contract); the capture sweep collects it off-session and
+      // nets it back out on capture.
+      await prisma.$transaction(async (tx) => {
+        await tx.payment.create({
+          data: {
+            reference,
+            customerId: b.customerId,
+            bookingId: b.id,
+            type: "LATE_FEE",
+            method: "STRIPE",
+            amount: daily,
+            gstAmount: gstFromInclusive(daily),
+            status: "PENDING",
+            notes: `Late return — day ${day} past grace on ${b.bookingReference}`,
+          },
+        });
+        await tx.booking.update({
+          where: { id: b.id },
+          data: { balanceDue: { increment: daily } },
+        });
+      });
+    } catch (err) {
+      // Unique reference collision = this day was already raised. Expected
+      // on every 15-minute tick after the first raise.
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 async function runStage(b: CandidateBooking, stage: number): Promise<void> {
   if (stage === 1) {

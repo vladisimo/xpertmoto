@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
@@ -12,8 +12,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
 import { MobileBottomBar } from "@/components/layout/mobile-bottom-bar";
 import { LoadingBlock } from "@/components/ui/spinner";
-import { DamageMapCanvas, normalizeMarkers, type DamageMarker } from "@/components/agreement/damage-map-canvas";
-import { PhotoCaptureGrid } from "@/components/agreement/photo-capture-grid";
+import { PhotoIssueCapture } from "@/components/agreement/photo-issue-capture";
 
 export default function CheckInInspectPage(props: { params: Promise<{ id: string }> }) {
   const { id } = use(props.params);
@@ -37,23 +36,8 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
   const [overall, setOverall] = useState<"EXCELLENT" | "GOOD" | "FAIR" | "POOR">(
     (existingPost?.overallCondition as "EXCELLENT" | "GOOD" | "FAIR" | "POOR" | undefined) ?? "GOOD",
   );
-  const [severity, setSeverity] = useState<"MINOR" | "MODERATE" | "MAJOR">("MINOR");
-  const [markers, setMarkers] = useState<DamageMarker[]>(() => {
-    const src = (existingPost?.bodyDamageMap as unknown as { markers?: unknown[] } | null)?.markers ?? [];
-    return normalizeMarkers(src);
-  });
   const [err, setErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  const preHireMarkers: DamageMarker[] = useMemo(() => {
-    const src = (preHire?.bodyDamageMap as unknown as { markers?: unknown[] } | null)?.markers ?? [];
-    return normalizeMarkers(src);
-  }, [preHire?.bodyDamageMap]);
-
-  const photos = useMemo(
-    () => (existingPost?.photos ?? []).map((p) => ({ id: p.id, url: p.url, caption: p.caption ?? undefined })),
-    [existingPost?.photos],
-  );
 
   if (!b) return <PageShell><LoadingBlock padded="lg" /></PageShell>;
 
@@ -72,15 +56,6 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
         odometerKm: Number(odometer || 0),
         fuelLevel: Number(fuel),
         overallCondition: overall,
-        damageMarkers: markers.map((m) => ({
-          id: m.id,
-          x: m.x,
-          y: m.y,
-          severity: m.severity,
-          note: m.note,
-          source: m.source,
-          view: m.view ?? "LEFT",
-        })),
         status: "DRAFT",
       });
       setCreatedInspectionId(draft.id);
@@ -102,16 +77,6 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
         odometerKm: Number(odometer || 0),
         fuelLevel: Number(fuel),
         overallCondition: overall,
-        damageMarkers: markers.map((m) => ({
-          id: m.id,
-          x: m.x,
-          y: m.y,
-          severity: m.severity,
-          note: m.note,
-          source: m.source,
-          view: m.view ?? "LEFT",
-          addedAt: m.addedAt,
-        })),
       });
       await utils.inspection.byBooking.invalidate({ bookingId: b!.id });
       setErr(null);
@@ -147,7 +112,7 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
           { label: "1. Inspect" },
         ]}
         title="Post-hire inspection"
-        description="Do this alongside the customer. Compare against the pre-hire map — new damage lands here."
+        description="Do this alongside the customer. Compare against the pre-hire reference — the new damage you pin on the return photos is what gets assessed."
         back={`/staff/bookings/${id}/check-in`}
         mobileCompact
       />
@@ -200,54 +165,36 @@ export default function CheckInInspectPage(props: { params: Promise<{ id: string
         </CardContent>
       </Card>
 
-      {inspectionId ? (
+      {preHire ? (
         <Card>
           <CardHeader>
-            <CardTitle className="h3">Photos</CardTitle>
+            <CardTitle className="h3">Pre-hire reference</CardTitle>
           </CardHeader>
           <CardContent>
-            <PhotoCaptureGrid
-              uploadUrl="/api/upload/inspection-photo"
-              extraFields={{ inspectionId }}
-              initial={photos}
-              onUploaded={() => utils.inspection.byBooking.invalidate({ bookingId: b.id })}
-              onRemoved={() => utils.inspection.byBooking.invalidate({ bookingId: b.id })}
-            />
+            <p className="caption mb-3">
+              Condition documented at check-out — read only. Only <em>new</em> damage you record below is assessed.
+            </p>
+            <PhotoIssueCapture inspectionId={preHire.id} categoryId={b.categoryId} readOnly />
           </CardContent>
         </Card>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="h3">Damage map — pre-hire in grey, new in red/orange</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2 text-sm">
-            <span>Severity:</span>
-            {(["MINOR", "MODERATE", "MAJOR"] as const).map((s) => (
-              <Button
-                key={s}
-                type="button"
-                variant={severity === s ? "default" : "secondary"}
-                size="sm"
-                onClick={() => setSeverity(s)}
-              >
-                {s.slice(0, 1) + s.slice(1).toLowerCase()}
-              </Button>
-            ))}
-          </div>
-          <DamageMapCanvas
-            baseMarkers={preHireMarkers}
-            markers={markers}
-            onChange={setMarkers}
-            activeSeverity={severity}
-            source="staff"
-          />
-          <p className="caption">
-            {markers.length === 0 ? "No new damage marked." : `${markers.length} new marker(s).`}
-          </p>
-        </CardContent>
-      </Card>
+      {inspectionId ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">Return photos &amp; new damage</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <PhotoIssueCapture inspectionId={inspectionId} categoryId={b.categoryId} />
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="py-6 text-center text-sm text-muted-foreground">
+            Save the readings first to enable photo capture.
+          </CardContent>
+        </Card>
+      )}
 
       {err && (
         <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">

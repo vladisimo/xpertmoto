@@ -21,12 +21,25 @@ const sendNotification = vi.fn().mockResolvedValue({ results: [], logIds: [], no
 
 const queueAdd = vi.fn().mockResolvedValue(undefined);
 
+// The success path now runs a CAS + balanceDue decrement inside a
+// transaction (shared contract with the other capture paths).
+const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+const bookingFindUnique = vi.fn().mockResolvedValue({ balanceDue: 150, amountPaid: 0 });
+const bookingUpdate = vi.fn().mockResolvedValue({});
+const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
+  cb({
+    payment: { updateMany: paymentUpdateMany },
+    booking: { findUnique: bookingFindUnique, update: bookingUpdate },
+  }),
+);
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     payment: { findUnique: paymentFindUnique, update: paymentUpdate },
     auditLog: { create: auditCreate },
     paymentEvent: { create: paymentEventCreate },
     user: { findMany: userFindMany },
+    $transaction: txFn,
   },
 }));
 
@@ -77,8 +90,9 @@ describe("capture-retry", () => {
     const { runCaptureRetry } = await import("@/server/jobs/capture-retry");
     const outcome = await runCaptureRetry({ paymentId: "pay_retry_1", attempt: 2 });
     expect(outcome).toBe("succeeded");
-    expect(paymentUpdate).toHaveBeenCalledWith(
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: { id: "pay_retry_1", status: "PENDING" },
         data: expect.objectContaining({ status: "SUCCEEDED", stripePaymentIntentId: "pi_ok" }),
       }),
     );

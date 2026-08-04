@@ -3,6 +3,7 @@ import { logger } from "@/lib/logger";
 import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writePaymentEvent } from "@/server/services/payment-events";
+import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
 import { sendNotification } from "@/server/services/notification-sender";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
@@ -107,14 +108,30 @@ export async function runCaptureRetry(data: CaptureRetryJobData): Promise<"succe
   });
 
   if (charge?.status === "succeeded") {
-    await prisma.payment.update({
-      where: { id: row.id },
-      data: {
-        status: "SUCCEEDED",
-        stripePaymentIntentId: charge.id,
-        stripeChargeId: charge.chargeId ?? null,
-        processedAt: new Date(),
-      },
+    // CAS + balanceDue decrement in one transaction — the same contract as
+    // the other capture paths (capture-pending job / captureNow / webhook).
+    // A plain update here used to flip the row to SUCCEEDED without the
+    // decrement, and the webhook's own CAS then found the row already
+    // SUCCEEDED and skipped it too — so every retry-collected charge left
+    // its amount stuck on Booking.balanceDue (dunned forever).
+    await prisma.$transaction(async (tx) => {
+      const flipped = await tx.payment.updateMany({
+        where: { id: row.id, status: "PENDING" },
+        data: {
+          status: "SUCCEEDED",
+          stripePaymentIntentId: charge.id,
+          stripeChargeId: charge.chargeId ?? null,
+          processedAt: new Date(),
+        },
+      });
+      if (flipped.count > 0) {
+        await applyCaptureToBalanceDue(tx, {
+          bookingId: row.bookingId,
+          type: row.type,
+          amount: row.amount,
+          previousStatus: "PENDING",
+        });
+      }
     });
     await writePaymentEvent(prisma, {
       paymentId: row.id,

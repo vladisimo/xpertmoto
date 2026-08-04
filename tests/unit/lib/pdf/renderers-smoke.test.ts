@@ -124,15 +124,21 @@ describe("PDF renderers — smoke", () => {
       staffName: "Sam Staff",
       odometerKm: 5380,
       fuelLevel: 45,
-      preHireMarkers: [{ x: 0.4, y: 0.5, severity: "MINOR", view: "LEFT" }],
-      newMarkers: [{ x: 0.6, y: 0.3, severity: "MODERATE", view: "FRONT" }],
-      photos: [],
+      photos: [
+        {
+          url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          caption: "Left side",
+          side: "LEFT",
+          issues: [{ n: 1, label: "Scratch on left fairing", severity: "MODERATE", note: null, posX: 0.5, posY: 0.4 }],
+        },
+      ],
       charges: [
         {
           description: "Scratch on left fairing",
           severity: "MODERATE",
           resolution: "STANDARD",
           amount: 180,
+          photoUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
         },
       ],
       fees: { lateFee: 0, fuelCharge: 12.5 },
@@ -197,8 +203,14 @@ describe("PDF renderers — smoke", () => {
       staffName: "Sam Staff",
       addons: [{ name: "Helmet", quantity: 1, totalPrice: 20 }],
       insurance: { name: "Standard", excessAmount: 1500, totalPrice: 48 },
-      photos: [],
-      damageMarkers: [],
+      photos: [
+        {
+          url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          caption: "Front",
+          side: "FRONT",
+          issues: [{ n: 1, label: "Chip on fairing", severity: "MINOR", note: null, posX: 0.3, posY: 0.6 }],
+        },
+      ],
       terms: {
         version: "2026-01",
         sections: [{ heading: "1. Hire", paragraphs: ["The hirer agrees..."] }],

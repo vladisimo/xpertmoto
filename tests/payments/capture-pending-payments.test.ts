@@ -104,7 +104,7 @@ describe("capture-pending-payments", () => {
     );
     // Idempotency key shape
     expect(chargeOffSessionForUser).toHaveBeenCalledWith(
-      expect.objectContaining({ idempotencyKey: "payment-capture:pay_1:DMG-abc" }),
+      expect.objectContaining({ idempotencyKey: "payment-capture:pay_1" }),
     );
   });
 

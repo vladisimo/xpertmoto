@@ -191,6 +191,11 @@ async function crossCheck(createdGte: number, createdLte: number, result: Reconc
           payload: { paymentId: p.id },
         });
         result.unmatchedSystemLedger += 1;
+      } else {
+        // A previously-flagged system-ledger discrepancy that now reconciles
+        // (fee-ledger row arrived late) closes itself — SYSTEM_LEDGER rows
+        // used to have no auto-resolution path and accumulated forever.
+        await resolveUnmatched("SYSTEM_LEDGER", p.stripeChargeId!);
       }
     }
   }
@@ -285,6 +290,12 @@ async function upsertUnmatched(args: {
   reason: string;
   payload: Prisma.InputJsonValue;
 }): Promise<void> {
+  const existing = await prisma.unmatchedTransaction.findUnique({
+    where: {
+      source_externalId: { source: args.source, externalId: args.externalId },
+    },
+    select: { id: true },
+  });
   await prisma.unmatchedTransaction.upsert({
     where: {
       source_externalId: { source: args.source, externalId: args.externalId },
@@ -299,6 +310,50 @@ async function upsertUnmatched(args: {
     },
     update: { reason: args.reason },
   });
+  // A discrepancy that nobody hears about is a silent leakage queue: fire
+  // the (previously never-called) metric and page the managers ONCE per
+  // discrepancy, on first open only — the nightly re-run re-upserting the
+  // same row must not re-page.
+  if (!existing) {
+    try {
+      const { unmatchedTransactionOpened } = await import(
+        "@/server/services/metrics"
+      );
+      unmatchedTransactionOpened(args.source);
+    } catch {
+      // metrics are best-effort
+    }
+    try {
+      const { sendNotification } = await import(
+        "@/server/services/notification-sender"
+      );
+      const managers = await prisma.user.findMany({
+        where: { role: { in: ["MANAGER", "ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
+        select: { id: true },
+        take: 5,
+      });
+      const amountAud = (args.amountCents / 100).toFixed(2);
+      for (const m of managers) {
+        await sendNotification({
+          userId: m.id,
+          type: "INCIDENT_REPORTED",
+          channels: ["IN_APP", "EMAIL"],
+          subject: `Reconciliation discrepancy — ${args.source} A$${amountAud}`,
+          title: "Money doesn't reconcile",
+          body:
+            `${args.reason} (source ${args.source}, A$${amountAud}, ref ${args.externalId}). ` +
+            `Review in Admin → Finance → Reconciliation and resolve it with a note once explained.`,
+          data: { source: args.source, externalId: args.externalId, amountCents: args.amountCents },
+          dedupKey: `unmatched-txn:${args.source}:${args.externalId}`,
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), source: args.source },
+        "stripe-reconcile: unmatched-transaction alert failed",
+      );
+    }
+  }
 }
 
 export function startStripeReconcileScheduler() {

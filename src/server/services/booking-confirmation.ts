@@ -146,21 +146,100 @@ export async function confirmBookingPayment(
     throw new BookingNotConfirmableError(booking.status);
   }
 
-  // Server-side verification. We never trust the caller — fetch the
-  // PaymentIntent from Stripe and assert it actually succeeded before
-  // flipping the booking to CONFIRMED. For stub-mode PIs (no real Stripe)
-  // retrievePaymentIntent returns null and we skip this check so local
-  // dev still works.
+  // Server-side verification. We never trust the caller — the supplied PI
+  // must be THE PI created for this booking (identity via the persisted id,
+  // with a metadata.bookingId fallback for bookings created before the ids
+  // were persisted), must have actually succeeded, and must have captured at
+  // least the booking's payOnlineAmount. Without the amount/identity checks
+  // a $1 PI — or another booking's succeeded PI — would confirm this booking
+  // and allocate a vehicle. For stub-mode PIs (no real Stripe)
+  // retrievePaymentIntent returns null and we skip the checks so local dev
+  // still works.
+  let depositPaymentMethodId: string | null = null;
   if (args.paymentIntentId) {
+    if (
+      booking.stripePaymentIntentId &&
+      args.paymentIntentId !== booking.stripePaymentIntentId
+    ) {
+      logger.warn(
+        {
+          bookingId: booking.id,
+          supplied: args.paymentIntentId,
+          expected: booking.stripePaymentIntentId,
+          source: args.source,
+        },
+        "booking.confirm: supplied PaymentIntent is not the booking's deposit PI",
+      );
+      throw new PaymentIntentInvalidError(args.paymentIntentId);
+    }
     const pi = await retrievePaymentIntentOrThrow(args.paymentIntentId);
-    if (pi && pi.status !== "succeeded") {
-      throw new PaymentNotSucceededError(pi.status);
+    if (pi) {
+      if (pi.status !== "succeeded") {
+        throw new PaymentNotSucceededError(pi.status);
+      }
+      if (!booking.stripePaymentIntentId && pi.metadata?.bookingId !== booking.id) {
+        logger.warn(
+          { bookingId: booking.id, supplied: args.paymentIntentId, piBookingId: pi.metadata?.bookingId },
+          "booking.confirm: PaymentIntent metadata names a different booking",
+        );
+        throw new PaymentIntentInvalidError(args.paymentIntentId);
+      }
+      const expectedCents = Math.round(Number(booking.payOnlineAmount) * 100);
+      if (pi.amountReceivedCents < expectedCents) {
+        logger.warn(
+          {
+            bookingId: booking.id,
+            supplied: args.paymentIntentId,
+            receivedCents: pi.amountReceivedCents,
+            expectedCents,
+          },
+          "booking.confirm: PaymentIntent captured less than the booking's online amount",
+        );
+        throw new PaymentIntentInvalidError(args.paymentIntentId);
+      }
+      // The verified deposit PI carries the card the customer just paid
+      // with (attached via setup_future_usage) — remember it so the
+      // customer's default PM can be persisted after the confirm commits.
+      depositPaymentMethodId = pi.paymentMethodId;
     }
   }
   if (args.bondPaymentIntentId) {
+    if (
+      booking.bondPaymentIntentId &&
+      args.bondPaymentIntentId !== booking.bondPaymentIntentId
+    ) {
+      logger.warn(
+        {
+          bookingId: booking.id,
+          supplied: args.bondPaymentIntentId,
+          expected: booking.bondPaymentIntentId,
+          source: args.source,
+        },
+        "booking.confirm: supplied bond PaymentIntent is not the booking's bond hold",
+      );
+      throw new PaymentIntentInvalidError(args.bondPaymentIntentId);
+    }
     const bondPi = await retrievePaymentIntentOrThrow(args.bondPaymentIntentId);
-    if (bondPi && bondPi.status !== "requires_capture") {
-      throw new BondNotHeldError(bondPi.status);
+    if (bondPi) {
+      if (bondPi.status !== "requires_capture") {
+        throw new BondNotHeldError(bondPi.status);
+      }
+      if (!booking.bondPaymentIntentId && bondPi.metadata?.bookingId !== booking.id) {
+        throw new PaymentIntentInvalidError(args.bondPaymentIntentId);
+      }
+      const expectedBondCents = Math.round(Number(booking.bondAmount) * 100);
+      if (bondPi.amountCents < expectedBondCents) {
+        logger.warn(
+          {
+            bookingId: booking.id,
+            supplied: args.bondPaymentIntentId,
+            authorizedCents: bondPi.amountCents,
+            expectedCents: expectedBondCents,
+          },
+          "booking.confirm: bond authorisation is under the booking's bond amount",
+        );
+        throw new PaymentIntentInvalidError(args.bondPaymentIntentId);
+      }
     }
   }
 
@@ -280,7 +359,7 @@ export async function confirmBookingPayment(
       await tx.bondLedger.upsert({
         where: { bookingId: booking.id },
         update: args.bondPaymentIntentId
-          ? { stripePaymentIntentId: args.bondPaymentIntentId }
+          ? { stripePaymentIntentId: args.bondPaymentIntentId, authorizedAt: new Date() }
           : {},
         create: {
           bookingId: booking.id,
@@ -288,6 +367,9 @@ export async function confirmBookingPayment(
           heldAmount: booking.bondAmount,
           status: "HELD",
           stripePaymentIntentId: args.bondPaymentIntentId ?? undefined,
+          // The auth-expiry clock starts at authorisation, not row creation
+          // — the rolling re-hold job keys its horizon off this.
+          authorizedAt: args.bondPaymentIntentId ? new Date() : undefined,
         },
       });
     }
@@ -351,6 +433,29 @@ export async function confirmBookingPayment(
     return { booking: fresh, alreadyConfirmed: true };
   }
   const updated = txResult.row;
+
+  // KEYSTONE for off-session automation: persist the card the customer just
+  // paid with as their default PM. The deposit PI attached it to the Stripe
+  // Customer (setup_future_usage), but without this DB pointer every
+  // downstream auto-charge (recurring periods, late/damage fees, extensions)
+  // skips with "no stored PM". Best-effort — never blocks the confirmation.
+  if (depositPaymentMethodId) {
+    try {
+      const { persistDefaultPaymentMethodFromIntent } = await import(
+        "@/server/services/stripe-customer"
+      );
+      await persistDefaultPaymentMethodFromIntent(
+        booking.customerId,
+        depositPaymentMethodId,
+        { prisma },
+      );
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },
+        "booking.confirm: default-PM persistence failed; off-session charges may skip until the customer saves a card",
+      );
+    }
+  }
 
   // Drop cached availability for the days this booking now blocks so the
   // public wizard stops offering the just-taken capacity ahead of the

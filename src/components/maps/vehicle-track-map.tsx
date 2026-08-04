@@ -70,10 +70,13 @@ function compass(deg: number): string {
 export function VehicleTrackMap({
   segments,
   fixes,
+  replayMarker,
 }: {
   segments: TrackSegment[];
   /** When provided, render each fix as a clickable dot with a detail popup. */
   fixes?: FixMarker[];
+  /** Current position during route replay — a distinct moving marker. */
+  replayMarker?: { lat: number; lng: number; headingDeg: number | null } | null;
 }) {
   const mapRef = useRef<MapRef | null>(null);
   const fitted = useRef(false);
@@ -240,6 +243,15 @@ export function VehicleTrackMap({
             <EndpointDot label="End" color="#b91c1c" />
           </Marker>
         )}
+        {replayMarker && (
+          <Marker
+            longitude={replayMarker.lng}
+            latitude={replayMarker.lat}
+            anchor="center"
+          >
+            <ReplayMarker headingDeg={replayMarker.headingDeg} />
+          </Marker>
+        )}
         {selectedFix && (
           <Popup
             longitude={selectedFix.lng}
@@ -303,6 +315,46 @@ function FixDetailCard({ fix }: { fix: FixDetail }) {
         />
         <FixDetailRow label="Booking" value={fix.bookingReference ?? "—"} />
       </div>
+    </div>
+  );
+}
+
+/** Playback head: a blue dot with a heading arrow that moves along the route. */
+function ReplayMarker({ headingDeg }: { headingDeg: number | null }) {
+  return (
+    <div className="relative flex items-center justify-center" title="Playback">
+      <div
+        style={{
+          width: 22,
+          height: 22,
+          backgroundColor: "rgba(37,99,235,0.25)",
+          borderRadius: "9999px",
+        }}
+      />
+      <div
+        className="absolute"
+        style={{
+          width: 14,
+          height: 14,
+          backgroundColor: "#2563eb",
+          border: "2px solid white",
+          borderRadius: "9999px",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.5)",
+        }}
+      />
+      {headingDeg != null && (
+        <div
+          className="absolute"
+          style={{
+            transform: `rotate(${headingDeg}deg) translateY(-14px)`,
+            width: 0,
+            height: 0,
+            borderLeft: "4px solid transparent",
+            borderRight: "4px solid transparent",
+            borderBottom: "7px solid #2563eb",
+          }}
+        />
+      )}
     </div>
   );
 }

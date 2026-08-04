@@ -94,9 +94,11 @@ export function isPostRentalCharge(t: PaymentType): boolean {
  * touches a customer invoice, but it does send cash out, so on a finance
  * ledger it belongs here.
  *
- * GIFT_CARD_REDEMPTION is left as an inflow for now — its funding cash was
- * already booked at GIFT_CARD_PURCHASE; revisit if redemptions start
- * double-counting against booking payments.
+ * GIFT_CARD_REDEMPTION lives in PAYMENT_NONCASH_TYPES below: the funding
+ * CASH was booked at GIFT_CARD_PURCHASE, so a redemption moves no cash —
+ * its old +1 weight on a negative stored amount silently SUBTRACTED
+ * redeemed value from every cash total. (GST is separate: computeGstSummary
+ * books redemption GST into G1/1A directly, per Div 100.)
  */
 export const PAYMENT_OUTFLOW_TYPES: ReadonlySet<PaymentType> = new Set<PaymentType>([
   "REFUND",
@@ -118,6 +120,8 @@ export const PAYMENT_OUTFLOW_TYPES: ReadonlySet<PaymentType> = new Set<PaymentTy
 export const PAYMENT_NONCASH_TYPES: ReadonlySet<PaymentType> = new Set<PaymentType>([
   "BOND_HOLD",
   "BOND_RELEASE",
+  // Voucher redemption: the cash was booked at GIFT_CARD_PURCHASE.
+  "GIFT_CARD_REDEMPTION",
 ]);
 
 /** True for bond authorisations (hold/release) — shown as rows but excluded from any cash total. */

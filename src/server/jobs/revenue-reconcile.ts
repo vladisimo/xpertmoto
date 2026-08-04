@@ -48,6 +48,21 @@ export async function reconcileDailyRevenue(
 
   let written = 0;
   for (const r of rows) {
+    // Rebuild the booking-derived columns from source of truth, but PRESERVE
+    // the live-accumulated deltas (damage/late revenue via
+    // recordAdditionalCharges, refunds via recordRefund): the old update
+    // overwrote totalRevenue/netRevenue with booking-only sums, silently
+    // erasing every same-day ancillary charge and refund each night.
+    const existing = await prisma.dailyRevenue.findUnique({
+      where: { date_depotId: { date: r.date, depotId: r.depotId } },
+      select: { damageRevenue: true, lateFeesRevenue: true, totalRefunds: true },
+    });
+    const damage = Number(existing?.damageRevenue ?? 0);
+    const late = Number(existing?.lateFeesRevenue ?? 0);
+    const refunds = Number(existing?.totalRefunds ?? 0);
+    const total =
+      Math.round((Number(r.totalAmount) + damage + late) * 100) / 100;
+    const net = Math.round((total - refunds) * 100) / 100;
     await prisma.dailyRevenue.upsert({
       where: { date_depotId: { date: r.date, depotId: r.depotId } },
       create: {
@@ -62,9 +77,9 @@ export async function reconcileDailyRevenue(
       update: {
         bookingRevenue: r.bookingRevenue,
         addonRevenue: r.addonRevenue,
-        totalRevenue: r.totalAmount,
+        totalRevenue: total,
         totalGst: r.gstAmount,
-        netRevenue: r.totalAmount,
+        netRevenue: net,
       },
     });
     written++;

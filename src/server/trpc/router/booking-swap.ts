@@ -987,6 +987,14 @@ export const bookingSwapRouter = createTRPCRouter({
             },
           });
           paymentId = p.id;
+          // Raise→add half of the balance-due contract (balance-due.ts):
+          // SWAP_ADJUSTMENT is balance-affecting, so its capture decrements
+          // balanceDue — without this increment the capture would eat into
+          // UNRELATED debt on the booking and silently stop it being dunned.
+          await tx.booking.update({
+            where: { id: booking.id },
+            data: { balanceDue: { increment: absDelta } },
+          });
         } else if (direction === "REFUND") {
           if (fallbackToCredit) {
             // >180d — record as MANUAL_CREDIT so the ledger reflects

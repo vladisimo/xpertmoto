@@ -6,8 +6,21 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBranding } from "@/components/shared/branding-provider";
+import { GiftCardPaymentForm } from "@/components/marketing/gift-card-payment-form";
 
 const AMOUNTS = [50, 100, 250, 500];
+
+/** Purchase flow: details → card payment → paid. The card is created
+ *  PENDING server-side and only activates (and emails the recipient) once
+ *  Stripe confirms the payment, so the "paid" panel is honest about the
+ *  email being on its way rather than already sent. Stub-mode Stripe (dev)
+ *  skips the payment step — the server already activated the card. */
+type PendingPayment = {
+  giftCardId: string;
+  code: string;
+  clientSecret: string;
+  amount: number;
+};
 
 export default function GiftCardsPage() {
   const { siteName } = useBranding();
@@ -16,11 +29,22 @@ export default function GiftCardsPage() {
   const [recipientEmail, setRecipientEmail] = useState("");
   const [recipientName, setRecipientName] = useState("");
   const [message, setMessage] = useState("");
+  const [payment, setPayment] = useState<PendingPayment | null>(null);
   const [issued, setIssued] = useState<{ code: string; amount: number } | null>(null);
 
   const purchase = trpc.giftCard.purchase.useMutation({
     onSuccess: (res) => {
-      setIssued({ code: res.code, amount });
+      if (res.paymentClientSecret.startsWith("cs_stub_") || res.paymentClientSecret === "") {
+        // Dev stub mode — server activated + delivered inline.
+        setIssued({ code: res.code, amount });
+        return;
+      }
+      setPayment({
+        giftCardId: res.giftCardId,
+        code: res.code,
+        clientSecret: res.paymentClientSecret,
+        amount,
+      });
     },
   });
 
@@ -39,12 +63,13 @@ export default function GiftCardsPage() {
       {issued ? (
         <Card className="max-w-xl">
           <CardHeader>
-            <CardTitle>🎉 Gift card ready</CardTitle>
+            <CardTitle>🎉 Gift card on its way</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-body">
-              We&apos;ve emailed <strong>{recipientEmail}</strong> with their new
-              A${issued.amount.toFixed(2)} {siteName} gift card.
+              Payment received. We&apos;re emailing <strong>{recipientEmail}</strong>{" "}
+              their new A${issued.amount.toFixed(2)} {siteName} gift card now — it
+              should arrive within a few minutes.
             </p>
             <div className="rounded-md border-2 border-dashed border-primary bg-accent/10 p-4 text-center">
               <p className="eyebrow">Code</p>
@@ -55,6 +80,24 @@ export default function GiftCardsPage() {
             <Button variant="secondary" onClick={() => setIssued(null)}>
               Send another
             </Button>
+          </CardContent>
+        </Card>
+      ) : payment ? (
+        <Card className="max-w-xl">
+          <CardHeader>
+            <CardTitle>Payment</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <GiftCardPaymentForm
+              clientSecret={payment.clientSecret}
+              amountAud={payment.amount}
+              purchaserEmail={purchaserEmail}
+              onSuccess={() => {
+                setIssued({ code: payment.code, amount: payment.amount });
+                setPayment(null);
+              }}
+              onCancel={() => setPayment(null)}
+            />
           </CardContent>
         </Card>
       ) : (

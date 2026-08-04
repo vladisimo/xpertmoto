@@ -1,13 +1,15 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getBranding } from "@/lib/branding";
+import { buildMetadata } from "@/lib/seo/metadata";
 
 export async function generateMetadata(): Promise<Metadata> {
-  const { siteName, legalName } = await getBranding();
-  return {
-    title: `Privacy Policy | ${siteName}`,
+  const { legalName } = await getBranding();
+  return buildMetadata({
+    title: "Privacy Policy",
     description: `How ${legalName} collects, uses, stores and discloses personal information under the Australian Privacy Principles.`,
-  };
+    path: "/privacy",
+  });
 }
 
 const VERSION = "2.0";

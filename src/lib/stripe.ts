@@ -12,6 +12,10 @@ export type CreatePaymentIntentArgs = {
   // Customer attachment". Callers pass `null` for one-off charges with no
   // reuse (currently unused — always pass a real id).
   customerId?: string | null;
+  // Extra metadata merged over the default `{ bookingId }` — e.g. the
+  // gift-card purchase PI carries `giftCardId` so the webhook can activate
+  // exactly that card.
+  metadata?: Record<string, string>;
 };
 
 export type PaymentIntentResult = {
@@ -102,7 +106,7 @@ export async function createPaymentIntent(args: CreatePaymentIntentArgs): Promis
       currency: "aud",
       description: args.description,
       receipt_email: args.customerEmail,
-      metadata: { bookingId: args.bookingId },
+      metadata: { bookingId: args.bookingId, ...(args.metadata ?? {}) },
       // Card-only. The booking flow takes a bond hold (manual-capture PI)
       // immediately after this charge confirms, and confirmCardPayment only
       // accepts card-type PaymentMethods. Link/wallet types would silently
@@ -177,6 +181,15 @@ export async function retrievePaymentIntent(
    */
   amountReceivedCents: number;
   latestChargeId: string | null;
+  /** PI metadata (bookingId / giftCardId / type) — used by confirmation
+   *  verification to bind a PI to the entity it was created for. */
+  metadata: Record<string, string>;
+  /** PaymentMethod used to (attempt to) pay this PI — the handle for
+   *  persisting the customer's default card after a checkout confirm. */
+  paymentMethodId: string | null;
+  /** Client secret — only ever exposed to the PI's own customer (used by the
+   *  portal to complete a pending 3DS challenge). */
+  clientSecret: string | null;
 } | null> {
   if (
     !paymentIntentId ||
@@ -194,19 +207,86 @@ export async function retrievePaymentIntent(
             amount: number;
             amount_received?: number | null;
             latest_charge: string | null;
+            metadata?: Record<string, string> | null;
+            payment_method?: string | { id?: string | null } | null;
+            client_secret?: string | null;
           }>;
         };
       }
     | null;
   if (!stripe) return null;
   const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+  const pm = pi.payment_method;
   return {
     id: pi.id,
     status: pi.status,
     amountCents: pi.amount,
     amountReceivedCents: pi.amount_received ?? 0,
     latestChargeId: pi.latest_charge,
+    metadata: pi.metadata ?? {},
+    paymentMethodId: typeof pm === "string" ? pm : (pm?.id ?? null),
+    clientSecret: pi.client_secret ?? null,
   };
+}
+
+/**
+ * Fetch a PaymentMethod's display fields (brand / last4 / expiry). Used when
+ * persisting a default PM discovered from a succeeded PI, where we never had
+ * the card details client-side. Stub-safe: returns a bare id shape when
+ * Stripe isn't configured.
+ */
+export async function retrievePaymentMethod(
+  paymentMethodId: string,
+): Promise<StripePaymentMethodInfo | null> {
+  const stripe = (await getStripeClient()) as
+    | {
+        paymentMethods: {
+          retrieve: (id: string) => Promise<{
+            id: string;
+            card?: { brand?: string; last4?: string; exp_month?: number; exp_year?: number } | null;
+          }>;
+        };
+      }
+    | null;
+  if (!stripe) return { id: paymentMethodId };
+  const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+  return {
+    id: pm.id,
+    brand: pm.card?.brand ?? null,
+    last4: pm.card?.last4 ?? null,
+    expMonth: pm.card?.exp_month ?? null,
+    expYear: pm.card?.exp_year ?? null,
+  };
+}
+
+/**
+ * Mark an ALREADY-ATTACHED PaymentMethod as the customer's default — the
+ * counterpart to {@link attachDefaultPaymentMethod} for PMs that were
+ * attached by `setup_future_usage: "off_session"` on a checkout PI (calling
+ * attach again on those errors with `payment_method_unexpected_state`).
+ */
+export async function setCustomerDefaultPaymentMethod(args: {
+  customerId: string;
+  paymentMethodId: string;
+}): Promise<void> {
+  const stripe = (await getStripeClient()) as
+    | { customers: { update: (id: string, params: Record<string, unknown>) => Promise<{ id: string }> } }
+    | null;
+  if (!stripe) return;
+  try {
+    await stripe.customers.update(args.customerId, {
+      invoice_settings: { default_payment_method: args.paymentMethodId },
+    });
+  } catch (err) {
+    const d = describeStripeError(err);
+    throw new StripePaymentMethodError({
+      code: d.code,
+      message: `Stripe customers.update failed: ${d.message}`,
+      userMessage: paymentMethodUserMessage(d.code),
+      stripeType: d.type,
+      stripeRequestId: d.requestId,
+    });
+  }
 }
 
 // Phase E — hosted Stripe Checkout for "Pay now" links. Given an
@@ -388,6 +468,93 @@ export async function createBondHold(args: CreatePaymentIntentArgs): Promise<Pay
     clientSecret: pi.client_secret ?? "",
     status: pi.status === "succeeded" ? "succeeded" : "requires_confirmation",
   };
+}
+
+export type OffSessionBondHoldResult = {
+  id: string;
+  status: "requires_capture" | "requires_action" | "requires_payment_method" | "failed";
+  /** Present on requires_action — a customer-present device (e.g. the staff
+   *  counter tablet at check-out) can complete 3DS via confirmCardPayment. */
+  clientSecret: string | null;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+/**
+ * Authorise a fresh manual-capture bond hold against a SAVED payment method,
+ * off-session — no customer interaction on the happy path. Used to (re-)hold
+ * the bond at check-out and by the rolling re-hold job when a hold nears its
+ * card-network auth expiry. Success status is `requires_capture` (the hold is
+ * live), NOT `succeeded`.
+ *
+ * Caller must pass a stable `idempotencyKey` (e.g. `bond-reauth-<ledger>-<n>`)
+ * so a transient retry can't stack two live holds on the customer's card.
+ */
+export async function createBondHoldOffSession(args: {
+  customerId: string;
+  paymentMethodId: string;
+  amount: number; // AUD major units
+  bookingId: string;
+  description: string;
+  idempotencyKey: string;
+}): Promise<OffSessionBondHoldResult> {
+  const stripe = (await getStripeClient()) as
+    | {
+        paymentIntents: {
+          create: (
+            params: Record<string, unknown>,
+            opts?: { idempotencyKey?: string },
+          ) => Promise<{ id: string; status: string; client_secret: string | null }>;
+        };
+      }
+    | null;
+  if (!stripe) {
+    assertNotStubbedInProduction();
+    return {
+      id: `pi_bond_stub_${args.bookingId}`,
+      status: "requires_capture",
+      clientSecret: null,
+    };
+  }
+  try {
+    const pi = await stripe.paymentIntents.create(
+      {
+        amount: Math.round(args.amount * 100),
+        currency: "aud",
+        capture_method: "manual",
+        customer: args.customerId,
+        payment_method: args.paymentMethodId,
+        off_session: true,
+        confirm: true,
+        payment_method_types: ["card"],
+        description: `Bond hold — ${args.description}`,
+        metadata: { bookingId: args.bookingId, type: "bond" },
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+    const status =
+      pi.status === "requires_capture"
+        ? ("requires_capture" as const)
+        : pi.status === "requires_action"
+          ? ("requires_action" as const)
+          : pi.status === "requires_payment_method"
+            ? ("requires_payment_method" as const)
+            : ("failed" as const);
+    return { id: pi.id, status, clientSecret: pi.client_secret ?? null };
+  } catch (err) {
+    const anyErr = err as {
+      code?: string;
+      message?: string;
+      raw?: { payment_intent?: { id?: string; client_secret?: string | null } };
+    };
+    return {
+      id: anyErr.raw?.payment_intent?.id ?? "pi_unknown",
+      status: "failed",
+      clientSecret: anyErr.raw?.payment_intent?.client_secret ?? null,
+      errorCode: anyErr.code ?? "stripe_error",
+      errorMessage: (anyErr.message ?? "Stripe bond hold failed").slice(0, 256),
+    };
+  }
 }
 
 export type CapturePaymentIntentResult = {
@@ -717,6 +884,9 @@ export type OffSessionChargeResult = {
   errorCode?: string;
   errorMessage?: string;
   chargeId?: string | null;
+  /** Present on requires_action / authentication_required outcomes — the
+   *  customer portal completes 3DS with it via confirmCardPayment. */
+  clientSecret?: string | null;
 };
 
 /**
@@ -736,7 +906,12 @@ export async function chargeOffSession(args: OffSessionChargeArgs): Promise<OffS
           create: (
             params: Record<string, unknown>,
             opts?: { idempotencyKey?: string },
-          ) => Promise<{ id: string; status: string; latest_charge: string | null }>;
+          ) => Promise<{
+            id: string;
+            status: string;
+            latest_charge: string | null;
+            client_secret?: string | null;
+          }>;
         };
       }
     | null;
@@ -770,15 +945,29 @@ export async function chargeOffSession(args: OffSessionChargeArgs): Promise<OffS
           : pi.status === "requires_payment_method"
             ? ("requires_payment_method" as const)
             : ("failed" as const);
-    return { id: pi.id, status, chargeId: pi.latest_charge };
+    return {
+      id: pi.id,
+      status,
+      chargeId: pi.latest_charge,
+      // The customer completes 3DS with this from their portal — without it
+      // a requires_action charge is stuck PENDING forever.
+      clientSecret: pi.client_secret ?? null,
+    };
   } catch (err) {
-    // Stripe throws for hard declines; extract code + message without PII.
-    const anyErr = err as { code?: string; message?: string; raw?: { payment_intent?: { id?: string } } };
+    // Stripe throws for declines AND for issuer-mandated 3DS on off-session
+    // (code `authentication_required`) — the latter carries a live PI whose
+    // client_secret lets the customer authenticate on-session.
+    const anyErr = err as {
+      code?: string;
+      message?: string;
+      raw?: { payment_intent?: { id?: string; client_secret?: string | null } };
+    };
     return {
       id: anyErr.raw?.payment_intent?.id ?? "pi_unknown",
       status: "failed",
       errorCode: anyErr.code ?? "stripe_error",
       errorMessage: (anyErr.message ?? "Stripe charge failed").slice(0, 256),
+      clientSecret: anyErr.raw?.payment_intent?.client_secret ?? null,
     };
   }
 }

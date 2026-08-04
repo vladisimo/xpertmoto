@@ -7,14 +7,15 @@ import { DividedTitle } from "@/components/marketing/divided-title";
 import { FaqList } from "@/components/marketing/faq-list";
 import { TOUR_FAQS, TOURS } from "@/content/tours";
 import { getBranding } from "@/lib/branding";
+import { buildMetadata } from "@/lib/seo/metadata";
 
-export async function generateMetadata(): Promise<Metadata> {
-  const { siteName } = await getBranding();
-  return {
-    title: `Guided Motorcycle Tours in Sydney | ${siteName}`,
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Guided Motorcycle Tours, Sydney",
     description:
       "Premium guided motorcycle tours across Sydney and beyond. Day trips led by local experts — coastal curves, Blue Mountains, Hunter Valley and more.",
-  };
+    path: "/tours",
+  });
 }
 
 export default async function ToursPage() {

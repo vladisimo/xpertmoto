@@ -38,6 +38,16 @@ const TRACKS_DAILY_LIMIT = 5; // provider cap: 5 querytracks/device/day
 // vehicle can be thousands of fixes — insert them in bounded chunks.
 const DAILY_TRACK_THROTTLE_MS = 7000; // ~8.5 querytracks/min, leaves headroom for the poll
 const TELEMETRY_INSERT_CHUNK = 1000;
+// The nightly sync runs under a 2h job lock (gps51-daily-sync.ts). Run time is
+// ~linear in fleet size (devices × throttle): ~35 min at 300, ~1.2h at 600. Warn
+// once an estimated run uses most of that window so growth is visible before a
+// run overruns the lock or the daily IP/quota budget.
+const DAILY_LOCK_TTL_MS = 2 * 60 * 60 * 1000;
+const DAILY_RUNTIME_WARN_RATIO = 0.7;
+// Live-position batch upsert chunk. 13 columns/row → 500 rows ≈ 6500 bind params,
+// well under Postgres's 65535 limit. Keeps the per-minute poll to O(fleet/500)
+// round-trips instead of one per device.
+const LIVE_UPSERT_CHUNK = 500;
 const DEVICE_ERROR_SAMPLE_LIMIT = 50; // cap stored per-device errors in the run summary
 
 // ---------------------------------------------------------------------------
@@ -316,47 +326,81 @@ export async function runGps51Sync(prisma: PrismaClient = defaultPrisma): Promis
     const { records, cursor: newCursor } = await lastPosition({ deviceIds, cursor });
     devicesSeen = records.length;
 
-    for (const rec of records) {
-      const lat = num(rec.callat);
-      const lon = num(rec.callon);
-      if (lat == null || lon == null) continue;
-
-      const fixAt = normaliseEpoch(rec.devicetime ?? rec.updatetime) ?? new Date();
-      const vehicleId = deviceToVehicle.get(rec.deviceid) ?? null;
-      const moving = rec.moving === 1 ? true : rec.moving === 0 ? false : null;
-      const raw = rec as unknown as Prisma.InputJsonValue;
-
-      // Live-map snapshot only. Full-fidelity history is owned by the nightly
-      // querytracks sync (runGps51DailyTrackSync); the poll no longer appends to
-      // the VehicleTelemetry hypertable.
-      const common = {
-        vehicleId,
-        latitude: lat,
-        longitude: lon,
-        speedKph: speedKphFromRaw(rec.speed), // GPS51 speed is metres/hour → km/h
-        headingDeg: num(rec.course),
-        ignitionOn: deriveIgnition(rec),
-        batteryPct: num(rec.voltagepercent),
-        moving,
-        timestamp: fixAt,
-        raw,
-      };
-      await prisma.vehicleLivePosition.upsert({
-        where: { deviceId: rec.deviceid },
-        create: { deviceId: rec.deviceid, ...common },
-        update: common,
-      });
+    // Freshness signal: a structurally-successful poll can still hide trackers
+    // going dark — an offline device simply drops out of the lastposition
+    // response. Surface the gap so it shows in logs (and the run-log
+    // devicesSeen vs the linked count, read by gps51SyncStatus/freshness).
+    if (deviceIds.length > 0 && devicesSeen < deviceIds.length) {
+      log.warn(
+        { linked: deviceIds.length, reporting: devicesSeen, silent: deviceIds.length - devicesSeen },
+        "gps51: fewer devices reported than are linked — some trackers may be offline",
+      );
     }
 
-    await prisma.gps51Sync.update({
-      where: { id: sync.id },
-      data: {
-        status: "SUCCESS",
-        finishedAt: new Date(),
-        devicesSeen,
-        recordsWritten,
-        cursor: BigInt(Math.trunc(newCursor)),
-      },
+    // Build the live-map snapshot rows (skip fixes with no coordinates). Full-
+    // fidelity history is owned by the nightly querytracks sync
+    // (runGps51DailyTrackSync); the poll never appends to the VehicleTelemetry
+    // hypertable — it only maintains one latest-fix row per device.
+    const rows = records.flatMap((rec) => {
+      const lat = num(rec.callat);
+      const lon = num(rec.callon);
+      if (lat == null || lon == null) return [];
+      return [
+        {
+          deviceId: rec.deviceid,
+          vehicleId: deviceToVehicle.get(rec.deviceid) ?? null,
+          latitude: lat,
+          longitude: lon,
+          speedKph: speedKphFromRaw(rec.speed), // GPS51 speed is metres/hour → km/h
+          headingDeg: num(rec.course),
+          ignitionOn: deriveIgnition(rec),
+          batteryPct: num(rec.voltagepercent),
+          moving: rec.moving === 1 ? true : rec.moving === 0 ? false : null,
+          timestamp: normaliseEpoch(rec.devicetime ?? rec.updatetime) ?? new Date(),
+          raw: JSON.stringify(rec),
+        },
+      ];
+    });
+    recordsWritten = rows.length;
+
+    // Batched upsert + cursor advance in a single transaction. Chunked
+    // INSERT … ON CONFLICT collapses one round-trip-per-device into a handful,
+    // and committing the cursor with the rows means a crash mid-run never
+    // advances past unpersisted fixes (at-least-once + composite-key dedup).
+    await prisma.$transaction(async (tx) => {
+      for (let i = 0; i < rows.length; i += LIVE_UPSERT_CHUNK) {
+        const chunk = rows.slice(i, i + LIVE_UPSERT_CHUNK);
+        const values = chunk.map(
+          (r) =>
+            Prisma.sql`(${r.deviceId}, ${r.vehicleId}, ${r.latitude}, ${r.longitude}, ${r.speedKph}, ${r.headingDeg}, ${r.ignitionOn}, ${r.batteryPct}, ${r.moving}, ${r.timestamp}, ${r.raw}::jsonb, NOW(), NOW())`,
+        );
+        await tx.$executeRaw`
+          INSERT INTO "VehicleLivePosition"
+            ("deviceId", "vehicleId", "latitude", "longitude", "speedKph", "headingDeg", "ignitionOn", "batteryPct", "moving", "timestamp", "raw", "createdAt", "updatedAt")
+          VALUES ${Prisma.join(values)}
+          ON CONFLICT ("deviceId") DO UPDATE SET
+            "vehicleId" = EXCLUDED."vehicleId",
+            "latitude" = EXCLUDED."latitude",
+            "longitude" = EXCLUDED."longitude",
+            "speedKph" = EXCLUDED."speedKph",
+            "headingDeg" = EXCLUDED."headingDeg",
+            "ignitionOn" = EXCLUDED."ignitionOn",
+            "batteryPct" = EXCLUDED."batteryPct",
+            "moving" = EXCLUDED."moving",
+            "timestamp" = EXCLUDED."timestamp",
+            "raw" = EXCLUDED."raw",
+            "updatedAt" = NOW()`;
+      }
+      await tx.gps51Sync.update({
+        where: { id: sync.id },
+        data: {
+          status: "SUCCESS",
+          finishedAt: new Date(),
+          devicesSeen,
+          recordsWritten,
+          cursor: BigInt(Math.trunc(newCursor)),
+        },
+      });
     });
     log.info({ devicesSeen, recordsWritten, cursor: newCursor }, "gps51: sync complete");
     return { syncId: sync.id, status: "SUCCESS", devicesSeen, recordsWritten };
@@ -419,6 +463,16 @@ export async function runGps51DailyTrackSync(
   for (const v of linked) if (v.gpsTrackerId) deviceToVehicle.set(v.gpsTrackerId, v.id);
   const deviceIds = [...deviceToVehicle.keys()];
 
+  // Fleet-growth headroom: estimated wall-clock ≈ devices × throttle.
+  const estRuntimeMs = deviceIds.length * DAILY_TRACK_THROTTLE_MS;
+  const estRuntimeMinutes = Math.round(estRuntimeMs / 60000);
+  if (estRuntimeMs > DAILY_LOCK_TTL_MS * DAILY_RUNTIME_WARN_RATIO) {
+    log.warn(
+      { devices: deviceIds.length, estRuntimeMinutes, lockTtlMinutes: DAILY_LOCK_TTL_MS / 60000 },
+      "gps51 daily track sync: fleet approaching the run-window ceiling — raise the lock TTL or parallelise device pulls",
+    );
+  }
+
   let recordsWritten = 0;
   let devicesSucceeded = 0;
   const deviceErrors: Array<{ deviceId: string; error: string }> = [];
@@ -475,6 +529,7 @@ export async function runGps51DailyTrackSync(
     devicesTotal: deviceIds.length,
     devicesSucceeded,
     recordsWritten,
+    estRuntimeMinutes,
     deviceErrors: deviceErrors.slice(0, DEVICE_ERROR_SAMPLE_LIMIT),
   } satisfies Record<string, unknown>;
 
@@ -501,6 +556,43 @@ export async function runGps51DailyTrackSync(
     "gps51 daily track sync complete",
   );
   return { status, devicesTotal: deviceIds.length, devicesSucceeded, recordsWritten, deviceErrors };
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning guard
+// ---------------------------------------------------------------------------
+/**
+ * Verify VehicleTelemetry is actually a TimescaleDB hypertable. On a plain
+ * Postgres (missing extension, or a migration marked applied without Timescale)
+ * it silently degrades to an unpartitioned table with no compression/retention —
+ * exactly the failure that only shows up months later as runaway storage. Called
+ * once at worker boot; logs loudly (and lets the caller alert) but never blocks
+ * boot — GPS may be unconfigured while the rest of the fleet system runs.
+ */
+export async function assertTelemetryHypertable(
+  prisma: PrismaClient = defaultPrisma,
+): Promise<boolean> {
+  try {
+    const rows = await prisma.$queryRaw<Array<{ ok: bigint }>>`
+      SELECT count(*)::bigint AS ok
+      FROM timescaledb_information.hypertables
+      WHERE hypertable_name = 'VehicleTelemetry'
+    `;
+    const isHypertable = (rows[0]?.ok ?? 0n) > 0n;
+    if (!isHypertable) {
+      log.error(
+        "VehicleTelemetry is NOT a TimescaleDB hypertable — telemetry will grow unpartitioned/uncompressed with no retention. Ensure the Postgres instance has the timescaledb extension and the add_gps51_telemetry_timescale migration ran.",
+      );
+    }
+    return isHypertable;
+  } catch (err) {
+    // timescaledb_information schema absent ⇒ extension not installed at all.
+    log.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      "TimescaleDB not available — VehicleTelemetry is a plain table. Provision a Timescale-capable Postgres before relying on telemetry at scale.",
+    );
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -209,7 +209,11 @@ describe("confirmBookingPayment — guards", () => {
 
   it("rejects when the bond authorisation is not held", async () => {
     retrievePaymentIntentMock
-      .mockResolvedValueOnce({ status: "succeeded" })
+      .mockResolvedValueOnce({
+        status: "succeeded",
+        amountReceivedCents: 10_000,
+        metadata: { bookingId: "b1" },
+      })
       .mockResolvedValueOnce({ status: "canceled" });
     const { prisma } = makeMockPrisma(makeBooking());
 
@@ -221,6 +225,109 @@ describe("confirmBookingPayment — guards", () => {
         source: "checkout",
       }),
     ).rejects.toBeInstanceOf(BondNotHeldError);
+  });
+
+  it("rejects a PI that is not the booking's persisted deposit PI (forged/foreign id)", async () => {
+    const { prisma, top } = makeMockPrisma(
+      makeBooking({ stripePaymentIntentId: "pi_expected" }),
+    );
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_other_bookings",
+        source: "checkout",
+      }),
+    ).rejects.toBeInstanceOf(PaymentIntentInvalidError);
+    // Identity check fires before any Stripe round-trip.
+    expect(retrievePaymentIntentMock).not.toHaveBeenCalled();
+    expect((top.$transaction as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a succeeded PI whose metadata names a different booking (legacy fallback)", async () => {
+    retrievePaymentIntentMock.mockResolvedValue({
+      status: "succeeded",
+      amountReceivedCents: 10_000,
+      metadata: { bookingId: "someone-elses-booking" },
+    });
+    const { prisma } = makeMockPrisma(makeBooking());
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_1",
+        source: "checkout",
+      }),
+    ).rejects.toBeInstanceOf(PaymentIntentInvalidError);
+  });
+
+  it("rejects a succeeded PI that captured less than payOnlineAmount ($1-PI attack)", async () => {
+    retrievePaymentIntentMock.mockResolvedValue({
+      status: "succeeded",
+      amountReceivedCents: 100, // $1 against a $100 online amount
+      metadata: { bookingId: "b1" },
+    });
+    const { prisma } = makeMockPrisma(makeBooking());
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_1",
+        source: "checkout",
+      }),
+    ).rejects.toBeInstanceOf(PaymentIntentInvalidError);
+  });
+
+  it("rejects a bond authorisation under the booking's bond amount", async () => {
+    retrievePaymentIntentMock
+      .mockResolvedValueOnce({
+        status: "succeeded",
+        amountReceivedCents: 10_000,
+        metadata: { bookingId: "b1" },
+      })
+      .mockResolvedValueOnce({
+        status: "requires_capture",
+        amountCents: 100, // $1 hold against a $50 bond
+        metadata: { bookingId: "b1" },
+      });
+    const { prisma } = makeMockPrisma(makeBooking());
+
+    await expect(
+      confirmBookingPayment(prisma, {
+        bookingId: "b1",
+        paymentIntentId: "pi_1",
+        bondPaymentIntentId: "pi_bond_1",
+        source: "checkout",
+      }),
+    ).rejects.toBeInstanceOf(PaymentIntentInvalidError);
+  });
+
+  it("accepts the persisted PI with matching amount end-to-end", async () => {
+    retrievePaymentIntentMock
+      .mockResolvedValueOnce({
+        status: "succeeded",
+        amountReceivedCents: 10_000,
+        metadata: { bookingId: "b1" },
+      })
+      .mockResolvedValueOnce({
+        status: "requires_capture",
+        amountCents: 5_000,
+        metadata: { bookingId: "b1" },
+      });
+    const { prisma } = makeMockPrisma(
+      makeBooking({
+        stripePaymentIntentId: "pi_1",
+        bondPaymentIntentId: "pi_bond_1",
+      }),
+    );
+
+    const res = await confirmBookingPayment(prisma, {
+      bookingId: "b1",
+      paymentIntentId: "pi_1",
+      bondPaymentIntentId: "pi_bond_1",
+      source: "checkout",
+    });
+    expect(res.alreadyConfirmed).toBe(false);
   });
 
   it("maps a forged/invalid PaymentIntent id to a clean client error, not a 500 (R2-L9)", async () => {

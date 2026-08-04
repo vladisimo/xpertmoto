@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { trpc } from "@/lib/trpc/client";
+import { getStripeClient } from "@/lib/stripe-client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/layout/page-header";
@@ -12,13 +13,17 @@ import { formatCurrency } from "@/lib/utils";
 /**
  * Phase E — customer "pay outstanding balance" page. Lists every
  * PENDING / FAILED charge grouped by booking, with a "Pay now" button
- * that hands off to Stripe Checkout (or the stub redirect in dev).
+ * that hands off to Stripe Checkout (or the stub redirect in dev), plus a
+ * "complete card verification" section for off-session charges the issuer
+ * bounced to 3DS (the emailed "action required" deep-links here).
  */
 export default function CustomerPayPage() {
   const { data, isLoading, refetch } = trpc.customer.outstandingBalance.useQuery();
+  const needsAuth = trpc.customer.paymentsRequiringAuthentication.useQuery();
   const createSession = trpc.customer.createPayNowSession.useMutation();
   const [busyFor, setBusyFor] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [authDone, setAuthDone] = useState<string[]>([]);
 
   async function payBooking(paymentIds: string[], key: string) {
     setErr(null);
@@ -28,6 +33,28 @@ export default function CustomerPayPage() {
       window.location.href = res.url;
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Could not start payment");
+      setBusyFor(null);
+    }
+  }
+
+  async function completeAuthentication(paymentId: string, clientSecret: string) {
+    setErr(null);
+    setBusyFor(`auth-${paymentId}`);
+    try {
+      const stripe = await getStripeClient();
+      if (!stripe) throw new Error("Payments are unavailable right now — try again shortly.");
+      // The PI already carries the saved card; only the 3DS challenge runs.
+      const result = await stripe.confirmCardPayment(clientSecret);
+      if (result.error) throw new Error(result.error.message ?? "Verification failed");
+      if (result.paymentIntent?.status !== "succeeded") {
+        throw new Error(`Verification not completed (${result.paymentIntent?.status ?? "unknown"})`);
+      }
+      // The payment_intent.succeeded webhook flips the Payment row + balance.
+      setAuthDone((d) => [...d, paymentId]);
+      await Promise.all([refetch(), needsAuth.refetch()]);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Verification failed");
+    } finally {
       setBusyFor(null);
     }
   }
@@ -58,6 +85,37 @@ export default function CustomerPayPage() {
         <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
           {err}
         </div>
+      )}
+
+      {(needsAuth.data?.filter((p) => !authDone.includes(p.paymentId)).length ?? 0) > 0 && (
+        <Card className="border-amber-500/40">
+          <CardHeader>
+            <CardTitle className="h3">Card verification needed</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              Your bank asked for an extra verification step on these charges.
+              Confirming takes a few seconds — no card details needed.
+            </p>
+            {needsAuth.data!
+              .filter((p) => !authDone.includes(p.paymentId))
+              .map((p) => (
+                <div key={p.paymentId} className="flex items-center justify-between gap-3">
+                  <span>
+                    {p.bookingReference ?? p.reference} —{" "}
+                    <strong className="tabular-nums">{formatCurrency(p.amount)}</strong>
+                  </span>
+                  <Button
+                    size="sm"
+                    disabled={busyFor === `auth-${p.paymentId}`}
+                    onClick={() => completeAuthentication(p.paymentId, p.clientSecret)}
+                  >
+                    {busyFor === `auth-${p.paymentId}` ? "Verifying…" : "Verify & pay"}
+                  </Button>
+                </div>
+              ))}
+          </CardContent>
+        </Card>
       )}
 
       {hasAny &&

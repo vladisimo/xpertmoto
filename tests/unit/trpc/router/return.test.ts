@@ -58,3 +58,83 @@ describe("return.byBooking", () => {
     expect(out).toBeNull();
   });
 });
+
+describe("return.upsertDamageCharge — issue linkage", () => {
+  function staffCtx(prisma: Record<string, unknown>) {
+    const user = { id: "staff1", role: "STAFF" as const, depotId: "depot-a" };
+    return {
+      prisma,
+      user,
+      session: { user },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    } as unknown as Parameters<Caller["upsertDamageCharge"]>[0];
+  }
+
+  it("links the charge to its inspection issue and derives the evidence photo", async () => {
+    const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: "dc1", ...data }));
+    const prisma = {
+      returnAssessment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "ra1",
+          status: "DRAFT",
+          inspectionId: "insp1",
+          bookingId: "b1",
+          booking: { vehicleId: "v1" },
+          inspection: { id: "insp1" },
+        })),
+      },
+      inspectionIssue: {
+        findUnique: vi.fn(async () => ({ inspectionId: "insp1", inspectionPhoto: { url: "https://cdn/x.jpg" } })),
+      },
+      damageCharge: { create },
+    };
+    const c = returnRouter.createCaller(staffCtx(prisma) as never);
+    await c.upsertDamageCharge({
+      assessmentId: "ra1",
+      inspectionIssueId: "iss1",
+      description: "Broken mirror",
+      severity: "MAJOR",
+      resolution: "STANDARD",
+      amount: 120,
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]?.[0].data).toMatchObject({
+      inspectionIssueId: "iss1",
+      photoUrls: ["https://cdn/x.jpg"],
+    });
+  });
+
+  it("rejects an issue that belongs to a different inspection", async () => {
+    const create = vi.fn();
+    const prisma = {
+      returnAssessment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "ra1",
+          status: "DRAFT",
+          inspectionId: "insp1",
+          bookingId: "b1",
+          booking: { vehicleId: "v1" },
+          inspection: { id: "insp1" },
+        })),
+      },
+      inspectionIssue: {
+        findUnique: vi.fn(async () => ({ inspectionId: "OTHER", inspectionPhoto: null })),
+      },
+      damageCharge: { create },
+    };
+    const c = returnRouter.createCaller(staffCtx(prisma) as never);
+    await expect(
+      c.upsertDamageCharge({
+        assessmentId: "ra1",
+        inspectionIssueId: "issX",
+        description: "x",
+        severity: "MINOR",
+        resolution: "STANDARD",
+        amount: 10,
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(create).not.toHaveBeenCalled();
+  });
+});

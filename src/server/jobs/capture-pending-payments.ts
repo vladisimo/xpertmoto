@@ -6,7 +6,10 @@ import { chargeOffSessionForUser } from "@/server/services/stripe-customer";
 import { writePaymentAudit } from "@/server/services/audit-payment";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { sendNotification } from "@/server/services/notification-sender";
-import { applyCaptureToBalanceDue } from "@/server/services/balance-due";
+import {
+  applyCaptureToBalanceDue,
+  BALANCE_AFFECTING_CHARGE_TYPES,
+} from "@/server/services/balance-due";
 import { getBranding } from "@/lib/branding";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
@@ -43,20 +46,13 @@ const DEFAULT_GRACE_SECONDS = 30; // don't pick up rows created within the last 
 const DEFAULT_BATCH = 100;
 const DEFAULT_MAX_ATTEMPTS = 3;
 
+// The sweep collects exactly the balance-affecting charge set: every type
+// whose raise increments Booking.balanceDue must have this job as its
+// collector, or the charge sits on the balance forever (the pre-fix state
+// for CLEANING_FEE / ADDON_CHARGE / ZONE_SURCHARGE / FUEL_DELIVERY_FEE).
+// Bound to the balance-due contract so the two lists can never drift apart.
 const ELIGIBLE_TYPES: Prisma.PaymentWhereInput["type"] = {
-  in: [
-    "LATE_FEE",
-    "FUEL_CHARGE",
-    "DAMAGE_CHARGE",
-    "INFRINGEMENT_RECOVERY",
-    "MANUAL_CHARGE",
-    "EXTENSION",
-    // Phase A2 — recurring charges on long-term hires.
-    "SUBSCRIPTION_CHARGE",
-    // Mid-rental vehicle-swap delta (upgrade upcharge). Fault/operational
-    // swaps never create a Payment row; only spec-change upgrades do.
-    "SWAP_ADJUSTMENT",
-  ],
+  in: [...BALANCE_AFFECTING_CHARGE_TYPES],
 };
 
 export type CapturePendingResult = {
@@ -133,7 +129,10 @@ async function runCapturePendingPaymentsImpl(
 
   for (const row of rows) {
     if (!row.customerId) continue;
-    const attemptKey = `payment-capture:${row.id}:${row.reference}`;
+    // CANONICAL first-attempt key + params, shared verbatim with
+    // bookingSettlement.captureNow: a staff click racing this tick then
+    // collapses to ONE PaymentIntent at Stripe instead of two charges.
+    const attemptKey = `payment-capture:${row.id}`;
     const description = `${row.type} — ${row.booking?.bookingReference ?? row.reference}`;
     const customerId = row.customerId;
     const depotSlug = row.booking?.pickupDepot?.slug;
@@ -261,10 +260,17 @@ async function runCapturePendingPaymentsImpl(
       continue;
     }
 
-    if (charge.status === "requires_action") {
-      // Don't mark FAILED — customer must complete 3DS. Leave PENDING and
-      // email them. Email copy intentionally doesn't include the amount in
-      // the subject — only the booking reference + a prompt.
+    if (
+      charge.status === "requires_action" ||
+      classifyStripeDecline(charge.errorCode) === "needs_authentication"
+    ) {
+      // Don't mark FAILED — customer must complete 3DS. This covers BOTH
+      // shapes Stripe uses for issuer-mandated auth on off-session charges:
+      // a resolved PI with status requires_action AND the thrown
+      // `authentication_required` decline (previously misfiled as a hard
+      // decline, dumping recoverable charges to FAILED). Leave PENDING and
+      // email them — the portal's "complete verification" page finishes it
+      // and the payment_intent.succeeded webhook flips the row.
       result.requiresAction += 1;
       await prisma.payment.update({
         where: { id: row.id },
@@ -411,10 +417,15 @@ async function runCapturePendingPaymentsImpl(
  * Radar fraud blocks are a third class — they're not retryable (the card
  * will keep being blocked) but they need a different customer message
  * ("blocked by risk rules") and manager escalation rather than a polite
- * "try another card".
+ * "try another card". `authentication_required` is its own class: the card
+ * is FINE, the issuer just mandates a 3DS challenge — the charge must stay
+ * PENDING and the customer routed to authenticate, never dumped to FAILED.
  */
-export function classifyStripeDecline(code?: string): "retryable" | "hard_decline" | "fraud_block" {
+export function classifyStripeDecline(
+  code?: string,
+): "retryable" | "hard_decline" | "fraud_block" | "needs_authentication" {
   if (!code) return "retryable"; // no code = unknown origin, give it a retry
+  if (code === "authentication_required") return "needs_authentication";
   const fraudBlocks = new Set([
     // Radar-specific rejections
     "fraudulent",
@@ -432,7 +443,6 @@ export function classifyStripeDecline(code?: string): "retryable" | "hard_declin
     "insufficient_funds",
     "expired_card",
     "incorrect_cvc",
-    "authentication_required",
     "do_not_honor",
   ]);
   return hardDeclines.has(code) ? "hard_decline" : "retryable";
@@ -455,6 +465,9 @@ export function customerDeclineCopy(code?: string): string {
   }
   if (kind === "hard_decline") {
     return "Your card was declined. Please try a different card or contact your bank.";
+  }
+  if (kind === "needs_authentication") {
+    return "Your bank needs you to verify this payment. Sign in to your account and complete the verification step.";
   }
   return "Payment couldn't be completed. Please try again or try a different card.";
 }

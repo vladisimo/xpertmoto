@@ -31,8 +31,14 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: paymentUpdateMany,
       findFirst: paymentFindFirst,
       findMany: vi.fn().mockResolvedValue([]),
+      // External-refund delta detection: report the refund as fully covered
+      // by in-app REFUND rows so no REF-EXT row is booked in this scenario.
+      aggregate: vi.fn().mockResolvedValue({ _sum: { amount: 49 } }),
+      create: vi.fn().mockResolvedValue({ id: "pay_created" }),
     },
     booking: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+    // payment_intent.succeeded now checks for a gift-card purchase PI.
+    giftCard: { findUnique: vi.fn().mockResolvedValue(null) },
     bondLedger: { updateMany: bondUpdateMany, findFirst: vi.fn().mockResolvedValue(null) },
     customerProfile: { updateMany: vi.fn() },
     incident: { findFirst: vi.fn(), create: vi.fn() },

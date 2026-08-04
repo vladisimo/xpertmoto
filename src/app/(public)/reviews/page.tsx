@@ -3,6 +3,7 @@ import { Star } from "lucide-react";
 import { getBranding } from "@/lib/branding";
 import { getSiteUrl } from "@/lib/seo/site-url";
 import { reviewsLd } from "@/lib/seo/json-ld";
+import { buildMetadata } from "@/lib/seo/metadata";
 import { JsonLd } from "@/components/seo/json-ld";
 
 type Review = {
@@ -93,10 +94,11 @@ function Stars({ rating }: { rating: number }) {
 
 export async function generateMetadata(): Promise<Metadata> {
   const { siteName } = await getBranding();
-  return {
-    title: `Rental Reviews | ${siteName}`,
+  return buildMetadata({
+    title: "Rental Reviews",
     description: `Read real customer reviews of ${siteName} scooter and motorbike hire, sourced from our verified Google reviews.`,
-  };
+    path: "/reviews",
+  });
 }
 
 export default async function ReviewsPage() {

@@ -36,11 +36,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const defaultTitle = branding.tagline
     ? `${branding.siteName} — ${branding.tagline}`
     : branding.siteName;
-  // M-11: a longer, descriptive default (the bare tagline was ~43 chars).
-  // Derived from branding so it stays correct per tenant — no hardcoded names.
-  const description = branding.tagline
-    ? `${branding.tagline}. Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent GST-inclusive pricing, and flexible pickup across our depots.`
-    : `Book scooter & motorbike hire with ${branding.siteName} — instant online quotes, transparent pricing, and flexible pickup.`;
+  // SEO: a single, ~150-char value-prop (the old default was ~220 chars and
+  // repeated "scooter & motorbike hire" twice). Branding-derived so it stays
+  // correct per tenant — no hardcoded trading name.
+  const description = `Hire scooters & motorbikes with ${branding.siteName}. Instant online quotes, GST-inclusive pricing and flexible depot pickup right across Australia.`;
   return {
     // metadataBase resolves every page's relative canonical / og:url / og:image
     // (set via buildMetadata) to an absolute URL. Single source: getSiteUrl().

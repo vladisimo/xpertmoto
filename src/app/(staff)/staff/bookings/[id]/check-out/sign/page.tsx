@@ -28,7 +28,6 @@ export default function CheckOutSignPage(props: { params: Promise<{ id: string }
 
   const startDraft = trpc.agreement.startDraft.useMutation();
   const saveSignature = trpc.agreement.saveSignature.useMutation();
-  const addCustomerMarker = trpc.agreement.addCustomerDamageMarker.useMutation();
   const finalise = trpc.agreement.finalise.useMutation();
 
   const [err, setErr] = useState<string | null>(null);
@@ -168,15 +167,6 @@ export default function CheckOutSignPage(props: { params: Promise<{ id: string }
     }
   }
 
-  async function handleCustomerMarker(marker: { x: number; y: number; severity: "MINOR" | "MODERATE" | "MAJOR"; view: "LEFT" | "RIGHT" | "FRONT" | "REAR" }) {
-    try {
-      await addCustomerMarker.mutateAsync({ agreementId: currentAgreement!.id, marker });
-      await utils.inspection.byBooking.invalidate({ bookingId: id });
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Failed to save marker");
-    }
-  }
-
   async function submit() {
     setErr(null);
     try {
@@ -202,7 +192,7 @@ export default function CheckOutSignPage(props: { params: Promise<{ id: string }
     {
       id: "condition",
       title: "Vehicle condition report",
-      content: <ConditionPage inspection={preHire ?? null} onAddCustomerMarker={handleCustomerMarker} />,
+      content: <ConditionPage inspectionId={preHire?.id ?? null} categoryId={booking.categoryId} />,
     },
     {
       id: "terms",

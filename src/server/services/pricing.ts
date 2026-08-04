@@ -776,7 +776,16 @@ async function quoteImpl(prisma: PrismaClient, input: PricingInput): Promise<Pri
   let codeDiscountDec = aud(0);
   if (input.discountCode) {
     const d = await prisma.discount.findUnique({ where: { code: input.discountCode } });
-    if (d && d.isActive) {
+    if (
+      d &&
+      isDiscountUsable(d, {
+        now: new Date(),
+        durationDays,
+        bookingValue: toNumber(afterDurationDiscountDec),
+        categoryId: input.categoryId,
+        depotId: input.pickupDepotId,
+      })
+    ) {
       if (d.type === "PERCENTAGE") {
         codeDiscountDec = multiply(afterDurationDiscountDec, divide(d.value, 100));
       } else if (d.type === "FIXED") {
@@ -1474,4 +1483,60 @@ async function quoteSwapDeltaImpl(
     gstAmount: gstNum,
     direction,
   };
+}
+
+/**
+ * Full usability gate for a discount code. Previously only `isActive` was
+ * checked, so expired, exhausted, out-of-scope, and under-minimum codes all
+ * kept discounting — and single-use recovery codes were infinitely reusable.
+ * Shared by the quote (display) and the booking-create claim (enforcement);
+ * the claim additionally re-checks maxUses atomically via a conditional
+ * `usedCount` increment (see booking.create) so concurrent submits can't
+ * oversubscribe a code.
+ */
+export function isDiscountUsable(
+  d: {
+    isActive: boolean;
+    validFrom: Date | null;
+    validTo: Date | null;
+    maxUses: number | null;
+    usedCount: number;
+    minBookingDays: number | null;
+    minBookingValue: Prisma.Decimal | number | null;
+    applicableCategoryIds: string[];
+    applicableDepotIds: string[];
+  },
+  ctx: {
+    now: Date;
+    durationDays: number;
+    bookingValue: number;
+    categoryId?: string;
+    depotId?: string;
+  },
+): boolean {
+  if (!d.isActive) return false;
+  if (d.validFrom && ctx.now < d.validFrom) return false;
+  if (d.validTo) {
+    // validTo is a date-only column — the code is valid THROUGH that day.
+    const end = new Date(d.validTo.getTime() + 24 * 60 * 60 * 1000);
+    if (ctx.now >= end) return false;
+  }
+  if (d.maxUses != null && d.usedCount >= d.maxUses) return false;
+  if (d.minBookingDays != null && ctx.durationDays < d.minBookingDays) return false;
+  if (d.minBookingValue != null && ctx.bookingValue < Number(d.minBookingValue)) return false;
+  if (
+    d.applicableCategoryIds.length > 0 &&
+    ctx.categoryId &&
+    !d.applicableCategoryIds.includes(ctx.categoryId)
+  ) {
+    return false;
+  }
+  if (
+    d.applicableDepotIds.length > 0 &&
+    ctx.depotId &&
+    !d.applicableDepotIds.includes(ctx.depotId)
+  ) {
+    return false;
+  }
+  return true;
 }

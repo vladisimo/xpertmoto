@@ -262,14 +262,20 @@ export const inspectionRouter = createTRPCRouter({
     return ctx.prisma.inspection.findMany({
       where: { bookingId: input.bookingId },
       orderBy: { dateTime: "desc" },
-      include: { photos: true },
+      include: {
+        photos: true,
+        issues: { include: { inspectionPhoto: true, damageTariff: true }, orderBy: { createdAt: "asc" } },
+      },
     });
   }),
 
   byId: staffProcedure.input(z.object({ id: z.string() })).query(async ({ ctx, input }) => {
     const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
       where: { id: input.id },
-      include: { photos: true },
+      include: {
+        photos: true,
+        issues: { include: { inspectionPhoto: true, damageTariff: true }, orderBy: { createdAt: "asc" } },
+      },
     });
     assertDepotAccess(ctx.user, inspection.depotId);
     return inspection;
@@ -306,5 +312,113 @@ export const inspectionRouter = createTRPCRouter({
       if (photo.inspection) assertDepotAccess(ctx.user, photo.inspection.depotId);
       captureBookingId(ctx, photo.inspection?.bookingId);
       return ctx.prisma.inspectionPhoto.delete({ where: { id: input.id } });
+    }),
+
+  // ---- Labelled issues (photo-anchored damage) -----------------------------
+  // Supersedes the bodyDamageMap coordinate markers: an issue is anchored to a
+  // photo (`inspectionPhotoId`), pinned on it (`posX`/`posY`), and labelled
+  // (free text or a DamageTariff). A return-time issue can later become a
+  // DamageCharge via return.upsertDamageCharge({ inspectionIssueId }).
+
+  addIssue: staffProcedure
+    .input(
+      z.object({
+        inspectionId: z.string(),
+        inspectionPhotoId: z.string().optional(),
+        side: z.enum(["FRONT", "REAR", "LEFT", "RIGHT", "TOP", "OTHER"]).optional(),
+        damageTariffId: z.string().optional(),
+        label: z.string().min(1),
+        severity: z.enum(["MINOR", "MODERATE", "MAJOR"]).default("MINOR"),
+        note: z.string().optional(),
+        posX: z.number().min(0).max(1).optional(),
+        posY: z.number().min(0).max(1).optional(),
+        source: z.enum(["staff", "customer"]).default("staff"),
+        isPreExisting: z.boolean().optional(),
+      }),
+    )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
+    .mutation(async ({ ctx, input }) => {
+      const inspection = await ctx.prisma.inspection.findUniqueOrThrow({
+        where: { id: input.inspectionId },
+        select: { depotId: true, bookingId: true, status: true, type: true },
+      });
+      assertDepotAccess(ctx.user, inspection.depotId);
+      captureBookingId(ctx, inspection.bookingId);
+      if (inspection.status !== "DRAFT") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Only DRAFT inspections can be edited" });
+      }
+      return ctx.prisma.inspectionIssue.create({
+        data: {
+          inspectionId: input.inspectionId,
+          inspectionPhotoId: input.inspectionPhotoId ?? null,
+          side: input.side ?? null,
+          damageTariffId: input.damageTariffId ?? null,
+          label: input.label,
+          severity: input.severity,
+          note: input.note ?? null,
+          posX: input.posX ?? null,
+          posY: input.posY ?? null,
+          source: input.source,
+          isPreExisting: input.isPreExisting ?? inspection.type === "PRE_HIRE",
+        },
+        include: { inspectionPhoto: true, damageTariff: true },
+      });
+    }),
+
+  updateIssue: staffProcedure
+    .input(
+      z.object({
+        id: z.string(),
+        inspectionPhotoId: z.string().nullable().optional(),
+        side: z.enum(["FRONT", "REAR", "LEFT", "RIGHT", "TOP", "OTHER"]).nullable().optional(),
+        damageTariffId: z.string().nullable().optional(),
+        label: z.string().min(1).optional(),
+        severity: z.enum(["MINOR", "MODERATE", "MAJOR"]).optional(),
+        note: z.string().nullable().optional(),
+        posX: z.number().min(0).max(1).nullable().optional(),
+        posY: z.number().min(0).max(1).nullable().optional(),
+      }),
+    )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
+    .mutation(async ({ ctx, input }) => {
+      const issue = await ctx.prisma.inspectionIssue.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { inspection: { select: { depotId: true, bookingId: true, status: true } } },
+      });
+      assertDepotAccess(ctx.user, issue.inspection.depotId);
+      captureBookingId(ctx, issue.inspection.bookingId);
+      if (issue.inspection.status !== "DRAFT") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Only DRAFT inspections can be edited" });
+      }
+      const data: Prisma.InspectionIssueUncheckedUpdateInput = {};
+      if (input.inspectionPhotoId !== undefined) data.inspectionPhotoId = input.inspectionPhotoId;
+      if (input.side !== undefined) data.side = input.side;
+      if (input.damageTariffId !== undefined) data.damageTariffId = input.damageTariffId;
+      if (input.label !== undefined) data.label = input.label;
+      if (input.severity !== undefined) data.severity = input.severity;
+      if (input.note !== undefined) data.note = input.note;
+      if (input.posX !== undefined) data.posX = input.posX;
+      if (input.posY !== undefined) data.posY = input.posY;
+      return ctx.prisma.inspectionIssue.update({
+        where: { id: input.id },
+        data,
+        include: { inspectionPhoto: true, damageTariff: true },
+      });
+    }),
+
+  removeIssue: staffProcedure
+    .input(z.object({ id: z.string() }))
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
+    .mutation(async ({ ctx, input }) => {
+      const issue = await ctx.prisma.inspectionIssue.findUniqueOrThrow({
+        where: { id: input.id },
+        select: { inspection: { select: { depotId: true, bookingId: true, status: true } } },
+      });
+      assertDepotAccess(ctx.user, issue.inspection.depotId);
+      captureBookingId(ctx, issue.inspection.bookingId);
+      if (issue.inspection.status !== "DRAFT") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Only DRAFT inspections can be edited" });
+      }
+      return ctx.prisma.inspectionIssue.delete({ where: { id: input.id } });
     }),
 });

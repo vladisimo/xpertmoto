@@ -342,15 +342,34 @@ export async function cancel(
     }
   }
 
+  // Split the refund between its funding sources: money that came in via
+  // gift card goes BACK to the gift card (restored in the cancel
+  // transaction below), and only the card-funded slice hits Stripe.
+  // Refunding the full amount against the card charge used to make Stripe
+  // reject the oversized refund outright — the whole refund then failed and
+  // the gift-card value was never restored.
+  const giftCardPaidAgg = await prisma.payment.aggregate({
+    where: {
+      bookingId: booking.id,
+      type: "GIFT_CARD_REDEMPTION",
+      status: "SUCCEEDED",
+    },
+    _sum: { amount: true },
+  });
+  // Redemption rows are stored as negative amounts.
+  const giftCardPaid = Math.abs(Number(giftCardPaidAgg._sum.amount ?? 0));
+  const giftCardRefund = Math.min(refundAmount, giftCardPaid);
+  const cardRefund = Math.round((refundAmount - giftCardRefund) * 100) / 100;
+
   // Stripe refund runs outside the DB transaction so a Stripe failure
   // doesn't roll back the booking status change — the CANCELLED row is
   // the customer-visible truth, the refund row tracks reconciliation.
   let refundStripeId: string | null = null;
   let refundStatus: CancelResult["refundStatus"] = "NOT_APPLICABLE";
   let refundNote = `${Math.round(refundPct * 100)}% refund less admin fee`;
-  if (refundAmount > 0) {
+  const source = booking.payments[0];
+  if (cardRefund > 0) {
     refundStatus = "PENDING";
-    const source = booking.payments[0];
     if (!source) {
       refundNote = `${refundNote} — no Stripe charge on file; manual refund required`;
     } else {
@@ -358,7 +377,7 @@ export async function cancel(
         const res = await refundCharge({
           paymentIntentId: source.stripePaymentIntentId,
           chargeId: source.stripeChargeId,
-          amountCents: Math.round(refundAmount * 100),
+          amountCents: Math.round(cardRefund * 100),
           reason: "requested_by_customer",
           metadata: {
             bookingId: booking.id,
@@ -375,17 +394,21 @@ export async function cancel(
           err instanceof Error ? err.message : "unknown"
         }`;
         logger.error(
-          { err, bookingId: booking.id, refundAmount },
+          { err, bookingId: booking.id, refundAmount: cardRefund },
           "Stripe refund failed during cancel",
         );
       }
     }
+  } else if (giftCardRefund > 0) {
+    // Whole refund is gift-card-funded — restored atomically below.
+    refundStatus = "SUCCEEDED";
   }
 
   const sourceTag = input.source === "CUSTOMER" ? "[customer]" : input.source === "STAFF" ? "[staff]" : "[system]";
   const reasonOnLog = `${sourceTag} ${input.reason}`;
 
   const cascadedBookingIds: string[] = [];
+  let cardRefundPaymentId: string | null = null;
 
   const cancelTx = async (tx: Prisma.TransactionClient) => {
     // Compare-and-set on status — double-submit race / webhook collision
@@ -436,25 +459,78 @@ export async function cancel(
         reason: reasonOnLog,
       },
     });
-    if (refundAmount > 0) {
-      await tx.payment.create({
+    if (cardRefund > 0) {
+      const row = await tx.payment.create({
         data: {
           reference: `REF-${Date.now()}`,
           bookingId: booking.id,
           customerId: booking.customerId,
           type: "REFUND",
           method: "STRIPE",
-          amount: refundAmount,
+          amount: cardRefund,
           // The refunded money is GST-inclusive booking revenue (10%), so the
           // reversal carries a proportional GST credit. Without it the GST/BAS
           // export overstates GST collected on cancelled bookings.
-          gstAmount: gstFromInclusive(refundAmount),
+          gstAmount: gstFromInclusive(cardRefund),
           status:
             refundStatus === "NOT_APPLICABLE" ? "PENDING" : refundStatus,
           stripeChargeId: refundStripeId,
           processedAt: refundStatus === "SUCCEEDED" ? new Date() : null,
           processedById: input.actorUserId,
           notes: refundNote,
+        },
+      });
+      cardRefundPaymentId = row.id;
+    }
+    // Refunded money is no longer collected money: mirror the refund onto
+    // amountPaid so "collected" surfaces (portal, invoices, rewards) stop
+    // overstating it. Only SETTLED slices count — the gift restore commits in
+    // this transaction, the card slice only once Stripe accepted the refund
+    // (a FAILED card refund decrements when the retry job lands it instead).
+    {
+      const settledNow =
+        Math.round(((refundStripeId ? cardRefund : 0) + giftCardRefund) * 100) / 100;
+      if (settledNow > 0) {
+        const fresh = await tx.booking.findUniqueOrThrow({
+          where: { id: booking.id },
+          select: { amountPaid: true },
+        });
+        await tx.booking.update({
+          where: { id: booking.id },
+          data: {
+            amountPaid: Math.max(
+              0,
+              Math.round((Number(fresh.amountPaid) - settledNow) * 100) / 100,
+            ),
+          },
+        });
+      }
+    }
+    if (giftCardRefund > 0) {
+      // Restore the gift-card slice to the card(s) that funded it —
+      // atomic with the cancellation, so a rollback undoes the credit too.
+      const { restoreGiftCardForBooking } = await import("./gift-card");
+      const { restored } = await restoreGiftCardForBooking(tx, {
+        bookingId: booking.id,
+        amount: giftCardRefund,
+        reason: `Refund — booking ${booking.bookingReference} cancelled`,
+      });
+      await tx.payment.create({
+        data: {
+          reference: `REF-GC-${booking.id}`,
+          bookingId: booking.id,
+          customerId: booking.customerId,
+          type: "REFUND",
+          method: "CARD",
+          amount: giftCardRefund,
+          gstAmount: gstFromInclusive(giftCardRefund),
+          status: "SUCCEEDED",
+          processedAt: new Date(),
+          processedById: input.actorUserId,
+          notes:
+            restored >= giftCardRefund
+              ? "Refund restored to gift card"
+              : `Refund restored to gift card (A$${restored.toFixed(2)} of A$${giftCardRefund.toFixed(2)} — remainder needs manual follow-up: card voided/expired)`,
         },
       });
     }
@@ -510,6 +586,56 @@ export async function cancel(
   };
 
   await prisma.$transaction(cancelTx);
+
+  // A failed card refund is the customer's money stuck in limbo — it used to
+  // get only a pino line. Queue an automated retry (transient Stripe errors
+  // heal themselves) AND page the managers so a persistent failure has an
+  // owner.
+  if (refundStatus === "FAILED" && cardRefundPaymentId && source) {
+    try {
+      const { enqueueRefundRetry } = await import("@/server/jobs/refund-retry");
+      await enqueueRefundRetry({
+        paymentId: cardRefundPaymentId,
+        paymentIntentId: source.stripePaymentIntentId,
+        chargeId: source.stripeChargeId,
+        amountCents: Math.round(cardRefund * 100),
+        // The ORIGINAL attempt's key: if the first refund actually went
+        // through and only the response was lost, Stripe replays the
+        // success instead of refunding twice.
+        idempotencyKey: `refund-${booking.id}-${source.id}`,
+        attempt: 1,
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },
+        "cancel: could not enqueue refund retry",
+      );
+    }
+    try {
+      const managers = await prisma.user.findMany({
+        where: { role: { in: ["MANAGER", "ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
+        select: { id: true },
+        take: 5,
+      });
+      for (const m of managers) {
+        await sendNotification({
+          userId: m.id,
+          type: "INCIDENT_REPORTED",
+          channels: ["IN_APP", "EMAIL"],
+          subject: `Refund FAILED — ${booking.bookingReference}`,
+          title: "Cancellation refund failed",
+          body: `The A$${cardRefund.toFixed(2)} cancellation refund for booking ${booking.bookingReference} failed at Stripe. An automatic retry is queued; if it keeps failing, refund manually from the booking's payment console.`,
+          bookingId: booking.id,
+          data: { refundPaymentId: cardRefundPaymentId, amountAud: cardRefund },
+        });
+      }
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },
+        "cancel: refund-failure manager alert failed",
+      );
+    }
+  }
 
   if (booking.vehicleId) {
     await prisma.vehicle.update({

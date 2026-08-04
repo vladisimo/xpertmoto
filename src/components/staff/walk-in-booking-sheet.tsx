@@ -1,7 +1,9 @@
 "use client";
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
 import { trpc } from "@/lib/trpc/client";
+import { getStripeClient } from "@/lib/stripe-client";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -186,6 +188,18 @@ export function WalkInBookingSheet({
       : Boolean(customer.firstName && customer.lastName && customer.email);
   const ready = customerReady && depotId && vehicleId && validRange && !hoursIssue;
 
+  // Post-create card + bond step: when the walk-in carries a bond, the
+  // customer saves a card on the staff device (SetupIntent) and the hold is
+  // placed before we move on to check-out. Skipping is allowed — check-out
+  // then blocks on the missing hold unless staff override with a reason.
+  const [bondStep, setBondStep] = useState<{
+    bookingId: string;
+    customerId: string;
+    setupClientSecret: string;
+  } | null>(null);
+  const createSetupIntent = trpc.staffBooking.createCustomerSetupIntent.useMutation();
+  const holdWalkInBond = trpc.staffBooking.holdWalkInBond.useMutation();
+
   async function submit() {
     setErr(null);
     try {
@@ -208,11 +222,32 @@ export function WalkInBookingSheet({
         bondAmount: bond,
         method,
       });
+      if (booking.bondRequired) {
+        try {
+          const si = await createSetupIntent.mutateAsync({ customerId });
+          if (si.clientSecret && !si.clientSecret.startsWith("cs_seti_stub_")) {
+            setBondStep({
+              bookingId: booking.id,
+              customerId,
+              setupClientSecret: si.clientSecret,
+            });
+            return; // stay in the sheet for the card step
+          }
+        } catch {
+          // Stripe hiccup — fall through to check-out, which gates the bond.
+        }
+      }
       onOpenChange(false);
       router.push(`/staff/bookings/${booking.id}/check-out`);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to create walk-in");
     }
+  }
+
+  function finishToCheckout(bookingId: string) {
+    setBondStep(null);
+    onOpenChange(false);
+    router.push(`/staff/bookings/${bookingId}/check-out`);
   }
 
   return (
@@ -223,6 +258,38 @@ export function WalkInBookingSheet({
           <p className="text-sm text-muted-foreground">Fast booking for customers at the counter.</p>
         </SheetHeader>
 
+        {bondStep ? (
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Card &amp; bond hold</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Booking created. Enter the customer&apos;s card to place the{" "}
+                  {formatCurrency(bond)} bond hold (not charged — released after
+                  return). The saved card also covers any later fees automatically.
+                </p>
+                <WalkInBondCapture
+                  clientSecret={bondStep.setupClientSecret}
+                  processing={holdWalkInBond.isPending}
+                  onSaved={async (paymentMethodId) => {
+                    try {
+                      await holdWalkInBond.mutateAsync({
+                        bookingId: bondStep.bookingId,
+                        paymentMethodId,
+                      });
+                    } catch {
+                      // Check-out gates the missing hold; staff resolve there.
+                    }
+                    finishToCheckout(bondStep.bookingId);
+                  }}
+                  onSkip={() => finishToCheckout(bondStep.bookingId)}
+                />
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
           <Card>
             <CardHeader>
@@ -498,16 +565,92 @@ export function WalkInBookingSheet({
 
           {err && <div className="text-destructive text-sm">{err}</div>}
         </div>
+        )}
 
-        <div className="px-6 py-4 border-t shrink-0 flex justify-end gap-2">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button disabled={!ready || quickCreate.isPending || createWalkIn.isPending} onClick={submit}>
-            {quickCreate.isPending || createWalkIn.isPending ? "Processing…" : "Create booking & proceed to check-out"}
-          </Button>
-        </div>
+        {!bondStep && (
+          <div className="px-6 py-4 border-t shrink-0 flex justify-end gap-2">
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button disabled={!ready || quickCreate.isPending || createWalkIn.isPending} onClick={submit}>
+              {quickCreate.isPending || createWalkIn.isPending ? "Processing…" : "Create booking & proceed to check-out"}
+            </Button>
+          </div>
+        )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+/** SetupIntent card capture on the staff device for the walk-in bond. On
+ *  confirm the PM id goes to holdWalkInBond, which places the manual-capture
+ *  hold from the just-saved (freshly 3DS'd) card. */
+function WalkInBondCapture({
+  clientSecret,
+  processing,
+  onSaved,
+  onSkip,
+}: {
+  clientSecret: string;
+  processing: boolean;
+  onSaved: (paymentMethodId: string) => void | Promise<void>;
+  onSkip: () => void;
+}) {
+  const stripePromise = getStripeClient();
+  return (
+    <Elements stripe={stripePromise} options={{ clientSecret }}>
+      <WalkInBondCaptureInner processing={processing} onSaved={onSaved} onSkip={onSkip} />
+    </Elements>
+  );
+}
+
+function WalkInBondCaptureInner({
+  processing,
+  onSaved,
+  onSkip,
+}: {
+  processing: boolean;
+  onSaved: (paymentMethodId: string) => void | Promise<void>;
+  onSkip: () => void;
+}) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  async function confirm() {
+    if (!stripe || !elements) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await stripe.confirmSetup({
+        elements,
+        redirect: "if_required",
+        confirmParams: { return_url: window.location.href },
+      });
+      if (result.error) throw new Error(result.error.message ?? "Card could not be saved");
+      const pm = result.setupIntent?.payment_method;
+      const paymentMethodId = typeof pm === "string" ? pm : pm?.id;
+      if (!paymentMethodId) throw new Error("Card saved but no payment method returned");
+      await onSaved(paymentMethodId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Card could not be saved");
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <PaymentElement options={{ layout: "tabs", paymentMethodOrder: ["card"] }} />
+      {error && <div className="text-destructive text-sm">{error}</div>}
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" onClick={onSkip} disabled={submitting || processing}>
+          Skip bond (resolve at check-out)
+        </Button>
+        <Button onClick={confirm} disabled={!stripe || !elements || submitting || processing}>
+          {submitting || processing ? "Placing hold…" : "Save card & hold bond"}
+        </Button>
+      </div>
+    </div>
   );
 }

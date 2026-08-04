@@ -17,7 +17,20 @@ function makeFakePrisma(opts: {
   seasonMultiplier?: number;
   addons?: { id: string; name: string; dailyRate?: number; flatRate?: number; isPerDay: boolean }[];
   insurance?: { id: string; name: string; dailyRate: number };
-  discount?: { code: string; type: "PERCENTAGE" | "FIXED"; value: number; isActive: boolean };
+  discount?: {
+    code: string;
+    type: "PERCENTAGE" | "FIXED";
+    value: number;
+    isActive: boolean;
+    validFrom?: Date | null;
+    validTo?: Date | null;
+    maxUses?: number | null;
+    usedCount?: number;
+    minBookingDays?: number | null;
+    minBookingValue?: number | null;
+    applicableCategoryIds?: string[];
+    applicableDepotIds?: string[];
+  };
   oneWayFee?: {
     fromDepotId: string;
     toDepotId: string;
@@ -304,7 +317,20 @@ test("pricing — percentage discount code reduces total", async () => {
     weekly: 600,
     monthly: 2000,
     bond: 500,
-    discount: { code: "SAVE20", type: "PERCENTAGE", value: 20, isActive: true },
+    discount: {
+      code: "SAVE20",
+      type: "PERCENTAGE",
+      value: 20,
+      isActive: true,
+      validFrom: null,
+      validTo: null,
+      maxUses: null,
+      usedCount: 0,
+      minBookingDays: null,
+      minBookingValue: null,
+      applicableCategoryIds: [],
+      applicableDepotIds: [],
+    },
   });
   const q = await quote(fake, {
     categoryId: "cat1",

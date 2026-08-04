@@ -5,14 +5,15 @@ import { Button } from "@/components/ui/button";
 import { DividedTitle } from "@/components/marketing/divided-title";
 import { FaqList } from "@/components/marketing/faq-list";
 import { getBranding } from "@/lib/branding";
+import { buildMetadata } from "@/lib/seo/metadata";
 
-export async function generateMetadata(): Promise<Metadata> {
-  const { siteName } = await getBranding();
-  return {
-    title: `Motorcycle & Scooter Service Sydney | ${siteName} Repairs`,
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Motorcycle & Scooter Servicing, Sydney",
     description:
       "Expert motorcycle and scooter servicing in Sydney. 40+ years combined experience across all makes and models. Transparent pricing, honest work.",
-  };
+    path: "/mechanic-services",
+  });
 }
 
 const MECHANICDESK_BOOKING_URL =

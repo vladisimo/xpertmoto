@@ -20,6 +20,13 @@ vi.mock("../../../../src/server/jobs/queue", async (importOriginal) => {
   return { ...actual, getQueue: vi.fn(() => null) };
 });
 
+// The liveLocations Redis cache must never serve a hit here: a live dev Redis
+// (or a prior test's write) would swallow the prisma query the specs assert on.
+vi.mock("../../../../src/server/services/gps51-live-cache", () => ({
+  readLiveLocationsCache: vi.fn(async () => null),
+  writeLiveLocationsCache: vi.fn(async () => undefined),
+}));
+
 type Caller = ReturnType<typeof fleetRouter.createCaller>;
 
 function makeCtx(over: { role?: "STAFF" | "MANAGER" | "ADMIN" | "SUPER_ADMIN"; existingCount?: number } = {}) {
@@ -598,7 +605,12 @@ function makeGpsCtx(over: {
 } = {}) {
   const prisma = {
     vehicleLivePosition: {
-      findMany: vi.fn().mockResolvedValue(over.live ?? []),
+      // The freshness sample query filters on timestamp; the live-map query
+      // doesn't. Serve `over.live` only to the latter so `{}` fixture rows
+      // never reach the freshness mapper (which reads `timestamp.getTime()`).
+      findMany: vi.fn().mockImplementation((args?: { where?: { timestamp?: unknown } }) =>
+        Promise.resolve(args?.where?.timestamp ? [] : (over.live ?? [])),
+      ),
       findUnique: vi.fn().mockResolvedValue(null),
       count: vi.fn().mockResolvedValue((over.live ?? []).length),
     },
@@ -612,6 +624,7 @@ function makeGpsCtx(over: {
     vehicle: {
       findUnique: vi.fn().mockResolvedValue(over.vehicle ?? { id: "veh1", internalCode: "MTB-1" }),
       findFirst: vi.fn().mockResolvedValue(over.dupTracker ? { id: "other" } : null),
+      count: vi.fn().mockResolvedValue(0),
       update: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
         Promise.resolve({ id: "veh1", ...data }),
       ),

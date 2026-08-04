@@ -12,6 +12,38 @@ const RETENTION_QUEUE = "db-backup-retention" as const;
 type TriggerKind = "SCHEDULED" | "MANUAL_ADMIN";
 
 /**
+ * Prisma-specific connection-string query params that libpq (and therefore
+ * `pg_dump`) does not understand. Passing them through makes pg_dump exit 1
+ * with `invalid URI query parameter: "..."`. Our production DATABASE_URL is
+ * required to carry `connection_limit` (see src/lib/env.ts), so we cannot
+ * drop these from the env — we strip them only for the dump invocation.
+ */
+const PRISMA_ONLY_URL_PARAMS = [
+  "connection_limit",
+  "pool_timeout",
+  "pgbouncer",
+  "socket_timeout",
+  "schema",
+] as const;
+
+/**
+ * Return a libpq-compatible connection string by removing Prisma-only query
+ * params. Falls back to the original string if it isn't a parseable URL
+ * (e.g. a libpq key/value DSN), which pg_dump already accepts as-is.
+ */
+export function pgConnectionString(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    for (const param of PRISMA_ONLY_URL_PARAMS) {
+      url.searchParams.delete(param);
+    }
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+/**
  * Run a single pg_dump against the live database, upload the resulting
  * custom-format dump to S3 (or MinIO locally) via our storage helper, and
  * record a DatabaseBackup row with metadata.
@@ -64,7 +96,7 @@ export async function runDbBackup(args?: {
           "--compress=9",
           "--no-owner",
           "--no-privileges",
-          dbUrl,
+          pgConnectionString(dbUrl),
         ],
         { stdio: ["ignore", "pipe", "pipe"] },
       );

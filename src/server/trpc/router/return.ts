@@ -18,6 +18,7 @@ import { logger } from "@/lib/logger";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
 import { getBranding } from "@/lib/branding";
 import { gstFromInclusive } from "@/lib/money";
+import { cancelPaymentIntent, capturePaymentIntent } from "@/lib/stripe";
 
 const RETURN_PAGE_IDS = ["cover", "condition", "charges", "fees", "quote-ack", "settlement"] as const;
 
@@ -108,6 +109,7 @@ export const returnRouter = createTRPCRouter({
         assessmentId: z.string(),
         description: z.string().min(1),
         markerRef: z.string().optional(),
+        inspectionIssueId: z.string().optional(),
         severity: z.enum(["MINOR", "MODERATE", "MAJOR"]),
         resolution: z.enum(["STANDARD", "QUOTE_PENDING", "WAIVED", "WARRANTY"]),
         damageTariffId: z.string().optional(),
@@ -141,15 +143,36 @@ export const returnRouter = createTRPCRouter({
         });
       }
 
+      // Link the charge to the labelled inspection issue it came from (if any),
+      // and default the evidence photos to that issue's photo so the charge
+      // points at the picture the damage was identified against.
+      let derivedPhotoUrls = input.photoUrls ?? [];
+      if (input.inspectionIssueId) {
+        const issue = await ctx.prisma.inspectionIssue.findUnique({
+          where: { id: input.inspectionIssueId },
+          select: { inspectionId: true, inspectionPhoto: { select: { url: true } } },
+        });
+        if (!issue || issue.inspectionId !== assessment.inspectionId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Issue does not belong to this return inspection",
+          });
+        }
+        if (derivedPhotoUrls.length === 0 && issue.inspectionPhoto?.url) {
+          derivedPhotoUrls = [issue.inspectionPhoto.url];
+        }
+      }
+
       const base = {
         description: input.description,
         markerRef: input.markerRef,
+        inspectionIssueId: input.inspectionIssueId ?? null,
         severity: input.severity,
         resolution: input.resolution,
         damageTariffId: input.damageTariffId ?? null,
         amount: input.resolution === "STANDARD" ? (input.amount ?? 0) : 0,
         quoteCapAmount: input.resolution === "QUOTE_PENDING" ? input.quoteCapAmount : null,
-        photoUrls: input.photoUrls ?? [],
+        photoUrls: derivedPhotoUrls,
         staffNote: input.staffNote,
         status: "PROVISIONAL" as const,
       };
@@ -378,7 +401,7 @@ export const returnRouter = createTRPCRouter({
               returnDepot: true,
             },
           },
-          inspection: { include: { photos: true } },
+          inspection: { include: { photos: true, issues: { include: { inspectionPhoto: true, damageTariff: true } } } },
           staff: true,
           damageCharges: { include: { damageTariff: true } },
         },
@@ -406,7 +429,7 @@ export const returnRouter = createTRPCRouter({
       const preHire = await ctx.prisma.inspection.findFirst({
         where: { bookingId: assessment.bookingId, type: "PRE_HIRE" },
         orderBy: { dateTime: "desc" },
-        select: { fuelLevel: true, bodyDamageMap: true },
+        select: { fuelLevel: true },
       });
 
       const now = new Date();
@@ -429,6 +452,24 @@ export const returnRouter = createTRPCRouter({
           cfg["booking.lateReturnGraceHours"] ?? SETTING_DEFAULTS["booking.lateReturnGraceHours"],
       });
 
+      // The overdue job accrues one daily-rate LATE_FEE per completed late
+      // day (`LATE-<bookingId>-D<n>`); what's left to bill at return is only
+      // the residual (the partial final day). Without this subtraction every
+      // completed late day would be charged twice.
+      const priorLateRaised = await ctx.prisma.payment.aggregate({
+        where: {
+          bookingId: assessment.bookingId,
+          type: "LATE_FEE",
+          reference: { startsWith: `LATE-${assessment.bookingId}-D` },
+          status: { in: ["PENDING", "SUCCEEDED"] },
+        },
+        _sum: { amount: true },
+      });
+      fees.lateFee = Math.max(
+        0,
+        Math.round((fees.lateFee - Number(priorLateRaised._sum.amount ?? 0)) * 100) / 100,
+      );
+
       const standardTotal = assessment.damageCharges
         .filter((c) => c.resolution === "STANDARD")
         .reduce((acc, c) => acc + Number(c.amount), 0);
@@ -441,20 +482,108 @@ export const returnRouter = createTRPCRouter({
           (fees.lateFee + fees.fuelCharge + standardTotal + cleaningFee) * 100,
         ) / 100;
 
-      const preHireMarkers =
-        ((preHire?.bodyDamageMap as unknown as { markers?: { x: number; y: number; severity: string; view?: "LEFT" | "RIGHT" | "FRONT" | "REAR" }[] })?.markers ?? []).map(
-          (m) => ({ x: m.x, y: m.y, severity: m.severity, view: m.view ?? ("LEFT" as const) }),
-        );
-      const postHireMarkers =
-        ((assessment.inspection.bodyDamageMap as unknown as {
-          markers?: { x: number; y: number; severity: string; source?: string; view?: "LEFT" | "RIGHT" | "FRONT" | "REAR" }[];
-        })?.markers ?? [])
-          .filter((m) => m.source !== "pre-hire") // safety
-          .map((m) => ({ x: m.x, y: m.y, severity: m.severity, view: m.view ?? ("LEFT" as const) }));
+      // Each return-inspection photo with the new damage pinned + labelled on it.
+      const conditionPhotos = assessment.inspection.photos.map((p) => ({
+        url: p.url,
+        caption: p.caption,
+        side: null as string | null,
+        issues: assessment.inspection.issues
+          .filter((iss) => iss.inspectionPhotoId === p.id)
+          .map((iss, idx) => ({
+            n: idx + 1,
+            label: iss.label,
+            severity: iss.severity as string,
+            note: iss.note,
+            posX: iss.posX,
+            posY: iss.posY,
+          })),
+      }));
+      // The evidence photo for each charge = the photo of the issue it came from.
+      const issuePhotoById = new Map(
+        assessment.inspection.issues.map((iss) => [iss.id, iss.inspectionPhoto?.url ?? null]),
+      );
 
-      const bondHeld = Number(assessment.booking.bondAmount);
-      const bondApplied = Math.min(bondHeld, totalDueNow);
-      const bondReleased = Math.max(0, bondHeld - bondApplied);
+      // ---- Bond settlement (the signed PDF must state what ACTUALLY
+      // happened, and the bond is the primary recovery instrument: the money
+      // is already authorised, so unlike a fresh card charge it can't
+      // decline). Read the LEDGER, not booking.bondAmount — part-captured or
+      // released holds must not be re-counted.
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+      const ledger = await ctx.prisma.bondLedger.findUnique({
+        where: { bookingId: assessment.bookingId },
+      });
+      const capturable =
+        ledger && ledger.status === "HELD"
+          ? Math.max(
+              0,
+              r2(
+                Number(ledger.heldAmount) -
+                  Number(ledger.capturedAmount) -
+                  Number(ledger.releasedAmount),
+              ),
+            )
+          : 0;
+      // A pending repair quote keeps the bond HELD as the backstop (the
+      // rolling re-hold job keeps it alive on RETURNED bookings) — capture
+      // nothing yet, everything assessed today goes to the card.
+      let fromBond = pendingCapTotal > 0 ? 0 : r2(Math.min(totalDueNow, capturable));
+      let bondCaptureChargeId: string | null = null;
+      let bondCaptured = false;
+      if (fromBond > 0 && ledger) {
+        try {
+          // Single combined partial capture (manual-capture PIs are
+          // single-capture; Stripe auto-releases the remainder).
+          const capture = await capturePaymentIntent(ledger.stripePaymentIntentId, {
+            amountToCaptureCents: Math.round(fromBond * 100),
+            idempotencyKey: `bond-capture-${ledger.id}`,
+          });
+          bondCaptureChargeId = capture.latestChargeId;
+          bondCaptured = true;
+        } catch (err) {
+          // Degrade gracefully: everything goes to the card as PENDING rows
+          // and the ledger stays HELD (auto-release gating + the re-hold job
+          // then manage it). The PDF shows applied 0 — truthful.
+          logger.warn(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              assessmentId: assessment.id,
+              bondLedgerId: ledger.id,
+            },
+            "return.finalise: bond capture failed at Stripe — falling back to card charges",
+          );
+          fromBond = 0;
+        }
+      }
+      const overflow = r2(totalDueNow - fromBond);
+
+      // Nothing owed at all → release the hold now (with a real Stripe
+      // cancel), but ONLY when the booking has no other outstanding balance;
+      // otherwise keep it as the backstop and let the gated auto-release
+      // handle it once the balance clears.
+      let bondReleasedNow = 0;
+      if (
+        ledger &&
+        ledger.status === "HELD" &&
+        capturable > 0 &&
+        !bondCaptured &&
+        totalDueNow === 0 &&
+        pendingCapTotal === 0 &&
+        Number(assessment.booking.balanceDue) <= 0.009
+      ) {
+        try {
+          await cancelPaymentIntent(ledger.stripePaymentIntentId);
+          bondReleasedNow = capturable;
+        } catch (err) {
+          logger.warn(
+            { err: err instanceof Error ? err.message : String(err), bondLedgerId: ledger.id },
+            "return.finalise: bond release failed at Stripe — auto-release will retry",
+          );
+        }
+      }
+
+      const bondHeld = capturable > 0 ? capturable : Number(assessment.booking.bondAmount);
+      const bondApplied = bondCaptured ? fromBond : 0;
+      const bondReleased = bondCaptured ? r2(capturable - fromBond) : bondReleasedNow;
 
       const branding = await getBranding();
 
@@ -486,9 +615,7 @@ export const returnRouter = createTRPCRouter({
         staffName: assessment.staff ? `${assessment.staff.firstName} ${assessment.staff.lastName}` : undefined,
         odometerKm: assessment.inspection.odometerKm,
         fuelLevel: assessment.inspection.fuelLevel,
-        preHireMarkers,
-        newMarkers: postHireMarkers,
-        photos: assessment.inspection.photos.map((p) => ({ url: p.url, caption: p.caption })),
+        photos: conditionPhotos,
         charges: assessment.damageCharges.map((c) => ({
           description: c.description,
           severity: c.severity,
@@ -496,6 +623,7 @@ export const returnRouter = createTRPCRouter({
           amount: Number(c.amount),
           quoteCapAmount: c.quoteCapAmount ? Number(c.quoteCapAmount) : null,
           tariffName: c.damageTariff?.name ?? null,
+          photoUrl: (c.inspectionIssueId ? issuePhotoById.get(c.inspectionIssueId) : null) ?? c.photoUrls[0] ?? null,
         })),
         fees: { lateFee: fees.lateFee, fuelCharge: fees.fuelCharge },
         totalDueNow,
@@ -552,36 +680,131 @@ export const returnRouter = createTRPCRouter({
           where: { id: assessment.inspectionId },
           data: { status: "COMPLETED" },
         });
-        // STANDARD charges: confirm + spawn a PENDING Payment row so the
-        // capture-pending-payments job can pull them off-session. Mirrors
-        // return.confirmCharge so the post-sign settle UI surfaces every
-        // line in the Payment Console.
+
+        // Bond ledger + BOND_CAPTURE / BOND_RELEASE bookkeeping for the
+        // Stripe operation performed above. Terminal-consistent with the DB
+        // CHECK (captured + released == held) — a partial capture finalises
+        // the hold.
+        let bondCapturePaymentId: string | null = null;
+        const bondDeductions: Array<{ reason: string; amount: number }> = [];
+        if (ledger && bondCaptured) {
+          const capturePayment = await tx.payment.create({
+            data: {
+              reference: `BOND-CAP-RET-${assessment.id}`,
+              customerId: assessment.booking.customerId,
+              bookingId: assessment.bookingId,
+              type: "BOND_CAPTURE",
+              method: "STRIPE",
+              amount: fromBond,
+              // Bond-funded recovery of taxable fees (damage/late/fuel/cleaning)
+              // — GST-inclusive like the card-residual slices raised below.
+              gstAmount: gstFromInclusive(fromBond),
+              status: "SUCCEEDED",
+              stripePaymentIntentId: ledger.stripePaymentIntentId,
+              stripeChargeId: bondCaptureChargeId,
+              processedAt: new Date(),
+              processedById: ctx.user.id,
+              notes: `Bond applied at return — assessment ${assessment.assessmentNumber}`,
+            },
+          });
+          bondCapturePaymentId = capturePayment.id;
+          if (bondReleased > 0) {
+            await tx.payment.create({
+              data: {
+                reference: `RET-RELEASE-${assessment.id}`,
+                customerId: assessment.booking.customerId,
+                bookingId: assessment.bookingId,
+                type: "BOND_RELEASE",
+                method: "STRIPE",
+                amount: bondReleased,
+                status: "SUCCEEDED",
+                processedAt: new Date(),
+                notes: "Bond remainder released at return",
+              },
+            });
+          }
+        } else if (ledger && bondReleasedNow > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `RET-RELEASE-${assessment.id}`,
+              customerId: assessment.booking.customerId,
+              bookingId: assessment.bookingId,
+              type: "BOND_RELEASE",
+              method: "STRIPE",
+              amount: bondReleasedNow,
+              status: "SUCCEEDED",
+              processedAt: new Date(),
+              notes: "Bond released at return — nothing owed",
+            },
+          });
+          await tx.bondLedger.update({
+            where: { id: ledger.id },
+            data: {
+              status: "RELEASED",
+              releasedAmount: r2(Number(ledger.heldAmount) - Number(ledger.capturedAmount)),
+            },
+          });
+        }
+
+        // Allocate bond funds across the assessed lines (damage first, then
+        // late, fuel, cleaning); only the RESIDUAL beyond the bond becomes a
+        // PENDING card charge for the capture sweep. `remainingBond` is what
+        // the single combined capture above actually collected.
+        let remainingBond = bondCaptured ? fromBond : 0;
+        const takeFromBond = (amount: number, reason: string): { bondShare: number; residual: number } => {
+          const bondShare = r2(Math.min(remainingBond, amount));
+          remainingBond = r2(remainingBond - bondShare);
+          if (bondShare > 0) bondDeductions.push({ reason, amount: bondShare });
+          return { bondShare, residual: r2(amount - bondShare) };
+        };
+
         for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
           const amountNumber = Number(c.amount);
           if (amountNumber > 0) {
-            const payment = await tx.payment.create({
-              data: {
-                reference: `DMG-${c.id}`,
-                customerId: assessment.booking.customerId,
-                bookingId: assessment.bookingId,
-                type: "DAMAGE_CHARGE",
-                method: "STRIPE",
-                amount: c.amount,
-                gstAmount: gstFromInclusive(amountNumber),
-                status: "PENDING",
-                notes: `DamageCharge ${c.id} on booking ${assessment.booking.bookingReference}: ${c.description.slice(0, 140)}`,
-                processedById: ctx.user.id,
-              },
-            });
-            await tx.damageCharge.update({
-              where: { id: c.id },
-              data: {
-                status: "CONFIRMED",
-                capturedPaymentId: payment.id,
-                resolvedAt: new Date(),
-                resolvedById: ctx.user.id,
-              },
-            });
+            const { bondShare, residual } = takeFromBond(
+              amountNumber,
+              `Damage: ${c.description.slice(0, 80)}`,
+            );
+            if (residual > 0) {
+              const payment = await tx.payment.create({
+                data: {
+                  reference: `DMG-${c.id}`,
+                  customerId: assessment.booking.customerId,
+                  bookingId: assessment.bookingId,
+                  type: "DAMAGE_CHARGE",
+                  method: "STRIPE",
+                  amount: residual,
+                  gstAmount: gstFromInclusive(residual),
+                  status: "PENDING",
+                  notes:
+                    `DamageCharge ${c.id} on booking ${assessment.booking.bookingReference}: ${c.description.slice(0, 140)}` +
+                    (bondShare > 0 ? ` (residual beyond A$${bondShare.toFixed(2)} bond)` : ""),
+                  processedById: ctx.user.id,
+                },
+              });
+              await tx.damageCharge.update({
+                where: { id: c.id },
+                data: {
+                  status: "CONFIRMED",
+                  capturedPaymentId: payment.id,
+                  bondDeductionCents: bondShare > 0 ? Math.round(bondShare * 100) : null,
+                  resolvedAt: new Date(),
+                  resolvedById: ctx.user.id,
+                },
+              });
+            } else {
+              // Fully bond-funded — settled by the capture above.
+              await tx.damageCharge.update({
+                where: { id: c.id },
+                data: {
+                  status: "CAPTURED",
+                  capturedPaymentId: bondCapturePaymentId,
+                  bondDeductionCents: Math.round(bondShare * 100),
+                  resolvedAt: new Date(),
+                  resolvedById: ctx.user.id,
+                },
+              });
+            }
           } else {
             await tx.damageCharge.update({
               where: { id: c.id },
@@ -598,34 +821,62 @@ export const returnRouter = createTRPCRouter({
           data: { status: "WAIVED", resolvedAt: new Date(), resolvedById: ctx.user.id },
         });
         if (fees.lateFee > 0) {
-          await tx.payment.create({
-            data: {
-              reference: `LATE-${assessment.id}`,
-              customerId: assessment.booking.customerId,
-              bookingId: assessment.bookingId,
-              type: "LATE_FEE",
-              method: "STRIPE",
-              amount: fees.lateFee,
-              gstAmount: gstFromInclusive(fees.lateFee),
-              status: "PENDING",
-              notes: `Late return fee — ${fees.lateHours.toFixed(2)}h beyond grace on ${assessment.booking.bookingReference}`,
-              processedById: ctx.user.id,
-            },
-          });
+          const { bondShare, residual } = takeFromBond(fees.lateFee, "Late return fee");
+          if (residual > 0) {
+            await tx.payment.create({
+              data: {
+                reference: `LATE-${assessment.id}`,
+                customerId: assessment.booking.customerId,
+                bookingId: assessment.bookingId,
+                type: "LATE_FEE",
+                method: "STRIPE",
+                amount: residual,
+                gstAmount: gstFromInclusive(residual),
+                status: "PENDING",
+                notes:
+                  `Late return fee — ${fees.lateHours.toFixed(2)}h beyond grace on ${assessment.booking.bookingReference}` +
+                  (bondShare > 0 ? ` (residual beyond bond)` : ""),
+                processedById: ctx.user.id,
+              },
+            });
+          }
         }
         if (fees.fuelCharge > 0) {
-          await tx.payment.create({
+          const { bondShare, residual } = takeFromBond(fees.fuelCharge, "Refuel charge");
+          if (residual > 0) {
+            await tx.payment.create({
+              data: {
+                reference: `FUEL-${assessment.id}`,
+                customerId: assessment.booking.customerId,
+                bookingId: assessment.bookingId,
+                type: "FUEL_CHARGE",
+                method: "STRIPE",
+                amount: residual,
+                gstAmount: gstFromInclusive(residual),
+                status: "PENDING",
+                notes:
+                  `Refuel charge — ${fees.missingLitres.toFixed(2)}L on ${assessment.booking.bookingReference}` +
+                  (bondShare > 0 ? ` (residual beyond bond)` : ""),
+                processedById: ctx.user.id,
+              },
+            });
+          }
+        }
+
+        // Land the terminal ledger state for a capture, including the
+        // per-line deduction trail composed above.
+        if (ledger && bondCaptured) {
+          const existingDeductions = Array.isArray(ledger.deductions)
+            ? [...(ledger.deductions as Array<{ reason: string; amount: number }>)]
+            : [];
+          const newCaptured = r2(Number(ledger.capturedAmount) + fromBond);
+          await tx.bondLedger.update({
+            where: { id: ledger.id },
             data: {
-              reference: `FUEL-${assessment.id}`,
-              customerId: assessment.booking.customerId,
-              bookingId: assessment.bookingId,
-              type: "FUEL_CHARGE",
-              method: "STRIPE",
-              amount: fees.fuelCharge,
-              gstAmount: gstFromInclusive(fees.fuelCharge),
-              status: "PENDING",
-              notes: `Refuel charge — ${fees.missingLitres.toFixed(2)}L on ${assessment.booking.bookingReference}`,
-              processedById: ctx.user.id,
+              status: "FULLY_CAPTURED",
+              capturedAmount: newCaptured,
+              releasedAmount: r2(Number(ledger.heldAmount) - newCaptured),
+              deductions: [...existingDeductions, ...bondDeductions] as unknown as Prisma.InputJsonValue,
             },
           });
         }
@@ -648,6 +899,7 @@ export const returnRouter = createTRPCRouter({
           },
         });
         if (cleaningFee > 0) {
+          const { bondShare, residual } = takeFromBond(cleaningFee, "Cleaning fee");
           await tx.booking.update({
             where: { id: assessment.bookingId },
             data: {
@@ -655,35 +907,39 @@ export const returnRouter = createTRPCRouter({
               bookingNotes: {
                 create: {
                   userId: ctx.user.id,
-                  note: `Cleaning fee A$${cleaningFee.toFixed(2)}${input.cleaningReason ? ` — ${input.cleaningReason}` : ""}`,
+                  note: `Cleaning fee A$${cleaningFee.toFixed(2)}${input.cleaningReason ? ` — ${input.cleaningReason}` : ""}${bondShare > 0 ? ` (A$${bondShare.toFixed(2)} from bond)` : ""}`,
                   isInternal: false,
                 },
               },
-              payments: {
-                create: {
-                  reference: `CLEAN-${assessment.bookingId}-${Date.now()}`,
-                  customerId: assessment.booking.customerId,
-                  type: "CLEANING_FEE",
-                  method: "STRIPE",
-                  amount: cleaningFee,
-                  gstAmount: gstFromInclusive(cleaningFee),
-                  status: "PENDING",
-                  notes: input.cleaningReason ?? "Post-hire cleaning fee",
-                },
-              },
+              ...(residual > 0
+                ? {
+                    payments: {
+                      create: {
+                        reference: `CLEAN-${assessment.bookingId}-${Date.now()}`,
+                        customerId: assessment.booking.customerId,
+                        type: "CLEANING_FEE",
+                        method: "STRIPE",
+                        amount: residual,
+                        gstAmount: gstFromInclusive(residual),
+                        status: "PENDING",
+                        notes: input.cleaningReason ?? "Post-hire cleaning fee",
+                      },
+                    },
+                  }
+                : {}),
             },
           });
         }
-        // Ancillary charges raised above (damage + late + fuel + cleaning,
-        // summing to totalDueNow) are owed until the capture-pending job /
-        // webhook collects them. Add them to balanceDue here so
-        // applyCaptureToBalanceDue can net them out on capture — keeping the
-        // "raised → added, collected → removed" invariant (see balance-due.ts)
-        // and mirroring bookingSettlement.addCharge.
-        if (totalDueNow > 0) {
+        // Only the residual beyond the bond capture is owed on the card:
+        // those PENDING rows enter balanceDue here so applyCaptureToBalanceDue
+        // can net them out on capture — keeping the "raised → added,
+        // collected → removed" invariant (see balance-due.ts). Bond-funded
+        // amounts were collected in the capture above and never touch
+        // balanceDue.
+        if (overflow > 0) {
           await tx.booking.update({
             where: { id: assessment.bookingId },
-            data: { balanceDue: { increment: totalDueNow } },
+            data: { balanceDue: { increment: overflow } },
           });
         }
         await autoCloseByTarget(tx, "ReturnAssessment", assessment.id, {
@@ -919,6 +1175,131 @@ export const returnRouter = createTRPCRouter({
       writeCustomerAuditAsync(ctx.prisma, customerId, confirmedAudit);
       writeBookingAuditAsync(ctx.prisma, bookingId, confirmedAudit);
       return { damageCharge, paymentId: payment.id };
+    }),
+
+  /**
+   * Close out a QUOTE_PENDING damage charge once the repair quote / work
+   * order lands: bill the FINAL amount (hard-capped at the quoteCapAmount
+   * the customer initialled at return) as a PENDING card charge collected
+   * off-session. Previously the expensive quote-required repairs had no
+   * Payment path at all — collection depended on staff remembering to raise
+   * a fresh ad-hoc charge.
+   */
+  closeOutQuote: staffProcedure
+    .input(
+      z.object({
+        damageChargeId: z.string(),
+        /** Final repair cost from the quote / completed work order (AUD). */
+        finalAmount: z.number().min(0),
+      }),
+    )
+    .meta({ audit: { bookingIdPath: readCapturedBookingId } })
+    .mutation(async ({ ctx, input }) => {
+      const charge = await ctx.prisma.damageCharge.findUniqueOrThrow({
+        where: { id: input.damageChargeId },
+        include: {
+          returnAssessment: {
+            select: {
+              id: true,
+              status: true,
+              bookingId: true,
+              booking: { select: { customerId: true, bookingReference: true } },
+            },
+          },
+        },
+      });
+      captureBookingId(ctx, charge.returnAssessment.bookingId);
+      if (charge.resolution !== "QUOTE_PENDING") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Only QUOTE_PENDING charges can be closed out (this one is ${charge.resolution}).`,
+        });
+      }
+      if (charge.returnAssessment.status !== "SIGNED") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Cannot close out a charge on a ${charge.returnAssessment.status} assessment`,
+        });
+      }
+      if (charge.status === "CAPTURED" || charge.capturedPaymentId) {
+        return { damageCharge: charge, paymentId: charge.capturedPaymentId ?? null };
+      }
+      if (charge.status === "WAIVED") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Charge is WAIVED" });
+      }
+      const customerId = charge.returnAssessment.booking?.customerId ?? null;
+      if (!customerId) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Booking has no customer — cannot create a Payment",
+        });
+      }
+      const cap = Number(charge.quoteCapAmount ?? 0);
+      // The signed acknowledgement is the customer's liability ceiling.
+      const billAmount = Math.round(Math.min(input.finalAmount, cap > 0 ? cap : input.finalAmount) * 100) / 100;
+      const bookingId = charge.returnAssessment.bookingId;
+      const bookingReference = charge.returnAssessment.booking?.bookingReference ?? charge.id;
+
+      const { payment, damageCharge } = await ctx.prisma.$transaction(async (tx) => {
+        let payment: { id: string; reference: string } | null = null;
+        if (billAmount > 0) {
+          payment = await tx.payment.create({
+            data: {
+              reference: `DMG-${charge.id}`,
+              customerId,
+              bookingId,
+              type: "DAMAGE_CHARGE",
+              method: "STRIPE",
+              amount: billAmount,
+              gstAmount: gstFromInclusive(billAmount),
+              status: "PENDING",
+              notes: `Quote close-out — DamageCharge ${charge.id} on ${bookingReference} (final ${input.finalAmount.toFixed(2)}, cap ${cap.toFixed(2)})`,
+              processedById: ctx.user.id,
+            },
+          });
+          // Raised PENDING → enters balanceDue; the capture sweep collects it
+          // off-session and nets it back out (balance-due.ts contract).
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { balanceDue: { increment: billAmount } },
+          });
+        }
+        const damageCharge = await tx.damageCharge.update({
+          where: { id: charge.id },
+          data: {
+            amount: billAmount,
+            status: "CONFIRMED",
+            capturedPaymentId: payment?.id ?? null,
+            resolvedById: ctx.user.id,
+            resolvedAt: new Date(),
+          },
+        });
+        return { payment, damageCharge };
+      });
+
+      await writeAudit(ctx.prisma, {
+        userId: ctx.user.id,
+        action: "DAMAGE_QUOTE_CLOSED_OUT",
+        entity: "DamageCharge",
+        entityId: damageCharge.id,
+        previousData: { status: charge.status, quoteCapAmount: cap },
+        newData: {
+          billedAmount: billAmount,
+          finalQuoteAmount: input.finalAmount,
+          paymentId: payment?.id ?? null,
+        },
+      });
+      writeBookingAuditAsync(ctx.prisma, bookingId, {
+        userId: ctx.user.id,
+        action: "DAMAGE_QUOTE_CLOSED_OUT",
+        reqId: ctx.reqId,
+        newData: {
+          damageChargeId: damageCharge.id,
+          billedAmount: billAmount,
+          paymentId: payment?.id ?? null,
+        },
+      });
+      return { damageCharge, paymentId: payment?.id ?? null };
     }),
 
   /** Admin/Manager-only: void an assessment (rare). */

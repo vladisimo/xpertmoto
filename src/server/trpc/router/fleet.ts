@@ -34,6 +34,8 @@ import {
   type Gps51PositionRecord,
 } from "@/server/services/gps51";
 import { getQueue } from "@/server/jobs/queue";
+import { readLiveLocationsCache, writeLiveLocationsCache } from "@/server/services/gps51-live-cache";
+import { getFleetFreshness } from "@/server/services/gps51-freshness";
 import { haversineKm, reverseGeocode } from "@/lib/geo";
 import { logger } from "@/lib/logger";
 
@@ -50,6 +52,31 @@ function sanitizeTrackSpeed(speedKph: number | null): number | null {
   if (speedKph < 0 || speedKph > MAX_PLAUSIBLE_SPEED_KPH) return null;
   return speedKph;
 }
+
+/** One live-map pin: latest fix per device + its vehicle card fields. Cached in
+ *  Redis for a few seconds (gps51-live-cache), so the shape must stay superjson-
+ *  serialisable (Date is fine). Staleness is derived client-side from timestamp. */
+type LiveLocation = {
+  deviceId: string;
+  vehicleId: string | null;
+  vehicle: {
+    id: string;
+    internalCode: string | null;
+    rego: string;
+    make: string;
+    model: string;
+    images: { url: string }[];
+  } | null;
+  latitude: number;
+  longitude: number;
+  speedKph: number | null;
+  headingDeg: number | null;
+  ignitionOn: boolean | null;
+  batteryPct: number | null;
+  voltageV: number | null;
+  moving: boolean | null;
+  timestamp: Date;
+};
 
 /** Aggregate a trip's breadcrumb into distance / max-speed / duration. */
 type TripPoint = { lat: number; lng: number; speedKph: number | null; timestamp: Date };
@@ -1555,6 +1582,9 @@ export const fleetRouter = createTRPCRouter({
   /** Latest known position per tracked vehicle — powers the live fleet map.
    *  Reads VehicleLivePosition only (never the telemetry hypertable). */
   liveLocations: staffProcedure.query(async ({ ctx }) => {
+    const cached = await readLiveLocationsCache<LiveLocation[]>();
+    if (cached) return cached;
+
     const rows = await ctx.prisma.vehicleLivePosition.findMany({
       where: { vehicleId: { not: null } },
       include: {
@@ -1576,7 +1606,7 @@ export const fleetRouter = createTRPCRouter({
       },
       orderBy: { timestamp: "desc" },
     });
-    return rows.map((r) => ({
+    const payload: LiveLocation[] = rows.map((r) => ({
       deviceId: r.deviceId,
       vehicleId: r.vehicleId,
       vehicle: r.vehicle,
@@ -1592,6 +1622,8 @@ export const fleetRouter = createTRPCRouter({
       moving: r.moving,
       timestamp: r.timestamp,
     }));
+    await writeLiveLocationsCache(payload);
+    return payload;
   }),
 
   /** On-demand "where is this vehicle now". Returns the ≤60s-fresh live
@@ -1656,21 +1688,27 @@ export const fleetRouter = createTRPCRouter({
         },
       });
       if (!booking) throw new TRPCError({ code: "NOT_FOUND" });
-      if (!booking.vehicleId) return { vehicleId: null, points: [] as TripPoint[], summary: null };
+      if (!booking.vehicleId)
+        return { vehicleId: null, points: [] as TripPoint[], summary: null, truncated: false };
       const from = booking.actualPickupDateTime ?? booking.pickupDateTime;
       const to = booking.actualReturnDateTime ?? booking.returnDateTime;
+      // Cap the row scan: a multi-week rental of a busy vehicle could otherwise
+      // pull tens of thousands of fixes into memory. Same guard as vehicleTrack.
       const rows = await ctx.prisma.vehicleTelemetry.findMany({
         where: { vehicleId: booking.vehicleId, timestamp: { gte: from, lte: to } },
         orderBy: { timestamp: "asc" },
+        take: VEHICLE_TRACK_CAP + 1,
         select: { timestamp: true, latitude: true, longitude: true, speedKph: true },
       });
-      const points: TripPoint[] = rows.map((r) => ({
+      const truncated = rows.length > VEHICLE_TRACK_CAP;
+      const kept = truncated ? rows.slice(0, VEHICLE_TRACK_CAP) : rows;
+      const points: TripPoint[] = kept.map((r) => ({
         lat: r.latitude,
         lng: r.longitude,
         speedKph: r.speedKph,
         timestamp: r.timestamp,
       }));
-      return { vehicleId: booking.vehicleId, points, summary: tripSummary(points) };
+      return { vehicleId: booking.vehicleId, points, summary: tripSummary(points), truncated };
     }),
 
   /** Historical breadcrumb for a single vehicle over an arbitrary window, with
@@ -1854,7 +1892,7 @@ export const fleetRouter = createTRPCRouter({
 
         // Map the FULL valid set (no speed filter): segmentation needs the
         // stationary fixes; assembleTrack thins the displayed Fixes table.
-        const points: TrackPoint[] = valid
+        const allPoints: TrackPoint[] = valid
           .map((r: Gps51PositionRecord) => {
             const timestamp = normaliseEpoch(r.updatetime ?? r.devicetime) ?? input.from;
             const b = tag(timestamp.getTime());
@@ -1876,7 +1914,12 @@ export const fleetRouter = createTRPCRouter({
           })
           // GPS51 ordering isn't guaranteed; sort so trips/summary are correct.
           .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-        return { source: "gps51" as const, reason: null, ...assembleTrack(points, bookings, input), truncated: false };
+        // Defensive cap: the full pull is cached above (all fixes persisted), but
+        // the response array is bounded like the stored path. The 31-day input
+        // limits the window; this guards a very busy vehicle within it.
+        const truncated = allPoints.length > VEHICLE_TRACK_CAP;
+        const points = truncated ? allPoints.slice(0, VEHICLE_TRACK_CAP) : allPoints;
+        return { source: "gps51" as const, reason: null, ...assembleTrack(points, bookings, input), truncated };
       } catch (err) {
         if (err instanceof Gps51RateLimitError) return storedFallback("daily track quota reached");
         throw err;
@@ -1909,15 +1952,18 @@ export const fleetRouter = createTRPCRouter({
         const rows = await ctx.prisma.vehicleTelemetry.findMany({
           where: { vehicleId: booking.vehicleId ?? "", timestamp: { gte: from, lte: to } },
           orderBy: { timestamp: "asc" },
+          take: VEHICLE_TRACK_CAP + 1,
           select: { timestamp: true, latitude: true, longitude: true, speedKph: true },
         });
-        const points: TripPoint[] = rows.map((r) => ({
+        const truncated = rows.length > VEHICLE_TRACK_CAP;
+        const kept = truncated ? rows.slice(0, VEHICLE_TRACK_CAP) : rows;
+        const points: TripPoint[] = kept.map((r) => ({
           lat: r.latitude,
           lng: r.longitude,
           speedKph: r.speedKph,
           timestamp: r.timestamp,
         }));
-        return { source: "stored" as const, reason, points, summary: tripSummary(points) };
+        return { source: "stored" as const, reason, points, summary: tripSummary(points), truncated };
       };
 
       if (!deviceId) return storedFallback("no tracker assigned");
@@ -1927,7 +1973,7 @@ export const fleetRouter = createTRPCRouter({
           begin: formatBrisbane(from),
           end: formatBrisbane(to),
         });
-        const points: TripPoint[] = records
+        const allPoints: TripPoint[] = records
           .filter((r: Gps51PositionRecord) => typeof r.callat === "number" && typeof r.callon === "number")
           .map((r: Gps51PositionRecord) => ({
             lat: r.callat as number,
@@ -1935,7 +1981,11 @@ export const fleetRouter = createTRPCRouter({
             speedKph: typeof r.speed === "number" ? r.speed : null,
             timestamp: normaliseEpoch(r.updatetime ?? r.devicetime) ?? from,
           }));
-        return { source: "gps51" as const, reason: null, points, summary: tripSummary(points) };
+        // Defensive cap: the 31-day input bounds the provider window, but a very
+        // busy vehicle can still return a large array. Keep the response bounded.
+        const truncated = allPoints.length > VEHICLE_TRACK_CAP;
+        const points = truncated ? allPoints.slice(0, VEHICLE_TRACK_CAP) : allPoints;
+        return { source: "gps51" as const, reason: null, points, summary: tripSummary(points), truncated };
       } catch (err) {
         if (err instanceof Gps51RateLimitError) return storedFallback("daily track quota reached");
         throw err;
@@ -1976,12 +2026,14 @@ export const fleetRouter = createTRPCRouter({
       return { mode: "inline" as const, ...result };
     }),
 
-  /** Recent GPS51 sync runs + tracked-device count + last daily-track run for the admin tab. */
+  /** Recent GPS51 sync runs + tracked-device count + fleet freshness + last
+   *  daily-track run for the admin/staff sync panel. */
   gps51SyncStatus: staffProcedure.query(async ({ ctx }) => {
-    const [runs, trackedDevices, dailyRun] = await Promise.all([
+    const [runs, trackedDevices, dailyRun, freshness] = await Promise.all([
       ctx.prisma.gps51Sync.findMany({ orderBy: { startedAt: "desc" }, take: 10 }),
       ctx.prisma.vehicleLivePosition.count(),
       ctx.prisma.systemSetting.findUnique({ where: { key: DAILY_TRACK_SYNC_SETTING_KEY } }),
+      getFleetFreshness(ctx.prisma),
     ]);
     return {
       runs: runs.map((r) => ({
@@ -1994,6 +2046,7 @@ export const fleetRouter = createTRPCRouter({
         error: r.error,
       })),
       trackedDevices,
+      freshness,
       dailyTrackSync: (dailyRun?.value ?? null) as Record<string, unknown> | null,
     };
   }),
@@ -2209,6 +2262,24 @@ export const fleetRouter = createTRPCRouter({
           types: ["MAINTENANCE_WORK_ORDER"],
           reason: input.status === "COMPLETED" ? "completed" : "cancelled",
           closingUserId: ctx.user.id,
+        });
+      }
+
+      // Quote close-out: a QUOTE_PENDING damage charge (customer signed a
+      // liability cap at return) becomes billable the moment the repair work
+      // order closes with a real cost. Without this, the most expensive
+      // repairs never turned into a Payment at all — the booking sat
+      // RETURNED with the bill uncollected. Bill min(actualCost, cap) via
+      // the standard PENDING → off-session sweep pipeline, and flip the
+      // booking to COMPLETED once its last quote resolves.
+      if (input.status === "COMPLETED") {
+        const { closeOutQuotePendingCharges } = await import(
+          "@/server/services/damage-quote-closeout"
+        );
+        await closeOutQuotePendingCharges(ctx.prisma, {
+          workOrderId: wo.id,
+          actualCost: input.actualCost ?? null,
+          staffUserId: ctx.user.id,
         });
       }
 

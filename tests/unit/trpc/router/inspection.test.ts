@@ -110,3 +110,98 @@ describe("inspection depot scoping (B1 follow-up)", () => {
     expect(prisma.inspection.findMany).not.toHaveBeenCalled();
   });
 });
+
+describe("inspection.addIssue / removeIssue (labelled photo issues)", () => {
+  const staff = { id: "staff1", role: "STAFF" as const, depotId: "depot-a" };
+
+  test("addIssue creates a labelled issue on a DRAFT inspection at the staff's depot", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: "iss1", ...data }));
+    const prisma = {
+      inspection: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          depotId: "depot-a",
+          bookingId: "b1",
+          status: "DRAFT",
+          type: "PRE_HIRE",
+        })),
+      },
+      inspectionIssue: { create },
+    };
+    const ctx = { prisma, user: staff, session: { user: staff }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, reqId: "r1", _skipAudit: true };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await caller.addIssue({
+      inspectionId: "i1",
+      inspectionPhotoId: "p1",
+      label: "Broken mirror",
+      severity: "MAJOR",
+      posX: 0.4,
+      posY: 0.6,
+      side: "LEFT",
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]?.[0].data).toMatchObject({
+      inspectionId: "i1",
+      inspectionPhotoId: "p1",
+      label: "Broken mirror",
+      severity: "MAJOR",
+      posX: 0.4,
+      posY: 0.6,
+      side: "LEFT",
+      isPreExisting: true, // PRE_HIRE inspection → pre-existing damage
+    });
+  });
+
+  test("addIssue rejects BAD_REQUEST when the inspection is not DRAFT", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const create = vi.fn();
+    const prisma = {
+      inspection: {
+        findUniqueOrThrow: vi.fn(async () => ({ depotId: "depot-a", bookingId: "b1", status: "COMPLETED", type: "POST_HIRE" })),
+      },
+      inspectionIssue: { create },
+    };
+    const ctx = { prisma, user: staff, session: { user: staff }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, reqId: "r1", _skipAudit: true };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await expect(
+      caller.addIssue({ inspectionId: "i1", label: "Scratch", severity: "MINOR" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  test("addIssue rejects FORBIDDEN for another depot's inspection", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const create = vi.fn();
+    const prisma = {
+      inspection: {
+        findUniqueOrThrow: vi.fn(async () => ({ depotId: "depot-b", bookingId: "b1", status: "DRAFT", type: "PRE_HIRE" })),
+      },
+      inspectionIssue: { create },
+    };
+    const ctx = { prisma, user: staff, session: { user: staff }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, reqId: "r1", _skipAudit: true };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await expect(
+      caller.addIssue({ inspectionId: "i1", label: "Dent", severity: "MODERATE" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  test("removeIssue deletes an issue on a DRAFT inspection", async () => {
+    const { vi } = await import("vitest");
+    const { inspectionRouter } = await import("@/server/trpc/router/inspection");
+    const del = vi.fn(async () => ({ id: "iss1" }));
+    const prisma = {
+      inspectionIssue: {
+        findUniqueOrThrow: vi.fn(async () => ({ inspection: { depotId: "depot-a", bookingId: "b1", status: "DRAFT" } })),
+        delete: del,
+      },
+    };
+    const ctx = { prisma, user: staff, session: { user: staff }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, reqId: "r1", _skipAudit: true };
+    const caller = inspectionRouter.createCaller(ctx as never);
+    await caller.removeIssue({ id: "iss1" });
+    expect(del).toHaveBeenCalledWith({ where: { id: "iss1" } });
+  });
+});

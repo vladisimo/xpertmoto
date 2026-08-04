@@ -12,6 +12,7 @@ import {
   TwoColRow,
 } from "@/lib/pdf/components/page-shell";
 import { resolvePdfLogoSrc } from "@/lib/pdf/logo-resolver";
+import { PhotoIssues, type PdfPhotoWithIssues } from "@/lib/agreement/pdf/photo-issues";
 import { type PdfTheme, makePdfTheme } from "@/lib/pdf/theme";
 import { PdfTotals } from "@/lib/pdf/components/totals";
 import { formatCurrency, formatDateTime } from "@/lib/utils";
@@ -55,8 +56,7 @@ export interface RentalAgreementData {
   staffName?: string;
   addons: { name: string; quantity: number; totalPrice: number }[];
   insurance: { name: string; excessAmount: number; totalPrice: number } | null;
-  photos: { url: string; caption?: string | null }[];
-  damageMarkers: DamageMarker[];
+  photos: PdfPhotoWithIssues[];
   terms: { version: string; sections: { heading: string; paragraphs: string[] }[] };
   cancellationPolicy: string[];
   bondPolicy: string[];
@@ -67,14 +67,6 @@ export interface RentalAgreementData {
     initialsUrl?: string | null;
   };
   abn: string;
-}
-
-interface DamageMarker {
-  x: number;
-  y: number;
-  severity: string;
-  note?: string;
-  view?: "LEFT" | "RIGHT" | "FRONT" | "REAR";
 }
 
 export async function renderRentalAgreementPdf(data: RentalAgreementData): Promise<Buffer> {
@@ -219,40 +211,11 @@ export async function renderRentalAgreementPdf(data: RentalAgreementData): Promi
         {renderHeader()}
         <PdfSection theme={theme} title="Vehicle condition report (pre-hire)">
           <Text style={{ fontSize: theme.size.body, marginBottom: theme.spacing.md }}>
-            The photographs and damage map below document the condition of the vehicle at handover.
-            This report forms part of the agreement and is the reference against which return
-            damage is assessed.
+            The photographs below document the condition of the vehicle at handover, with any
+            pre-existing damage pinned and labelled on the relevant photo. This report forms part of
+            the agreement and is the reference against which return damage is assessed.
           </Text>
-          {data.photos.length > 0 ? (
-            <PhotoGrid theme={theme} photos={data.photos.slice(0, 6)} />
-          ) : null}
-          <Text
-            style={{
-              fontSize: theme.size.h3,
-              fontFamily: theme.font.bodyBold,
-              color: theme.colors.ink,
-              marginTop: theme.spacing.lg,
-              marginBottom: theme.spacing.sm,
-            }}
-          >
-            Damage map
-          </Text>
-          <View
-            style={{
-              width: "100%",
-              height: 180,
-              borderWidth: 1,
-              borderColor: theme.colors.divider,
-              marginBottom: theme.spacing.sm,
-            }}
-          >
-            <DamageMapSvg theme={theme} markers={data.damageMarkers} />
-          </View>
-          <Text style={{ fontSize: theme.size.body }}>
-            {data.damageMarkers.length === 0
-              ? "No existing damage recorded at handover."
-              : `${data.damageMarkers.length} existing marking(s) recorded at handover.`}
-          </Text>
+          <PhotoIssues theme={theme} photos={data.photos} />
         </PdfSection>
         {renderFooter()}
       </PageShell>
@@ -457,50 +420,6 @@ function buildLineItems(data: RentalAgreementData): PdfLineItem[] {
   return items;
 }
 
-function PhotoGrid({
-  theme,
-  photos,
-}: {
-  theme: PdfTheme;
-  photos: { url: string; caption?: string | null }[];
-}) {
-  const styles = StyleSheet.create({
-    grid: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: theme.spacing.sm,
-    },
-    box: {
-      width: "32%",
-      height: 100,
-      borderWidth: 1,
-      borderColor: theme.colors.divider,
-      borderRadius: theme.radii.sm,
-    },
-    image: {
-      width: "100%",
-      height: "100%",
-      objectFit: "cover",
-    },
-    caption: {
-      fontSize: theme.size.micro,
-      color: theme.colors.muted,
-      textAlign: "center",
-      marginTop: theme.spacing.xs,
-    },
-  });
-  return (
-    <View style={styles.grid}>
-      {photos.map((p, i) => (
-        <View key={`ph-${i}`} style={styles.box}>
-          <Image src={p.url} style={styles.image} />
-          {p.caption ? <Text style={styles.caption}>{p.caption}</Text> : null}
-        </View>
-      ))}
-    </View>
-  );
-}
-
 // Final signature block — mirrors the Terms & Conditions consent document:
 // label → bold signer name → signature image → "Accepted at {local} AEST ({iso})".
 function SignatureBox({
@@ -651,75 +570,3 @@ function SignedFixedFooter({
   );
 }
 
-const DAMAGE_VIEWS = ["LEFT", "RIGHT", "FRONT", "REAR"] as const;
-type DamageView = (typeof DAMAGE_VIEWS)[number];
-
-function DamageMapSvg({ theme, markers }: { theme: PdfTheme; markers: DamageMarker[] }) {
-  const byView: Record<DamageView, DamageMarker[]> = {
-    LEFT: [],
-    RIGHT: [],
-    FRONT: [],
-    REAR: [],
-  };
-  for (const m of markers) byView[m.view ?? "LEFT"].push(m);
-  const severityColour = (severity: string) => {
-    if (severity === "MAJOR") return theme.colors.errorInk;
-    return theme.colors.alertBorder;
-  };
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        flexWrap: "wrap",
-        height: "100%",
-        width: "100%",
-        backgroundColor: theme.colors.surface,
-      }}
-    >
-      {DAMAGE_VIEWS.map((v) => (
-        <View key={v} style={{ width: "50%", height: "50%", padding: 3 }}>
-          <View
-            style={{
-              position: "relative",
-              height: "100%",
-              width: "100%",
-              backgroundColor: theme.colors.paper,
-              borderWidth: 1,
-              borderColor: theme.colors.divider,
-            }}
-          >
-            <Text
-              style={{
-                position: "absolute",
-                top: 4,
-                left: 6,
-                fontSize: theme.size.micro,
-                color: theme.colors.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-              }}
-            >
-              {v}
-            </Text>
-            {byView[v].map((m, i) => (
-              <View
-                key={`${v}-${i}`}
-                style={{
-                  position: "absolute",
-                  left: `${m.x * 100}%`,
-                  top: `${m.y * 100}%`,
-                  width: 8,
-                  height: 8,
-                  marginLeft: -4,
-                  marginTop: -4,
-                  borderRadius: 8,
-                  backgroundColor: severityColour(m.severity),
-                }}
-              />
-            ))}
-          </View>
-        </View>
-      ))}
-    </View>
-  );
-}

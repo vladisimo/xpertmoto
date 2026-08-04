@@ -191,6 +191,8 @@ function makePrisma(opts: PrismaStubOpts = {}) {
     },
     infringement: {
       findUnique: vi.fn(async () => opts.existingInfringement ?? null),
+      findMany: vi.fn(async () => []),
+      update: vi.fn(async () => ({})),
       create: vi.fn(async () => ({
         id: "inf_1",
         referenceNumber: "ref_1",

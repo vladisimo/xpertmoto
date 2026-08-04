@@ -12,14 +12,18 @@ import {
 import { slugToBikeType } from "@/lib/bike-types";
 import { slugToRiderLevel } from "@/lib/rider-levels";
 import { slugToBand } from "@/lib/engine-bands";
+import { buildMetadata } from "@/lib/seo/metadata";
 import type { Metadata } from "next";
 
-// M-11: per-page title (composed via the root template) + unique description.
-export const metadata: Metadata = {
-  title: "Our fleet",
-  description:
-    "Browse the full scooter & motorbike hire fleet — from LAMS-friendly learner bikes to commuter scooters and touring machines. Filter by engine size, rider level and use case.",
-};
+// Per-page title (composed via the root template) + canonical/OG via buildMetadata.
+export function generateMetadata(): Promise<Metadata> {
+  return buildMetadata({
+    title: "Our fleet",
+    description:
+      "Browse our full scooter & motorbike hire fleet — LAMS learner bikes, commuter scooters and touring machines, filterable by size, rider level and use.",
+    path: "/fleet",
+  });
+}
 
 /** Number of cards in the "high-performance picks" featured strip. */
 const FEATURED_COUNT = 3;

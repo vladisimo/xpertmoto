@@ -8,7 +8,7 @@ import {
 } from "@/server/services/telematics-revenue";
 import { sendNotification } from "@/server/services/notification-sender";
 import type { LatLng } from "@/lib/geo";
-import { getQueue, registerWorker } from "./queue";
+import { getQueue, monitorCron, registerWorker } from "./queue";
 
 const QUEUE = "telemetry-processor" as const;
 
@@ -187,7 +187,15 @@ export async function runTelemetryProcessor(): Promise<TelemetryProcessorResult>
 
 export function startTelemetryProcessorScheduler() {
   registerWorker(QUEUE, async () => runTelemetryProcessor());
+  // Brisbane TZ + Sentry cron check-in for parity with the other GPS jobs — this
+  // is the most complex loop (zone/speed event emission + notifications) and was
+  // previously unmonitored and running on the worker's system TZ.
+  monitorCron(QUEUE, "*/5 * * * *", "Australia/Brisbane");
   const q = getQueue(QUEUE);
   if (!q) return;
-  q.add("every-5-min", {}, { repeat: { pattern: "*/5 * * * *" }, jobId: "repeat-5m-telem" });
+  q.add(
+    "every-5-min",
+    {},
+    { repeat: { pattern: "*/5 * * * *", tz: "Australia/Brisbane" }, jobId: "repeat-5m-telem" },
+  );
 }

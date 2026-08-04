@@ -425,3 +425,56 @@ describe("bookingSettlement.captureBond", () => {
     expect(capturePaymentIntentMock).not.toHaveBeenCalled();
   });
 });
+
+describe("bookingSettlement.writeOffBalance (bad-debt lever)", () => {
+  function managerCtx(booking: Record<string, unknown>) {
+    const ctx = makeCtx({ booking });
+    // writeOffBalance is managerProcedure — STAFF must be rejected.
+    ctx.session = { user: { id: "mgr1", role: "MANAGER" as never } } as never;
+    // Open charge rows the write-off must terminal-ise.
+    (ctx.prisma.payment as Record<string, unknown>).findMany = vi
+      .fn()
+      .mockResolvedValue([
+        { id: "pay_open_1", notes: null },
+        { id: "pay_open_2", notes: "capture-pending: failed" },
+      ]);
+    return ctx;
+  }
+
+  it("flips open rows to WRITTEN_OFF, zeroes balanceDue and issues a DECREASE adjustment", async () => {
+    const ctx = managerCtx({ balanceDue: 180 });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    const res = await c.writeOffBalance({ bookingId: "b1", reason: "Debtor uncontactable 90+ days" });
+    expect(res).toEqual({ amount: 180, rowsClosed: 2 });
+    expect(ctx.prisma.payment.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "pay_open_1" },
+        data: expect.objectContaining({ status: "WRITTEN_OFF" }),
+      }),
+    );
+    expect(ctx.prisma.booking.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ balanceDue: 0 }),
+      }),
+    );
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "DECREASE", bookingId: "b1" }),
+    );
+  });
+
+  it("rejects when nothing is owed", async () => {
+    const ctx = managerCtx({ balanceDue: 0 });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.writeOffBalance({ bookingId: "b1", reason: "nothing to do here" }),
+    ).rejects.toBeInstanceOf(TRPCError);
+  });
+
+  it("is manager-gated — STAFF cannot write off debt", async () => {
+    const ctx = makeCtx({ booking: { balanceDue: 100 } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.writeOffBalance({ bookingId: "b1", reason: "staff trying it on" }),
+    ).rejects.toBeInstanceOf(TRPCError);
+  });
+});

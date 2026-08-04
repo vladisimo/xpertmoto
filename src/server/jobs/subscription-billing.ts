@@ -1,6 +1,7 @@
 import { Decimal } from "@prisma/client/runtime/library";
 import { prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
+import { gstFromInclusive } from "@/lib/money";
 import { sendNotification } from "@/server/services/notification-sender";
 import { getQueue, registerWorker } from "./queue";
 
@@ -12,18 +13,25 @@ const QUEUE = "subscription-billing" as const;
  * Hourly sweep that finds subscriptions whose `currentPeriodEnd` has
  * passed and rolls them forward by one month. For each rollover we:
  *   1. Close the current-period `SubscriptionUsage` row (create one if
- *      none exists) so admin reporting has a complete history.
+ *      none exists) so admin reporting has a complete history. Usage is
+ *      read from the SubscriptionUsage row (the table
+ *      `recordSubscriptionUsage` actually writes to), with the legacy
+ *      `usageSnapshot` JSON as a fallback.
  *   2. Compute overage charges from days-used beyond `plan.includedDays`
- *      and km-used beyond `plan.includedKm`, if the plan caps either.
- *   3. Advance `currentPeriodStart/End` by one month; leave
+ *      and km-used beyond `plan.includedKm`, if the plan caps either, and
+ *      raise them as a PENDING SUBSCRIPTION_CHARGE Payment — collected
+ *      off-session by capture-pending-payments (retry/dunning inherited).
+ *   3. Raise the NEW period's base fee the same way (ACTIVE/PAST_DUE only —
+ *      TRIALING rolls without a base charge).
+ *   4. Advance `currentPeriodStart/End` by one month; leave
  *      `usageSnapshot` empty so the next period accumulates fresh.
- *   4. Notify the customer if there were overage charges.
+ *   5. Notify the customer if there were overage charges.
  *
- * Actual Stripe subscription billing is out of scope here — this job
- * maintains the local ledger. When a Stripe integration arrives the
- * subscription's `stripeSubscriptionId` is honored (the Stripe webhook
- * flows period transitions) and this job becomes a no-op for those
- * subscriptions.
+ * Idempotency: charge references are deterministic per period
+ * (`SUB-<id>-<n>` / `SUB-OVER-<id>-<n>`, unique constraint), so a re-run
+ * that already queued a period's charge skips it instead of double-billing.
+ * When a Stripe-Subscription integration arrives, rows with a
+ * `stripeSubscriptionId` are skipped here (webhooks own their periods).
  */
 
 export interface SubscriptionBillingResult {
@@ -92,8 +100,20 @@ export async function runSubscriptionBilling(
 
   for (const sub of due) {
     try {
-      const daysUsed = computeDaysUsed(sub.usageSnapshot);
-      const kmUsed = computeKmUsed(sub.usageSnapshot);
+      // Usage truth lives in the SubscriptionUsage row that
+      // recordSubscriptionUsage writes; the legacy usageSnapshot JSON is a
+      // fallback only (it was never populated by any live path).
+      const usageRow = await prisma.subscriptionUsage.findUnique({
+        where: {
+          subscriptionId_periodStart: {
+            subscriptionId: sub.id,
+            periodStart: sub.currentPeriodStart,
+          },
+        },
+        select: { daysUsed: true, kmUsed: true },
+      });
+      const daysUsed = usageRow?.daysUsed ?? computeDaysUsed(sub.usageSnapshot);
+      const kmUsed = usageRow?.kmUsed ?? computeKmUsed(sub.usageSnapshot);
       const { overageDays, overageKm, overageCharge } = computeOverage({
         daysUsed,
         kmUsed,
@@ -105,6 +125,14 @@ export async function runSubscriptionBilling(
 
       const nextStart = sub.currentPeriodEnd;
       const nextEnd = addOneMonth(nextStart);
+      const baseFee = sub.status === "TRIALING" ? 0 : Number(sub.plan.priceMonthlyAud);
+
+      // Period number for deterministic charge references: SUB-<id>-1 was
+      // raised at subscribe; each rollover raises the NEXT period.
+      const priorBaseCharges = await prisma.payment.count({
+        where: { customerId: sub.customerId, reference: { startsWith: `SUB-${sub.id}-` } },
+      });
+      const periodNumber = priorBaseCharges + 1;
 
       await prisma.$transaction(async (tx) => {
         // Close the current-period usage row (create if absent).
@@ -130,6 +158,41 @@ export async function runSubscriptionBilling(
             overageCharge: new Decimal(overageCharge),
           },
         });
+
+        // Bill the closed period's overage — PENDING row picked up by the
+        // off-session capture sweep. Deterministic reference makes re-runs
+        // collide (P2002) instead of double-billing.
+        if (overageCharge > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `SUB-OVER-${sub.id}-${periodNumber - 1}`,
+              customerId: sub.customerId,
+              type: "SUBSCRIPTION_CHARGE",
+              method: "STRIPE",
+              amount: overageCharge,
+              gstAmount: gstFromInclusive(overageCharge),
+              status: "PENDING",
+              notes: `${sub.plan.name} — overage for period ending ${sub.currentPeriodEnd.toLocaleDateString("en-AU")} (${overageDays} day(s), ${overageKm} km over)`,
+            },
+          });
+        }
+
+        // Bill the NEW period's base fee.
+        if (baseFee > 0) {
+          await tx.payment.create({
+            data: {
+              reference: `SUB-${sub.id}-${periodNumber}`,
+              customerId: sub.customerId,
+              type: "SUBSCRIPTION_CHARGE",
+              method: "STRIPE",
+              amount: baseFee,
+              gstAmount: gstFromInclusive(baseFee),
+              status: "PENDING",
+              notes: `${sub.plan.name} — period ${periodNumber} (${nextStart.toLocaleDateString("en-AU")} → ${nextEnd.toLocaleDateString("en-AU")})`,
+            },
+          });
+        }
+
         // Roll the subscription forward.
         await tx.subscription.update({
           where: { id: sub.id },
@@ -159,7 +222,7 @@ export async function runSubscriptionBilling(
             `Your ${sub.plan.name} subscription rolled over on ${nextStart.toLocaleDateString("en-AU")}. ` +
             `You went over the included allowance by ${overageDays} day(s) and ${overageKm} km, ` +
             `totalling $${overageCharge.toFixed(2)}.\n\n` +
-            `This has been added to your account.`,
+            `This will be charged to your card on file.`,
           data: { subscriptionId: sub.id, overageCharge, overageDays, overageKm },
         }).catch((err) => {
           logger.warn(

@@ -21,6 +21,8 @@ const createStripeCustomer = vi.fn();
 const createSetupIntent = vi.fn();
 const attachDefaultPaymentMethod = vi.fn();
 const chargeOffSession = vi.fn();
+const retrievePaymentMethod = vi.fn();
+const setCustomerDefaultPaymentMethod = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -29,11 +31,17 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+const cancelPaymentIntentMock = vi.fn().mockResolvedValue(true);
+
 vi.mock("@/lib/stripe", () => ({
   createStripeCustomer: (...args: unknown[]) => createStripeCustomer(...args),
   createSetupIntent: (...args: unknown[]) => createSetupIntent(...args),
   attachDefaultPaymentMethod: (...args: unknown[]) => attachDefaultPaymentMethod(...args),
   chargeOffSession: (...args: unknown[]) => chargeOffSession(...args),
+  retrievePaymentMethod: (...args: unknown[]) => retrievePaymentMethod(...args),
+  setCustomerDefaultPaymentMethod: (...args: unknown[]) =>
+    setCustomerDefaultPaymentMethod(...args),
+  cancelPaymentIntent: (...args: unknown[]) => cancelPaymentIntentMock(...args),
 }));
 
 beforeEach(() => {
@@ -44,6 +52,8 @@ beforeEach(() => {
   createSetupIntent.mockReset();
   attachDefaultPaymentMethod.mockReset();
   chargeOffSession.mockReset();
+  retrievePaymentMethod.mockReset();
+  setCustomerDefaultPaymentMethod.mockClear();
 });
 
 describe("stripe-customer service", () => {
@@ -144,5 +154,125 @@ describe("stripe-customer service", () => {
     });
     expect(r).toBeNull();
     expect(chargeOffSession).not.toHaveBeenCalled();
+  });
+
+  describe("persistDefaultPaymentMethodFromIntent (keystone)", () => {
+    it("persists the deposit PI's card as default when none is set — WITHOUT re-attaching", async () => {
+      profileFindUnique.mockResolvedValue({
+        stripeCustomerId: "cus_1",
+        defaultStripePaymentMethodId: null,
+      });
+      retrievePaymentMethod.mockResolvedValue({
+        id: "pm_1",
+        brand: "visa",
+        last4: "4242",
+        expMonth: 12,
+        expYear: 2030,
+      });
+      const { persistDefaultPaymentMethodFromIntent } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await persistDefaultPaymentMethodFromIntent("user_1", "pm_1");
+      expect(res.persisted).toBe(true);
+      // setup_future_usage already attached the PM — attach again would error.
+      expect(attachDefaultPaymentMethod).not.toHaveBeenCalled();
+      expect(setCustomerDefaultPaymentMethod).toHaveBeenCalledWith({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+      });
+      expect(profileUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            defaultStripePaymentMethodId: "pm_1",
+            stripePaymentMethodBrand: "visa",
+            stripePaymentMethodLast4: "4242",
+          }),
+        }),
+      );
+    });
+
+    it("no-ops when the profile already has a default PM (customer's choice wins)", async () => {
+      profileFindUnique.mockResolvedValue({
+        stripeCustomerId: "cus_1",
+        defaultStripePaymentMethodId: "pm_existing",
+      });
+      const { persistDefaultPaymentMethodFromIntent } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await persistDefaultPaymentMethodFromIntent("user_1", "pm_new");
+      expect(res.persisted).toBe(false);
+      expect(setCustomerDefaultPaymentMethod).not.toHaveBeenCalled();
+      expect(profileUpdate).not.toHaveBeenCalled();
+    });
+
+    it("no-ops for stub-mode customers", async () => {
+      profileFindUnique.mockResolvedValue({
+        stripeCustomerId: "cus_stub_user_1",
+        defaultStripePaymentMethodId: null,
+      });
+      const { persistDefaultPaymentMethodFromIntent } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await persistDefaultPaymentMethodFromIntent("user_1", "pm_1");
+      expect(res.persisted).toBe(false);
+      expect(setCustomerDefaultPaymentMethod).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("reactivateFailedChargesForUser (re-attempt on new card)", () => {
+    function makeDb(rows: Array<{ id: string; status: string; stripePaymentIntentId: string | null }>) {
+      const paymentUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const db = {
+        payment: {
+          findMany: vi.fn().mockResolvedValue(rows),
+          updateMany: paymentUpdateMany,
+        },
+        auditLog: { create: auditCreate },
+      };
+      return { db: db as never, paymentUpdateMany };
+    }
+
+    it("flips FAILED balance-affecting rows back to PENDING with the PI pointer cleared", async () => {
+      const { db, paymentUpdateMany } = makeDb([
+        { id: "pay_1", status: "FAILED", stripePaymentIntentId: "pi_dead" },
+      ]);
+      const { reactivateFailedChargesForUser } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await reactivateFailedChargesForUser("user_1", { prisma: db });
+      expect(res.reactivated).toBe(1);
+      expect(paymentUpdateMany).toHaveBeenCalledWith({
+        where: { id: "pay_1", status: "FAILED" },
+        data: { status: "PENDING", stripePaymentIntentId: null },
+      });
+    });
+
+    it("cancels a stale requires_action PI before re-arming the row", async () => {
+      const { db, paymentUpdateMany } = makeDb([
+        { id: "pay_2", status: "PENDING", stripePaymentIntentId: "pi_stuck_3ds" },
+      ]);
+      const { reactivateFailedChargesForUser } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await reactivateFailedChargesForUser("user_1", { prisma: db });
+      expect(res.reactivated).toBe(1);
+      // A stale portal tab must never be able to confirm the old PI after
+      // the new attempt fires — cancel precedes the re-arm.
+      expect(cancelPaymentIntentMock).toHaveBeenCalledWith("pi_stuck_3ds");
+      expect(paymentUpdateMany).toHaveBeenCalledWith({
+        where: { id: "pay_2", status: "PENDING" },
+        data: { status: "PENDING", stripePaymentIntentId: null },
+      });
+    });
+
+    it("no-ops cleanly when nothing is stuck", async () => {
+      const { db, paymentUpdateMany } = makeDb([]);
+      const { reactivateFailedChargesForUser } = await import(
+        "@/server/services/stripe-customer"
+      );
+      const res = await reactivateFailedChargesForUser("user_1", { prisma: db });
+      expect(res.reactivated).toBe(0);
+      expect(paymentUpdateMany).not.toHaveBeenCalled();
+    });
   });
 });

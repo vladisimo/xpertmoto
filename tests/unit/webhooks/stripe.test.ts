@@ -18,14 +18,20 @@ const auditCreate = vi.fn().mockResolvedValue({});
 const webhookEventCreate = vi.fn().mockResolvedValue({});
 const webhookEventUpdate = vi.fn().mockResolvedValue({});
 const webhookEventUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+const paymentAggregate = vi.fn().mockResolvedValue({ _sum: { amount: null } });
+const paymentCreate = vi.fn().mockResolvedValue({ id: "pay_ext" });
+const paymentEventCreate = vi.fn().mockResolvedValue({});
+const giftCardFindUnique = vi.fn().mockResolvedValue(null);
+const incidentUpdate = vi.fn().mockResolvedValue({});
 const txFn = vi.fn(async (cb: (tx: unknown) => unknown) =>
   cb({
-    payment: { updateMany: paymentUpdateMany },
+    payment: { updateMany: paymentUpdateMany, create: paymentCreate },
     // The succeeded handler applies the balanceDue decrement on the same tx
     // as the status flip — route the tx's booking model to the same spies.
     booking: { findUnique: bookingFindUnique, update: bookingUpdate },
     dailyRevenue: { upsert: vi.fn().mockResolvedValue({}) },
     auditLog: { create: auditCreate },
+    paymentEvent: { create: paymentEventCreate },
   }),
 );
 
@@ -35,11 +41,14 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: paymentUpdateMany,
       findFirst: paymentFindFirst,
       findMany: paymentFindMany,
+      aggregate: paymentAggregate,
     },
     booking: { findMany: bookingFindMany, findUnique: bookingFindUnique, update: bookingUpdate },
     bondLedger: { updateMany: bondUpdateMany, update: bondUpdate, findFirst: bondFindFirst },
     customerProfile: { updateMany: profileUpdateMany },
-    incident: { findFirst: incidentFindFirst, create: incidentCreate },
+    giftCard: { findUnique: giftCardFindUnique },
+    incident: { findFirst: incidentFindFirst, create: incidentCreate, update: incidentUpdate },
+    paymentEvent: { create: paymentEventCreate },
     user: { findMany: userFindMany },
     auditLog: { create: auditCreate },
     stripeWebhookEvent: {

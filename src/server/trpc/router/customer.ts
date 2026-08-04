@@ -729,6 +729,54 @@ export const customerRouter = createTRPCRouter({
     };
   }),
 
+  // 3DS recovery: PENDING charges whose off-session attempt came back
+  // requires_action / authentication_required. The customer completes the
+  // challenge in the portal with the PI's client secret; the
+  // payment_intent.succeeded webhook then flips the row and nets balanceDue.
+  // Without this surface those charges were stuck PENDING forever.
+  paymentsRequiringAuthentication: protectedProcedure.query(async ({ ctx }) => {
+    const candidates = await ctx.prisma.payment.findMany({
+      where: {
+        customerId: ctx.user.id,
+        status: "PENDING",
+        stripePaymentIntentId: { not: null },
+      },
+      include: { booking: { select: { bookingReference: true } } },
+      orderBy: { createdAt: "asc" },
+      take: 20,
+    });
+    const { retrievePaymentIntent } = await import("@/lib/stripe");
+    const out: Array<{
+      paymentId: string;
+      reference: string;
+      bookingReference: string | null;
+      amount: number;
+      clientSecret: string;
+    }> = [];
+    for (const p of candidates) {
+      try {
+        const pi = await retrievePaymentIntent(p.stripePaymentIntentId);
+        // requires_confirmation covers the authentication_required decline
+        // shape (the PI exists but was never successfully confirmed).
+        if (
+          pi?.clientSecret &&
+          ["requires_action", "requires_confirmation"].includes(pi.status)
+        ) {
+          out.push({
+            paymentId: p.id,
+            reference: p.reference,
+            bookingReference: p.booking?.bookingReference ?? null,
+            amount: Number(p.amount),
+            clientSecret: pi.clientSecret,
+          });
+        }
+      } catch {
+        // Stripe hiccup on one PI must not hide the rest.
+      }
+    }
+    return out;
+  }),
+
   // Phase E — create a Stripe Checkout "Pay now" session for the given
   // Payment rows. On success, Stripe redirects the customer to
   // /dashboard/pay/success which flips each Payment row to SUCCEEDED.

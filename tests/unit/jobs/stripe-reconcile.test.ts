@@ -27,7 +27,9 @@ const { prismaMock } = vi.hoisted(() => ({
       findMany: vi.fn(),
     },
     payment: { findMany: vi.fn(), update: vi.fn() },
-    unmatchedTransaction: { upsert: vi.fn(), updateMany: vi.fn() },
+    user: { findMany: vi.fn().mockResolvedValue([]) },
+    unmatchedTransaction: {
+      findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn(), updateMany: vi.fn() },
   },
 }));
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));

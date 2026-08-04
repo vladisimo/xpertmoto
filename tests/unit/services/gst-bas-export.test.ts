@@ -3,7 +3,20 @@ import { describe, expect, test, it, vi, beforeEach } from "vitest";
 const findManyPayment = vi.fn();
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    payment: { findMany: (...a: unknown[]) => findManyPayment(...a) },
+    payment: {
+      // computeGstSummary now issues TWO findMany calls: the settled-payment
+      // sweep and a dedicated GIFT_CARD_REDEMPTION query (Div-100 voucher
+      // treatment). Route by the where-clause so fixtures written for the
+      // first query aren't double-counted through the second.
+      findMany: (args: { where?: { type?: unknown } }) =>
+        args?.where?.type === "GIFT_CARD_REDEMPTION"
+          ? Promise.resolve([])
+          : findManyPayment(args),
+    },
+    // 1B input credit reads Stripe fee totals for the window.
+    stripeFeeLedger: {
+      aggregate: vi.fn().mockResolvedValue({ _sum: { feeAmountCents: null } }),
+    },
   },
 }));
 

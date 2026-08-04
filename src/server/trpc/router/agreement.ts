@@ -363,7 +363,7 @@ export const agreementRouter = createTRPCRouter({
               insurance: { include: { insuranceOption: true } },
             },
           },
-          inspection: { include: { photos: true } },
+          inspection: { include: { photos: true, issues: { include: { inspectionPhoto: true } } } },
           staff: true,
         },
       });
@@ -388,10 +388,22 @@ export const agreementRouter = createTRPCRouter({
 
       const booking = agreement.booking;
       const insurance = booking.insurance[0];
-      const damageMarkers =
-        (agreement.inspection.bodyDamageMap as unknown as {
-          markers?: { x: number; y: number; severity: string; note?: string; view?: "LEFT" | "RIGHT" | "FRONT" | "REAR" }[];
-        })?.markers ?? [];
+      // Each condition photo with the pre-existing issues pinned on it.
+      const conditionPhotos = agreement.inspection.photos.map((p) => ({
+        url: p.url,
+        caption: p.caption,
+        side: null as string | null,
+        issues: agreement.inspection.issues
+          .filter((iss) => iss.inspectionPhotoId === p.id)
+          .map((iss, idx) => ({
+            n: idx + 1,
+            label: iss.label,
+            severity: iss.severity as string,
+            note: iss.note,
+            posX: iss.posX,
+            posY: iss.posY,
+          })),
+      }));
 
       const branding = await getBranding();
       const termsBranding = {
@@ -454,8 +466,7 @@ export const agreementRouter = createTRPCRouter({
               totalPrice: Number(insurance.totalPrice),
             }
           : null,
-        photos: agreement.inspection.photos.map((p) => ({ url: p.url, caption: p.caption })),
-        damageMarkers,
+        photos: conditionPhotos,
         terms: interpolateTerms(CURRENT_TERMS, termsBranding),
         cancellationPolicy: CANCELLATION_POLICY,
         bondPolicy: BOND_POLICY,

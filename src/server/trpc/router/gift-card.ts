@@ -9,18 +9,14 @@ import {
 } from "../trpc";
 import { createPaymentIntent } from "@/lib/stripe";
 import {
+  activateGiftCardOnPayment,
+  deliverGiftCardEmail,
   getActiveBalance,
   issueGiftCard,
-  redeemGiftCard,
+  redeemGiftCardTx,
 } from "@/server/services/gift-card";
-import { sendEmail } from "@/lib/email";
-import { render } from "@react-email/render";
-import { createElement } from "react";
-import GiftCardReceivedEmail from "../../../../emails/gift-card-received";
 import { writeAudit } from "@/server/services/audit";
-import { isNotificationsPaused } from "@/server/services/notification-gate";
-import { logger } from "@/lib/logger";
-import { gstFromInclusive } from "@/lib/money";
+import { Prisma } from "@prisma/client";
 
 export const giftCardRouter = createTRPCRouter({
   /**
@@ -65,23 +61,26 @@ export const giftCardRouter = createTRPCRouter({
         bookingId: `GIFT-${card.id}`,
         customerEmail: input.purchaserEmail,
         description: `${siteName} gift card purchase (${card.code})`,
+        // The webhook activates the card off this key — without it a paid
+        // card would stay PENDING forever in real Stripe mode.
+        metadata: { giftCardId: card.id },
       });
 
-      // Stub-mode Stripe → immediately mark as active for test flows.
+      // Correlate the card with its PI so reconciliation (and the webhook
+      // fallback lookup) can find it even if metadata is ever stripped.
+      await ctx.prisma.giftCard.update({
+        where: { id: card.id },
+        data: { stripePaymentIntentId: intent.id },
+      });
+
+      // Stub-mode Stripe (dev without keys) → no webhook will ever arrive;
+      // activate + deliver inline so the flow still works end-to-end.
       if (intent.id.startsWith("pi_stub_")) {
-        await ctx.prisma.payment.create({
-          data: {
-            reference: `GIFT-${card.id}`,
-            type: "GIFT_CARD_PURCHASE",
-            method: "STRIPE",
-            amount: input.amount,
-            gstAmount: gstFromInclusive(input.amount),
-            stripePaymentIntentId: intent.id,
-            status: "SUCCEEDED",
-            processedAt: new Date(),
-          },
+        const { activated } = await activateGiftCardOnPayment(ctx.prisma, {
+          giftCardId: card.id,
+          stripePaymentIntentId: intent.id,
         });
-        await sendRecipientEmail(ctx.prisma, card.id);
+        if (activated) await deliverGiftCardEmail(ctx.prisma, card.id);
       }
 
       await writeAudit(ctx.prisma, {
@@ -139,34 +138,62 @@ export const giftCardRouter = createTRPCRouter({
         throw new TRPCError({ code: "FORBIDDEN" });
       }
       try {
-        const updated = await redeemGiftCard(ctx.prisma, {
-          code: input.code,
-          amount: input.amount,
-          bookingId: input.bookingId,
-        });
+        // One transaction for card debit + Payment row + booking counters:
+        // a partial failure must roll the debit back (the customer's card
+        // value can never evaporate without the booking being credited),
+        // and the balanceDue CAS below rejects over-redemption so the
+        // booking balance can never go negative.
+        const updated = await ctx.prisma.$transaction(async (tx) => {
+          const card = await redeemGiftCardTx(tx, {
+            code: input.code,
+            amount: input.amount,
+            bookingId: input.bookingId,
+          });
 
-        await ctx.prisma.payment.create({
-          data: {
-            reference: `GC-REDEEM-${Date.now()}`,
-            customerId: booking.customerId,
-            bookingId: booking.id,
-            type: "GIFT_CARD_REDEMPTION",
-            method: "CARD",
-            amount: -input.amount,
-            status: "SUCCEEDED",
-            notes: `Gift card ${input.code}`,
-            processedAt: new Date(),
-          },
-        });
-        await ctx.prisma.booking.update({
-          where: { id: booking.id },
-          data: {
-            amountPaid: { increment: input.amount },
-            balanceDue: { decrement: input.amount },
-          },
+          // Deterministic reference = idempotency: a double-clicked submit
+          // (or client retry) hits the unique constraint instead of debiting
+          // the card twice. One redemption per card per booking.
+          await tx.payment.create({
+            data: {
+              reference: `GC-REDEEM-${booking.id}-${card.id}`,
+              customerId: booking.customerId,
+              bookingId: booking.id,
+              type: "GIFT_CARD_REDEMPTION",
+              method: "CARD",
+              amount: -input.amount,
+              status: "SUCCEEDED",
+              notes: `Gift card ${input.code}`,
+              processedAt: new Date(),
+            },
+          });
+
+          const applied = await tx.booking.updateMany({
+            where: { id: booking.id, balanceDue: { gte: input.amount } },
+            data: {
+              amountPaid: { increment: input.amount },
+              balanceDue: { decrement: input.amount },
+            },
+          });
+          if (applied.count === 0) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Redemption exceeds the booking's remaining balance",
+            });
+          }
+          return card;
         });
         return { newBalance: Number(updated.balance) };
       } catch (err) {
+        if (
+          err instanceof Prisma.PrismaClientKnownRequestError &&
+          err.code === "P2002"
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "This gift card has already been applied to this booking",
+          });
+        }
+        if (err instanceof TRPCError) throw err;
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: err instanceof Error ? err.message : "Redeem failed",
@@ -217,32 +244,3 @@ export const giftCardRouter = createTRPCRouter({
   }),
 });
 
-async function sendRecipientEmail(prisma: Parameters<typeof issueGiftCard>[0], cardId: string) {
-  const card = await prisma.giftCard.findUnique({ where: { id: cardId } });
-  if (!card || card.deliveredAt) return;
-  if (await isNotificationsPaused()) {
-    logger.info({ cardId }, "gift-card: recipient email suppressed — notifications paused");
-    return;
-  }
-  const { getBranding } = await import("@/lib/branding");
-  const { siteName } = await getBranding();
-  const html = await render(
-    createElement(GiftCardReceivedEmail, {
-      recipientName: card.recipientName ?? "Rider",
-      amount: `A$${Number(card.initialAmount).toFixed(2)}`,
-      code: card.code,
-      personalMessage: card.personalMessage ?? undefined,
-      redeemUrl: `${process.env.APP_URL ?? ""}/booking?giftCard=${card.code}`,
-      siteName,
-    }),
-  );
-  await sendEmail({
-    to: card.recipientEmail,
-    subject: `🎁 You've been gifted a ${siteName} ride`,
-    html,
-  });
-  await prisma.giftCard.update({
-    where: { id: card.id },
-    data: { deliveredAt: new Date() },
-  });
-}

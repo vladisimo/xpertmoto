@@ -30,6 +30,10 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
   const [keysHanded, setKeysHanded] = useState(false);
   const [notes, setNotes] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // Payment/bond failure recovery: which auto-step failed on the last
+  // attempt, and the staff-entered reason for overriding it.
+  const [failedStep, setFailedStep] = useState<"remainder" | "bond" | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
 
   if (!b) return <PageShell><LoadingBlock padded="lg" /></PageShell>;
 
@@ -42,10 +46,18 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
     b.customerIdVerified &&
     !!preHire;
 
-  async function submit() {
+  const balanceDue = Number(b.balanceDue ?? 0);
+
+  async function submit(withOverride = false) {
     if (!signed || !preHire) return;
     setErr(null);
     try {
+      const override =
+        withOverride && failedStep && overrideReason.trim()
+          ? failedStep === "remainder"
+            ? { remainderOverride: { skip: true as const, reason: overrideReason.trim() } }
+            : { bondOverride: { skip: true as const, reason: overrideReason.trim() } }
+          : {};
       await checkOut.mutateAsync({
         bookingId: id,
         odometerKm: preHire.odometerKm,
@@ -54,11 +66,18 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
         customerIdVerified: b!.customerIdVerified,
         agreementId: signed.id,
         notes: notes || undefined,
+        ...override,
       });
       await utils.staffBooking.detail.invalidate({ id });
       router.push(`/staff/bookings/${id}`);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Check-out failed");
+      const message = e instanceof Error ? e.message : "Check-out failed";
+      setErr(message);
+      // The server blocks handover on a failed auto-charge / bond hold;
+      // classify so the override panel targets only the failing step.
+      if (message.includes("balance is still due")) setFailedStep("remainder");
+      else if (message.toLowerCase().includes("bond")) setFailedStep("bond");
+      else setFailedStep(null);
     }
   }
 
@@ -150,6 +169,27 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
         </Card>
       )}
 
+      {balanceDue > 0.009 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">Payment at pickup</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 text-sm">
+            <div className="flex justify-between">
+              <span>Balance due now</span>
+              <span className="font-semibold tabular-nums">
+                A${balanceDue.toFixed(2)}
+              </span>
+            </div>
+            <p className="text-muted-foreground">
+              Charged automatically to the customer&apos;s saved card when you
+              complete the handover. If the card declines you can take payment
+              at the terminal instead.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="h3">Handover</CardTitle>
@@ -177,8 +217,51 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
         </div>
       )}
 
+      {failedStep && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">
+              {failedStep === "remainder"
+                ? "Payment could not be collected"
+                : "Bond hold could not be placed"}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              {failedStep === "remainder"
+                ? "Take the payment at the terminal (Record payment on the booking) and retry — or hand over anyway and collect later."
+                : "Ask the customer for another card and retry — or hand over without bond security."}
+            </p>
+            {failedStep === "remainder" && (
+              <Button variant="secondary" asChild>
+                <Link href={`/staff/bookings/${id}`}>Open booking → Record payment</Link>
+              </Button>
+            )}
+            <div>
+              <Label>Override reason (required to proceed without it)</Label>
+              <Input
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                placeholder={
+                  failedStep === "remainder"
+                    ? "e.g. EFTPOS terminal payment taken, receipt #1234"
+                    : "e.g. manager approved handover without bond"
+                }
+              />
+            </div>
+            <Button
+              variant="destructive"
+              disabled={!overrideReason.trim() || checkOut.isPending}
+              onClick={() => submit(true)}
+            >
+              Override &amp; complete handover
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="hidden gap-3 md:flex">
-        <Button onClick={submit} disabled={!canSubmit || checkOut.isPending}>
+        <Button onClick={() => submit()} disabled={!canSubmit || checkOut.isPending}>
           {checkOut.isPending ? "Completing…" : "Complete check-out"}
         </Button>
         <Button variant="ghost" asChild>
@@ -188,7 +271,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
 
       <MobileBottomBar>
         <Button
-          onClick={submit}
+          onClick={() => submit()}
           disabled={!canSubmit || checkOut.isPending}
           className="flex-1"
         >

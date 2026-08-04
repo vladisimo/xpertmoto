@@ -159,6 +159,7 @@ const chargeRefundedSchema = z.object({
 const chargeDisputeSchema = z.object({
   id: z.string().min(1),
   payment_intent: z.string().nullable().optional(),
+  charge: z.string().nullable().optional(),
   reason: z.string().optional(),
   amount: z.number().int().nonnegative().optional(),
 });
@@ -189,6 +190,7 @@ const paymentMethodSchema = z.object({
 const chargeDisputeUpdatedSchema = z.object({
   id: z.string().min(1),
   payment_intent: z.string().nullable().optional(),
+  charge: z.string().nullable().optional(),
   status: z.string().optional(),
   amount: z.number().int().nonnegative().optional(),
 });
@@ -249,6 +251,45 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
               releasedAmount: authorised - captured,
             },
           });
+        }
+      }
+
+      // Gift-card purchase fulfilment. The purchase PI carries giftCardId in
+      // metadata (fallback: the card row stores the PI id); activation flips
+      // PENDING → ACTIVE exactly once (CAS inside the service), creates the
+      // GIFT_CARD_PURCHASE Payment row, and emails the recipient. Without
+      // this branch a real-mode purchase charges the buyer's card while the
+      // gift card never activates and the money never lands in the ledger.
+      const giftCardId =
+        parsed.metadata?.giftCardId ??
+        (
+          await prisma.giftCard.findUnique({
+            where: { stripePaymentIntentId: id },
+            select: { id: true },
+          })
+        )?.id;
+      if (!isBondHold && giftCardId) {
+        try {
+          const { activateGiftCardOnPayment, deliverGiftCardEmail } = await import(
+            "@/server/services/gift-card"
+          );
+          const { activated } = await activateGiftCardOnPayment(prisma, {
+            giftCardId,
+            stripePaymentIntentId: id,
+            stripeChargeId: chargeId,
+          });
+          if (activated) {
+            await deliverGiftCardEmail(prisma, giftCardId);
+            logger.info(
+              { giftCardId, stripePaymentIntentId: id },
+              "stripe webhook: gift card activated on payment",
+            );
+          }
+        } catch (err) {
+          logger.error(
+            { err: err instanceof Error ? err.message : String(err), giftCardId },
+            "stripe webhook: gift-card activation failed — card remains PENDING; reconcile manually",
+          );
         }
       }
 
@@ -644,6 +685,87 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           });
           await invalidateRevenueCaches(depotId);
         }
+
+        // External refunds (Stripe dashboard / API — the documented goodwill
+        // workflow) never wrote a −1 REFUND row, so the GST/BAS export kept
+        // the original +1 sale un-netted (over-remitting) and
+        // Booking.amountPaid overstated collected money. Book the delta not
+        // already covered by in-app REFUND rows; the deterministic reference
+        // makes this idempotent under redelivery, and a growing refund total
+        // books only its increment.
+        if (amountRefundedCents > 0) {
+          const sourceRow = await prisma.payment.findFirst({
+            where: { stripePaymentIntentId: pi, type: { notIn: ["REFUND"] } },
+            orderBy: { createdAt: "asc" },
+            select: { type: true, bookingId: true, customerId: true },
+          });
+          const inAppRefunds = await prisma.payment.aggregate({
+            where: {
+              type: "REFUND",
+              status: { in: ["SUCCEEDED", "PENDING"] },
+              ...(sourceRow?.bookingId
+                ? { bookingId: sourceRow.bookingId }
+                : { stripePaymentIntentId: pi }),
+            },
+            _sum: { amount: true },
+          });
+          const externalDelta =
+            Math.round(
+              (amountRefundedCents / 100 - Number(inAppRefunds._sum.amount ?? 0)) * 100,
+            ) / 100;
+          if (externalDelta > 0.009) {
+            const { gstFromInclusive } = await import("@/lib/money");
+            try {
+              await prisma.$transaction(async (tx) => {
+                await tx.payment.create({
+                  data: {
+                    reference: `REF-EXT-${pi}-${amountRefundedCents}`,
+                    bookingId: sourceRow?.bookingId ?? null,
+                    customerId: sourceRow?.customerId ?? null,
+                    stripePaymentIntentId: pi,
+                    type: "REFUND",
+                    method: "STRIPE",
+                    amount: externalDelta,
+                    // Voucher sales carry no GST at issue (Div 100 — taxed
+                    // at redemption), so refunding one claws none back.
+                    gstAmount:
+                      sourceRow?.type === "GIFT_CARD_PURCHASE"
+                        ? 0
+                        : gstFromInclusive(externalDelta),
+                    status: "SUCCEEDED",
+                    processedAt: new Date(),
+                    notes: "External refund (Stripe dashboard/API) — booked by webhook",
+                  },
+                });
+                if (sourceRow?.bookingId) {
+                  const fresh = await tx.booking.findUnique({
+                    where: { id: sourceRow.bookingId },
+                    select: { amountPaid: true },
+                  });
+                  if (fresh) {
+                    await tx.booking.update({
+                      where: { id: sourceRow.bookingId },
+                      data: {
+                        amountPaid: Math.max(
+                          0,
+                          Math.round((Number(fresh.amountPaid) - externalDelta) * 100) / 100,
+                        ),
+                      },
+                    });
+                  }
+                }
+              });
+            } catch (err) {
+              // Unique-reference collision = this refund total was already
+              // booked by a prior delivery. Expected on redelivery.
+              if (
+                !(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")
+              ) {
+                throw err;
+              }
+            }
+          }
+        }
       }
       return;
     }
@@ -655,16 +777,31 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       if (!parsed) return;
       const pi = parsed.payment_intent ?? undefined;
       const disputeId = parsed.id;
+      const disputedChargeId = parsed.charge ?? null;
       const reason = parsed.reason ?? "unknown";
       const disputeAmountCents = parsed.amount ?? 0;
       if (!pi) return;
 
-      await prisma.payment.updateMany({
-        where: { stripePaymentIntentId: pi },
-        data: { status: "DISPUTED" },
-      });
+      // Scope the DISPUTED flip to the row for the DISPUTED CHARGE — a PI
+      // can back several Payment rows (deposit + ancillary captures), and
+      // the old PI-wide flip yanked every one of them out of the settled
+      // sets, corrupting collected-money counters for charges nobody
+      // disputed. PI-wide only as a fallback for legacy rows that never had
+      // stripeChargeId backfilled.
+      const scopedFlip = disputedChargeId
+        ? await prisma.payment.updateMany({
+            where: { stripePaymentIntentId: pi, stripeChargeId: disputedChargeId },
+            data: { status: "DISPUTED" },
+          })
+        : { count: 0 };
+      if (scopedFlip.count === 0) {
+        await prisma.payment.updateMany({
+          where: { stripePaymentIntentId: pi },
+          data: { status: "DISPUTED" },
+        });
+      }
       const disputedRows = await prisma.payment.findMany({
-        where: { stripePaymentIntentId: pi },
+        where: { stripePaymentIntentId: pi, status: "DISPUTED" },
         select: { id: true },
       });
       for (const p of disputedRows) {
@@ -902,7 +1039,12 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       const pi = parsed.payment_intent ?? null;
       if (!pi) return;
       const disputeStatus = parsed.status ?? "unknown";
+      const disputedChargeId = parsed.charge ?? null;
       const incidentNumber = `CBK-${parsed.id}`;
+      // Vehicleless bookings never got a CBK incident (Incident requires a
+      // vehicle), and the old handler bailed here — leaving their payments
+      // DISPUTED forever and lost disputes off the books entirely. The
+      // incident update is optional; the money handling below is not.
       const incident = await prisma.incident.findFirst({
         where: { incidentNumber },
         select: {
@@ -912,43 +1054,129 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
           booking: { select: { pickupDepot: { select: { slug: true } } } },
         },
       });
-      if (!incident) {
-        logger.info(
-          { eventType: event.type, disputeId: parsed.id },
-          "dispute update for unknown incident — skipping",
-        );
-        return;
-      }
       let incidentStatus: "UNDER_INVESTIGATION" | "RESOLVED" | "CLOSED" = "UNDER_INVESTIGATION";
-      let paymentStatus: "DISPUTED" | "FAILED" | "SUCCEEDED" = "DISPUTED";
       if (event.type === "charge.dispute.closed") {
         // Stripe dispute.status values at close: "won" | "lost" | "warning_closed"
         if (disputeStatus === "won" || disputeStatus === "warning_closed") {
           incidentStatus = "RESOLVED";
-          paymentStatus = "SUCCEEDED";
         } else if (disputeStatus === "lost") {
           incidentStatus = "CLOSED";
-          paymentStatus = "FAILED";
         }
       }
-      await prisma.incident.update({
-        where: { id: incident.id },
-        data: {
-          status: incidentStatus,
-          resolution: `Stripe dispute ${disputeStatus}`,
-          resolvedAt: event.type === "charge.dispute.closed" ? new Date() : undefined,
-        },
-      });
-      if (event.type === "charge.dispute.closed") {
-        await prisma.payment.updateMany({
-          where: { stripePaymentIntentId: pi, status: "DISPUTED" },
-          data: { status: paymentStatus },
+      if (incident) {
+        await prisma.incident.update({
+          where: { id: incident.id },
+          data: {
+            status: incidentStatus,
+            resolution: `Stripe dispute ${disputeStatus}`,
+            resolvedAt: event.type === "charge.dispute.closed" ? new Date() : undefined,
+          },
         });
+      }
+      if (event.type === "charge.dispute.closed") {
+        // Restore / settle the DISPUTED row(s), scoped to the disputed
+        // charge where possible (see charge.dispute.created).
+        const disputedWhere = {
+          stripePaymentIntentId: pi,
+          status: "DISPUTED" as const,
+          ...(disputedChargeId ? { stripeChargeId: disputedChargeId } : {}),
+        };
+        const disputedRows = await prisma.payment.findMany({
+          where: disputedWhere,
+          select: { id: true, amount: true, gstAmount: true, type: true, bookingId: true, customerId: true },
+        });
+        const rowsToClose =
+          disputedRows.length > 0
+            ? disputedRows
+            : await prisma.payment.findMany({
+                where: { stripePaymentIntentId: pi, status: "DISPUTED" },
+                select: { id: true, amount: true, gstAmount: true, type: true, bookingId: true, customerId: true },
+              });
+
+        if (disputeStatus === "won" || disputeStatus === "warning_closed") {
+          await prisma.payment.updateMany({
+            where: { id: { in: rowsToClose.map((r) => r.id) } },
+            data: { status: "SUCCEEDED" },
+          });
+        } else if (disputeStatus === "lost") {
+          // A lost dispute is money OUT: Stripe already pulled the funds.
+          // Book it exactly like a refund so every downstream ledger agrees:
+          //   - the sale row settles as REFUNDED (keeps its +1 in the BAS
+          //     quarter it was collected),
+          //   - a −1 REFUND row dated NOW claws the GST back in the current
+          //     quarter (same-quarter nets to zero, cross-quarter becomes a
+          //     decreasing adjustment),
+          //   - Booking.amountPaid drops so retained-consideration and
+          //     rewards math stop counting money we no longer hold.
+          const disputeAmount =
+            (parsed.amount ?? 0) > 0
+              ? (parsed.amount ?? 0) / 100
+              : rowsToClose.reduce((acc, r) => acc + Number(r.amount), 0);
+          const primary = rowsToClose[0];
+          await prisma.payment.updateMany({
+            where: { id: { in: rowsToClose.map((r) => r.id) } },
+            data: { status: "REFUNDED" },
+          });
+          if (primary && disputeAmount > 0) {
+            const { gstFromInclusive } = await import("@/lib/money");
+            try {
+              await prisma.$transaction(async (tx) => {
+                await tx.payment.create({
+                  data: {
+                    reference: `REF-CBK-${parsed.id}`,
+                    bookingId: primary.bookingId,
+                    customerId: primary.customerId,
+                    stripePaymentIntentId: pi,
+                    stripeChargeId: disputedChargeId,
+                    type: "REFUND",
+                    method: "STRIPE",
+                    amount: disputeAmount,
+                    gstAmount:
+                      primary.type === "GIFT_CARD_PURCHASE"
+                        ? 0
+                        : gstFromInclusive(disputeAmount),
+                    status: "SUCCEEDED",
+                    processedAt: new Date(),
+                    notes: `Chargeback lost — dispute ${parsed.id}`,
+                  },
+                });
+                if (primary.bookingId) {
+                  const fresh = await tx.booking.findUnique({
+                    where: { id: primary.bookingId },
+                    select: { amountPaid: true, depotId: true },
+                  });
+                  if (fresh) {
+                    await tx.booking.update({
+                      where: { id: primary.bookingId },
+                      data: {
+                        amountPaid: Math.max(
+                          0,
+                          Math.round((Number(fresh.amountPaid) - disputeAmount) * 100) / 100,
+                        ),
+                      },
+                    });
+                    await recordRefund(tx, {
+                      depotId: fresh.depotId,
+                      at: new Date(),
+                      amount: disputeAmount,
+                    });
+                  }
+                }
+              });
+            } catch (err) {
+              if (
+                !(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")
+              ) {
+                throw err;
+              }
+            }
+          }
+        }
       }
       await writeAudit(prisma, {
         action: event.type.replace(/\./g, "_"),
         entity: "Incident",
-        entityId: incident.id,
+        entityId: incident?.id ?? `dispute:${parsed.id}`,
         status: "SUCCESS",
         newData: { disputeId: parsed.id, disputeStatus, paymentIntentId: pi },
       });
@@ -959,7 +1187,7 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
         "charge.dispute.closed": SERVER_EVENTS.disputeClosed,
       };
       const disputeEvent = disputeEventByType[event.type];
-      if (disputeEvent && incident.customerId) {
+      if (disputeEvent && incident?.customerId) {
         const depotSlug = incident.booking?.pickupDepot?.slug;
         await trackServer({
           event: disputeEvent,

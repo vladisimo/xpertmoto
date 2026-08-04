@@ -1886,6 +1886,25 @@ export const adminRouter = createTRPCRouter({
             data: { status: "CREDITED" },
           });
         }
+        // Credited consideration is forgiven debt: without this the booking
+        // stayed on the debtors list and kept being dunned for money the
+        // business explicitly wrote down — the credit note was the ONLY
+        // manual credit lever and it didn't touch the balance.
+        if (invoice.bookingId) {
+          const b = await tx.booking.findUniqueOrThrow({
+            where: { id: invoice.bookingId },
+            select: { balanceDue: true },
+          });
+          await tx.booking.update({
+            where: { id: invoice.bookingId },
+            data: {
+              balanceDue: Math.max(
+                0,
+                Math.round((Number(b.balanceDue) - input.amount) * 100) / 100,
+              ),
+            },
+          });
+        }
         return credit;
       });
 
@@ -1953,6 +1972,24 @@ export const adminRouter = createTRPCRouter({
               issuedById: ctx.user.id,
             },
           });
+          // Voided consideration is no longer owed — same booking write-down
+          // as issueCreditNote, or the debtor list keeps chasing a dead
+          // invoice.
+          if (invoice.bookingId) {
+            const b = await tx.booking.findUniqueOrThrow({
+              where: { id: invoice.bookingId },
+              select: { balanceDue: true },
+            });
+            await tx.booking.update({
+              where: { id: invoice.bookingId },
+              data: {
+                balanceDue: Math.max(
+                  0,
+                  Math.round((Number(b.balanceDue) - remaining) * 100) / 100,
+                ),
+              },
+            });
+          }
         }
         return tx.invoice.update({
           where: { id: invoice.id },
@@ -2074,8 +2111,11 @@ export const adminRouter = createTRPCRouter({
     }),
 
   // Operator-triggered Stripe reconcile (the prod "Refresh from Stripe" button).
+  // advanceCheckpoint:false — a mid-day manual refresh must not move the
+  // NIGHTLY job's high-water mark, or the window between the refresh and
+  // midnight is never re-scanned by the scheduled run.
   refreshStripeReconcile: adminProcedure.mutation(async ({ ctx }) => {
-    const result = await runStripeReconcile();
+    const result = await runStripeReconcile({ advanceCheckpoint: false });
     await writeAudit(ctx.prisma, {
       userId: ctx.session.user.id,
       category: "JOB",
@@ -2086,6 +2126,75 @@ export const adminRouter = createTRPCRouter({
     });
     return result;
   }),
+
+  // Open reconciliation discrepancies (Stripe money with no Payment row, or
+  // Payment rows with no Stripe charge). Previously written by crossCheck
+  // but readable nowhere — a silent leakage queue.
+  listUnmatchedTransactions: adminProcedure
+    .input(
+      z
+        .object({
+          includeResolved: z.boolean().default(false),
+          limit: z.number().int().min(1).max(200).default(100),
+        })
+        .optional(),
+    )
+    .query(({ ctx, input }) =>
+      ctx.prisma.unmatchedTransaction.findMany({
+        where: input?.includeResolved ? {} : { resolvedAt: null },
+        orderBy: { createdAt: "desc" },
+        take: input?.limit ?? 100,
+      }),
+    ),
+
+  resolveUnmatchedTransaction: adminProcedure
+    .input(z.object({ id: z.string(), note: z.string().min(3) }))
+    .mutation(async ({ ctx, input }) => {
+      const row = await ctx.prisma.unmatchedTransaction.update({
+        where: { id: input.id },
+        data: {
+          resolvedAt: new Date(),
+          resolvedById: ctx.session.user.id,
+          resolvedNote: input.note,
+        },
+      });
+      await writeAudit(ctx.prisma, {
+        userId: ctx.session.user.id,
+        category: "MUTATION",
+        action: "reconciliation.unmatched_resolved",
+        entity: "UnmatchedTransaction",
+        entityId: row.id,
+        newData: { source: row.source, externalId: row.externalId, note: input.note },
+      });
+      return row;
+    }),
+
+  // Quarterly BAS lodgement CSV — wires the previously-dead generateBasCsv
+  // so the return stops being assembled by hand each quarter. Returns the
+  // CSV text; the client downloads it as a file.
+  exportBasCsv: adminProcedure
+    .input(
+      z.object({
+        year: z.number().int().min(2020).max(2100),
+        quarter: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const { generateBasCsv, quarterBoundaries } = await import(
+        "@/server/services/gst-bas-export"
+      );
+      const { from, to, label } = quarterBoundaries(input.year, input.quarter);
+      const csv = await generateBasCsv({ from, to, periodLabel: label });
+      await writeAudit(ctx.prisma, {
+        userId: ctx.session.user.id,
+        category: "MUTATION",
+        action: "finance.bas_csv_exported",
+        entity: "Payment",
+        entityId: label,
+        newData: { period: label },
+      });
+      return { filename: `bas-${label}.csv`, csv };
+    }),
 
   // ----- Reports -----
   bookingsByPeriod: adminProcedure

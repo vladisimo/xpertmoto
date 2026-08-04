@@ -14,3 +14,12 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- Matches what prisma/migrations sets up, but ensures it's present from
 -- the start of the DB's life so early migrations succeed cleanly.
 CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+-- timescaledb: intentionally NOT created here. It requires the extension binary
+-- to be loaded via shared_preload_libraries, which only the timescale/timescaledb
+-- Postgres image provides (see docker-compose.yml). The
+-- add_gps51_telemetry_timescale migration runs `CREATE EXTENSION timescaledb`;
+-- that migration — and the VehicleTelemetry hypertable, compression, and
+-- retention policies — will FAIL on a plain Postgres. Prod must run a
+-- Timescale-capable instance (not vanilla RDS). The worker boot check
+-- (assertTelemetryHypertable) alerts if this silently didn't happen.
