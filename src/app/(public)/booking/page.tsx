@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { buildMetadata } from "@/lib/seo/metadata";
@@ -25,29 +26,39 @@ export function generateMetadata(): Promise<Metadata> {
   });
 }
 
-export default async function BookingPage() {
-  // Reading `headers()` opts this route out of build-time prerender, which
-  // satisfies Next 16's guard against `Date.now()` reads in server
-  // components without first touching a dynamic data source — the
-  // in-process flag cache uses `Date.now()` for its TTL math. Compatible
-  // with `nextConfig.cacheComponents`, unlike the `force-dynamic` export.
-  await headers();
-  const flags = await getFeatureFlags(WIZARD_FLAG_KEYS);
+export default function BookingPage() {
   return (
     <>
       {/* M-9/M-11: the wizard steps use <h2> headings, so the page needs a
        *  single screen-reader-only <h1>. sr-only is position:absolute, so it
        *  doesn't disturb the wizard's full-height shell layout. */}
       <h1 className="sr-only">Book your hire</h1>
-      <BookingWizardClient
-        flags={{
-          wizard_mobile_shell: flags.wizard_mobile_shell,
-          wizard_inline_auth: flags.wizard_inline_auth,
-          wizard_intl_licence_flow: flags.wizard_intl_licence_flow,
-          allOAuthProviders: [...OAUTH_PROVIDER_IDS],
-          enabledOAuthProviders: getEnabledOAuthProviders(),
-        }}
-      />
+      <Suspense fallback={null}>
+        <BookingWizardGate />
+      </Suspense>
     </>
+  );
+}
+
+async function BookingWizardGate() {
+  // Reading `headers()` keeps this subtree out of build-time prerender,
+  // which satisfies Next 16's guard against `Date.now()` reads in server
+  // components without first touching a dynamic data source — the
+  // in-process flag cache uses `Date.now()` for its TTL math. It sits in an
+  // async child behind Suspense so the route keeps a prerenderable shell:
+  // unfenced, every `?step=` navigation logs "encountered runtime data
+  // during prerendering or a navigation" and trips the e2e browser guard.
+  await headers();
+  const flags = await getFeatureFlags(WIZARD_FLAG_KEYS);
+  return (
+    <BookingWizardClient
+      flags={{
+        wizard_mobile_shell: flags.wizard_mobile_shell,
+        wizard_inline_auth: flags.wizard_inline_auth,
+        wizard_intl_licence_flow: flags.wizard_intl_licence_flow,
+        allOAuthProviders: [...OAUTH_PROVIDER_IDS],
+        enabledOAuthProviders: getEnabledOAuthProviders(),
+      }}
+    />
   );
 }
