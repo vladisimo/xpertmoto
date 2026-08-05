@@ -16,9 +16,15 @@ test("generateBookingReference matches SCT-YYYYMMDD-XXXXXX", () => {
 });
 
 test("generateBookingReference is collision-resistant across many calls", () => {
+  // 5000 draws from the 32^6 (~1.07e9) same-day pool collide with ~1.2%
+  // probability per run (birthday bound) — demanding zero collisions makes
+  // this test flake about one CI run in 85. Tolerating a single collision
+  // drops the false-failure rate below 1 in 10^4 while still failing
+  // instantly on any regression toward a small pool (the old 4-digit pool
+  // would produce ~1200 collisions here).
   const seen = new Set<string>();
   for (let i = 0; i < 5000; i++) {
     seen.add(generateBookingReference());
   }
-  expect(seen.size).toBe(5000);
+  expect(seen.size).toBeGreaterThanOrEqual(4999);
 });
