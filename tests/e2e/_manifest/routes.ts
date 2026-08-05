@@ -260,6 +260,20 @@ export const ADMIN_DYNAMIC: readonly DynamicRoute[] = [
     resolve: async () => "/staff/ai-insights",
   },
   {
+    // MANAGER_PLUS staff route — nomination.* procedures are manager-gated
+    // and the page bounces STAFF back to /staff/fleet, so sweep the real tab
+    // content under the SUPER_ADMIN session instead.
+    name: "/staff/fleet/nominations (MANAGER_PLUS)",
+    resolve: async () => "/staff/fleet/nominations",
+  },
+  {
+    // MANAGER_PLUS staff route — linkt.* procedures are manager-gated and the
+    // page bounces STAFF back to /staff/fleet, so sweep the real tab content
+    // under the SUPER_ADMIN session instead.
+    name: "/staff/fleet/tolls (MANAGER_PLUS)",
+    resolve: async () => "/staff/fleet/tolls",
+  },
+  {
     name: "/admin/ai-insights/[id]",
     // Insights are computed on the fly (no Insight model); the listing page is
     // swept statically and there is no stable id to deep-link. Skip.

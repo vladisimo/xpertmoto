@@ -28,10 +28,15 @@ export class BookingWizard {
     await expect(this.page).toHaveURL(/\/booking\?step=\d/);
   }
 
-  /** Accessible-name regex for a calendar day ("June 15th, 2026"). */
+  /**
+   * Accessible-name regex for a calendar day. The picker's custom a11y
+   * labels are day-first en-AU with an availability suffix, e.g.
+   * "Monday 17 August 2026, available" — match on the date portion only
+   * (the leading \b stops "7 August" from matching inside "17 August").
+   */
   private dayName(d: Date): RegExp {
     const month = d.toLocaleString("en-AU", { month: "long" });
-    return new RegExp(`${month} ${d.getDate()}(st|nd|rd|th), ${d.getFullYear()}`);
+    return new RegExp(`\\b${d.getDate()} ${month} ${d.getFullYear()}\\b`);
   }
 
   /**
@@ -40,6 +45,14 @@ export class BookingWizard {
    * is disabled (depot closed), slides forward up to 3 days.
    */
   async selectDates(pickupInDays: number, durationDays: number): Promise<{ pickup: Date; ret: Date }> {
+    // Day cells render enabled/disabled from depot data — wait for the grid
+    // to hydrate before probing candidates (slow CI runners lag here).
+    await this.page
+      .getByRole("grid")
+      .first()
+      .getByRole("button")
+      .first()
+      .waitFor({ timeout: 15_000 });
     const clickFirstEnabled = async (start: Date): Promise<Date> => {
       for (let slide = 0; slide < 4; slide++) {
         const d = new Date(start);
