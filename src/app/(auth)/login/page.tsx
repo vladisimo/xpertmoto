@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 import { OAUTH_PROVIDER_IDS, getEnabledOAuthProviders } from "@/lib/auth-providers";
@@ -13,7 +14,45 @@ export const metadata: Metadata = {
   description: "Sign in to manage your bookings, complete a hire, or access your account.",
 };
 
-export default async function LoginPage({
+/**
+ * The session redirect and the OAuth SystemSetting are uncached request data;
+ * they live in an async child behind Suspense so the page shell (carousel,
+ * heading) stays prerenderable and navigations to /login stay instant.
+ */
+export default function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string }>;
+}) {
+  return (
+    <div className="relative min-h-screen grid grid-cols-1 md:grid-cols-2">
+      <Image
+        src="/brand/xpert-logo-black.avif"
+        alt="XPERT Moto"
+        width={160}
+        height={40}
+        priority
+        className="pointer-events-none absolute right-6 top-6 z-10 h-10 w-auto sm:right-10 sm:top-10"
+        style={{ width: "auto" }}
+      />
+
+      <aside className="relative hidden overflow-hidden bg-black md:block">
+        <LoginImageCarousel />
+      </aside>
+
+      <main className="flex items-center justify-center p-6 sm:p-10 md:p-12">
+        {/* M-9/M-11: every page needs exactly one <h1>. The visible UI leads
+         *  with the logo + form, so the page heading is screen-reader-only. */}
+        <h1 className="sr-only">Sign in</h1>
+        <Suspense fallback={null}>
+          <LoginGate searchParams={searchParams} />
+        </Suspense>
+      </main>
+    </div>
+  );
+}
+
+async function LoginGate({
   searchParams,
 }: {
   searchParams: Promise<{ callbackUrl?: string }>;
@@ -43,31 +82,10 @@ export default async function LoginPage({
   );
 
   return (
-    <div className="relative min-h-screen grid grid-cols-1 md:grid-cols-2">
-      <Image
-        src="/brand/xpert-logo-black.avif"
-        alt="XPERT Moto"
-        width={160}
-        height={40}
-        priority
-        className="pointer-events-none absolute right-6 top-6 z-10 h-10 w-auto sm:right-10 sm:top-10"
-        style={{ width: "auto" }}
-      />
-
-      <aside className="relative hidden overflow-hidden bg-black md:block">
-        <LoginImageCarousel />
-      </aside>
-
-      <main className="flex items-center justify-center p-6 sm:p-10 md:p-12">
-        {/* M-9/M-11: every page needs exactly one <h1>. The visible UI leads
-         *  with the logo + form, so the page heading is screen-reader-only. */}
-        <h1 className="sr-only">Sign in</h1>
-        <LoginForm
-          allProviders={[...OAUTH_PROVIDER_IDS]}
-          enabledProviders={enabledProviders}
-          oauthAllowedForBackOffice={oauthAllowedForBackOffice}
-        />
-      </main>
-    </div>
+    <LoginForm
+      allProviders={[...OAUTH_PROVIDER_IDS]}
+      enabledProviders={enabledProviders}
+      oauthAllowedForBackOffice={oauthAllowedForBackOffice}
+    />
   );
 }

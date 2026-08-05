@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { auth } from "@/lib/auth";
 import { PageHeader } from "@/components/layout/page-header";
 import { PageShell } from "@/components/layout/page-section";
@@ -13,15 +14,18 @@ const ADMIN_ROLES = new Set(["ADMIN", "SUPER_ADMIN"]);
  * lg:hidden tab strip. The `[id]` customer-detail route lives OUTSIDE this
  * `(section)` route group, so it keeps its own entity header instead of this
  * section bar.
+ *
+ * The session read lives in an async child behind Suspense so the shell
+ * stays prerenderable — an unfenced `auth()` here blocks instant navigation
+ * for every customers tab and trips the e2e browser guard.
  */
-export default async function CustomersSectionLayout({
+function Shell({
+  isAdmin,
   children,
 }: {
+  isAdmin: boolean;
   children: React.ReactNode;
 }) {
-  const session = await auth();
-  const isAdmin = ADMIN_ROLES.has(session?.user?.role ?? "");
-
   return (
     <SectionShell section="customers" isAdmin={isAdmin}>
       <PageShell full>
@@ -36,4 +40,22 @@ export default async function CustomersSectionLayout({
       </PageShell>
     </SectionShell>
   );
+}
+
+export default function CustomersSectionLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <Suspense fallback={<Shell isAdmin={false}>{null}</Shell>}>
+      <ShellWithRole>{children}</ShellWithRole>
+    </Suspense>
+  );
+}
+
+async function ShellWithRole({ children }: { children: React.ReactNode }) {
+  const session = await auth();
+  const isAdmin = ADMIN_ROLES.has(session?.user?.role ?? "");
+  return <Shell isAdmin={isAdmin}>{children}</Shell>;
 }

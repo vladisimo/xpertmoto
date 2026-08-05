@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -6,8 +7,9 @@ import { requireFullSession } from "@/lib/auth-step-up";
 import { getBranding } from "@/lib/branding";
 import { Card, CardContent } from "@/components/ui/card";
 import type { UserRole } from "@prisma/client";
+import type { Metadata } from "next";
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "Choose portal",
 };
 
@@ -46,7 +48,22 @@ function buildTiles(role: UserRole): Tile[] {
   return tiles;
 }
 
-export default async function PortalSelectPage() {
+/**
+ * The session + branding reads are uncached request data; they live in an
+ * async child behind Suspense so the route stays prerenderable and
+ * navigations here stay instant.
+ */
+export default function PortalSelectPage() {
+  return (
+    <main className="relative min-h-screen bg-background">
+      <Suspense fallback={null}>
+        <PortalSelectContent />
+      </Suspense>
+    </main>
+  );
+}
+
+async function PortalSelectContent() {
   const session = await requireFullSession({ pathname: "/portal-select" });
   const { role } = session.user;
   const hasCustomer = session.hasCustomerProfile === true;
@@ -66,7 +83,7 @@ export default async function PortalSelectPage() {
   const tiles = buildTiles(role);
 
   return (
-    <main className="relative min-h-screen bg-background">
+    <>
       <Image
         src="/brand/xpert-logo-black.avif"
         alt={branding.siteName}
@@ -123,6 +140,6 @@ export default async function PortalSelectPage() {
           </Link>
         </p>
       </div>
-    </main>
+    </>
   );
 }

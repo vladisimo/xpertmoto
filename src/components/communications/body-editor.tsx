@@ -201,7 +201,11 @@ function PreviewPane({
               "mt-1 h-80 w-full rounded-md border border-border bg-white",
             )}
             srcDoc={wrapForPreview(body)}
-            sandbox=""
+            // allow-same-origin (without allow-scripts) keeps scripts blocked
+            // but gives the srcdoc a real origin — an opaque origin can't load
+            // same-host images through our Cross-Origin-Resource-Policy:
+            // same-origin response header.
+            sandbox="allow-same-origin"
             loading="lazy"
             referrerPolicy="no-referrer"
           />

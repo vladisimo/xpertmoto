@@ -64,7 +64,11 @@ export default async function CodeTemplatePreviewPage({
         <iframe
           title={`${meta.name} email preview`}
           srcDoc={html}
-          sandbox=""
+          // allow-same-origin (without allow-scripts) keeps scripts blocked
+          // but gives the srcdoc a real origin — an opaque origin can't load
+          // same-host images through our Cross-Origin-Resource-Policy:
+          // same-origin response header.
+          sandbox="allow-same-origin"
           className="h-[800px] w-full rounded-md border border-border bg-white"
         />
       </PageSection>
