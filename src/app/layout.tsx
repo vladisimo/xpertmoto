@@ -52,13 +52,14 @@ export async function generateMetadata(): Promise<Metadata> {
       template: `%s · ${branding.siteName}`,
     },
     description,
-    icons: branding.faviconUrl
-      ? {
-          icon: branding.faviconUrl,
-          shortcut: branding.faviconUrl,
-          apple: branding.logoSquareUrl ?? branding.faviconUrl,
-        }
-      : undefined,
+    // `/favicon.ico` always resolves now (the route handler at
+    // src/app/favicon.ico/route.ts serves the branding asset, falling back to
+    // the bundled brand mark), so the link tags are emitted unconditionally.
+    icons: {
+      icon: branding.faviconUrl ?? "/favicon.ico",
+      shortcut: branding.faviconUrl ?? "/favicon.ico",
+      apple: branding.logoSquareUrl ?? branding.faviconUrl ?? "/favicon.ico",
+    },
     // Search Console verification meta tag (only when configured).
     verification: env.GOOGLE_SITE_VERIFICATION
       ? { google: env.GOOGLE_SITE_VERIFICATION }

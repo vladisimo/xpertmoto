@@ -18,14 +18,13 @@ Campaigns/Segments pages (nav/procedure role mismatch), #5 login ignores
 401 probes on every public page view, #19/#20 silent wizard-step clamps,
 #6 duplicate `<main>` landmark after route-group navigation, #7/#10 React
 controlled/uncontrolled warnings, #8 misleading category-capacity fallback,
-#18 `role=tab` without `tabpanel` on URL-driven tab bars, #2 favicon 404
-(set `branding.faviconUrl`), Sentry tunnel `/monitoring` 500s when upstream
-unreachable (should degrade gracefully).
+#18 `role=tab` without `tabpanel` on URL-driven tab bars, Sentry tunnel
+`/monitoring` 500s when upstream unreachable (should degrade gracefully).
 
 | # | Sev | Area | Finding | Status |
 |---|-----|------|---------|--------|
 | 1 | low | public/all pages | Anonymous visitors fire `session.whoAmI` which responds **401** on every public page view — console error + wasted request for every logged-out visitor. Should return `null` for anonymous sessions or not be called without a session. | investigating |
-| 2 | low | public | `/favicon.ico` 404s — no fallback favicon at the root path (browsers request it unconditionally). | investigating |
+| 2 | low | public | `/favicon.ico` 404s — no fallback favicon at the root path (browsers request it unconditionally). Fixed (night NT-005, PR #40): a route handler at [src/app/favicon.ico/route.ts](../src/app/favicon.ico/route.ts) proxies `branding.faviconUrl` when set, else serves the bundled square brand mark — never 404s/500s. | **fixed** |
 | 3 | noise | public | PostHog `config.js` 404s — the `phx_…` project key appears invalid/placeholder in dev; third-party, allowlisted in the e2e guard. | noted |
 | 4 | **high** | booking wizard | **Returning customers with `licenceType=null` profiles were silently hard-stuck at step 4.** `isCustomerComplete()` required `identityPath`, but legacy profiles (saved before `licenceType` existed, and the entire `wizard_intl_licence_flow=off` rollout) never set it — `w.next()` clamped back to step 4 with zero feedback in both review and edit modes (Continue appeared dead; "Save & continue" appeared to succeed then did nothing). Fixed: null `identityPath` now falls back to the validator's documented legacy rule (licence triplet OR passport triplet) in [src/stores/booking-wizard.ts](../src/stores/booking-wizard.ts); unit test updated (it had codified the bug). Verified in-browser: full wizard now completes end-to-end. | **fixed** |
 | 5 | low | booking funnel | `/login?callbackUrl=/booking` ignores the callbackUrl for credentials login — a customer who signs in mid-booking lands on `/dashboard` instead of returning to the wizard (state survives, but they must navigate back manually). | open |
