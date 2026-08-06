@@ -4,6 +4,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Briefcase, ChevronRight, ShieldCheck, User } from "lucide-react";
 import { requireFullSession } from "@/lib/auth-step-up";
+import { resolveCallbackUrl } from "@/components/auth/callback-url";
 import { getBranding } from "@/lib/branding";
 import { Card, CardContent } from "@/components/ui/card";
 import type { UserRole } from "@prisma/client";
@@ -53,30 +54,53 @@ function buildTiles(role: UserRole): Tile[] {
  * async child behind Suspense so the route stays prerenderable and
  * navigations here stay instant.
  */
-export default function PortalSelectPage() {
+export default function PortalSelectPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string | string[] }>;
+}) {
   return (
     <main className="relative min-h-screen bg-background">
       <Suspense fallback={null}>
-        <PortalSelectContent />
+        <PortalSelectContent searchParams={searchParams} />
       </Suspense>
     </main>
   );
 }
 
-async function PortalSelectContent() {
+async function PortalSelectContent({
+  searchParams,
+}: {
+  searchParams: Promise<{ callbackUrl?: string | string[] }>;
+}) {
   const session = await requireFullSession({ pathname: "/portal-select" });
   const { role } = session.user;
   const hasCustomer = session.hasCustomerProfile === true;
+
+  // Deep-link requested at sign-in (frontend-test-findings #5), forwarded
+  // here by the login form because only this server component knows whether
+  // the user is single-portal. Honoured ONLY on the single-portal forwards
+  // below; dual-access users always get the selector — deep-links are
+  // intentionally dropped for them (pinned by the auth-and-portal e2e
+  // spec). resolveCallbackUrl keeps it same-origin; the destination still
+  // enforces its own role / onboarding / 2FA gates server-side.
+  const { callbackUrl } = await searchParams;
+  const requested = Array.isArray(callbackUrl) ? callbackUrl[0] : callbackUrl;
 
   const isBackOffice =
     role === "STAFF" || role === "MANAGER" || role === "ADMIN" || role === "SUPER_ADMIN";
 
   if (!isBackOffice) {
     if (session.requiresOnboarding) redirect("/onboarding");
-    redirect("/dashboard");
+    redirect(resolveCallbackUrl(requested, "/dashboard"));
   }
   if (!hasCustomer) {
-    redirect(role === "ADMIN" || role === "SUPER_ADMIN" ? "/admin/dashboard" : "/staff/dashboard");
+    redirect(
+      resolveCallbackUrl(
+        requested,
+        role === "ADMIN" || role === "SUPER_ADMIN" ? "/admin/dashboard" : "/staff/dashboard",
+      ),
+    );
   }
 
   const branding = await getBranding();

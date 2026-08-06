@@ -13,8 +13,8 @@ test-infra), #14 template preview iframe raw-template flash/ORB (low),
 #11 e2e env sent real email / used real Stripe (test-infra).
 
 **Open, needs decision (highest first):** #13 STAFF sees broken
-Campaigns/Segments pages (nav/procedure role mismatch), #5 login ignores
-`callbackUrl` (booking-funnel friction), #19/#20 silent wizard-step clamps,
+Campaigns/Segments pages (nav/procedure role mismatch), #19/#20 silent
+wizard-step clamps,
 #6 duplicate `<main>` landmark after route-group navigation, #7/#10 React
 controlled/uncontrolled warnings, #8 misleading category-capacity fallback,
 #18 `role=tab` without `tabpanel` on URL-driven tab bars, Sentry tunnel
@@ -26,7 +26,7 @@ controlled/uncontrolled warnings, #8 misleading category-capacity fallback,
 | 2 | low | public | `/favicon.ico` 404s — no fallback favicon at the root path (browsers request it unconditionally). Fixed (night NT-005, PR #40): a route handler at [src/app/favicon.ico/route.ts](../src/app/favicon.ico/route.ts) proxies `branding.faviconUrl` when set, else serves the bundled square brand mark — never 404s/500s. | **fixed** |
 | 3 | noise | public | PostHog `config.js` 404s — the `phx_…` project key appears invalid/placeholder in dev; third-party, allowlisted in the e2e guard. | noted |
 | 4 | **high** | booking wizard | **Returning customers with `licenceType=null` profiles were silently hard-stuck at step 4.** `isCustomerComplete()` required `identityPath`, but legacy profiles (saved before `licenceType` existed, and the entire `wizard_intl_licence_flow=off` rollout) never set it — `w.next()` clamped back to step 4 with zero feedback in both review and edit modes (Continue appeared dead; "Save & continue" appeared to succeed then did nothing). Fixed: null `identityPath` now falls back to the validator's documented legacy rule (licence triplet OR passport triplet) in [src/stores/booking-wizard.ts](../src/stores/booking-wizard.ts); unit test updated (it had codified the bug). Verified in-browser: full wizard now completes end-to-end. | **fixed** |
-| 5 | low | booking funnel | `/login?callbackUrl=/booking` ignores the callbackUrl for credentials login — a customer who signs in mid-booking lands on `/dashboard` instead of returning to the wizard (state survives, but they must navigate back manually). | open |
+| 5 | low | booking funnel | `/login?callbackUrl=/booking` ignores the callbackUrl for credentials login — a customer who signs in mid-booking lands on `/dashboard` instead of returning to the wizard (state survives, but they must navigate back manually). Fixed (night NT-007 PR #42 + option-1 rework): the login form forwards a `resolveCallbackUrl`-validated deep-link to `/portal-select`, which honours it only on its single-portal forwards — a mid-booking customer returns to the wizard, while dual-access users still always get the selector (deep-links intentionally dropped there, per the pinned auth-and-portal spec). | **fixed** |
 | 6 | low | a11y | After client-side nav between route groups (e.g. /booking → /login), the previous route group's `<main>` stays mounted at 0×0 — two `main` landmarks in the DOM (WCAG: one main landmark per page). Likely App Router layout-persistence artifact; needs a hard-nav comparison. | open |
 | 7 | low | booking wizard | React "Select is changing from uncontrolled to controlled" warning when picking dates enables the pickup/return time selects (step 1). Controlled/uncontrolled switch in the time `Select`s. | open |
 | 8 | low | fleet/booking UI | Vehicle cards and confirmation specs show the **category** engine capacity when `VehicleModel.engineCapacityCc` is null (e.g. "660cc" on a 50cc Honda Dio). Real model data mostly avoids it, but the fallback is misleading — prefer hiding the spec when model capacity is unknown. (Seed also leaves `engineCapacityCc` null for all models.) | open |

@@ -103,22 +103,29 @@ export function LoginForm({
   });
 
   function redirectPostLogin() {
-    // `/portal-select` is the default post-login landing — it inspects
+    // `/portal-select` is the universal post-login landing — it inspects
     // role + hasCustomerProfile server-side and either renders the
     // multi-portal selector or redirects straight to the single dashboard
     // the user can access.
     //
-    // A `?callbackUrl=` on the login URL wins over that default: it is set
-    // by the middleware bounce, the 401 handler and the booking wizard's
-    // sign-in links, so honouring it returns a customer who signed in
-    // mid-booking to the wizard instead of stranding them on /dashboard
-    // (wizard state survives in localStorage). Only same-origin relative
-    // paths are accepted; every destination still enforces its own
-    // role / onboarding / 2FA gates server-side.
-    const requested = new URLSearchParams(window.location.search).get(
-      "callbackUrl",
+    // A `?callbackUrl=` on the login URL (set by the middleware bounce, the
+    // 401 handler and the booking wizard's sign-in links) is forwarded to
+    // portal-select rather than navigated to directly: this client can't
+    // see the caller's role, and only the server knows whether the user is
+    // single-portal (deep-link honoured — a customer who signed in
+    // mid-booking returns to the wizard, wizard state survives in
+    // localStorage) or dual-access (deep-link intentionally dropped, the
+    // selector always wins — pinned by the auth-and-portal e2e spec). Only
+    // same-origin relative paths survive resolveCallbackUrl, and every
+    // destination still enforces its own role / onboarding / 2FA gates
+    // server-side.
+    const requested = resolveCallbackUrl(
+      new URLSearchParams(window.location.search).get("callbackUrl"),
+      "",
     );
-    window.location.href = resolveCallbackUrl(requested, "/portal-select");
+    window.location.href = requested
+      ? `/portal-select?callbackUrl=${encodeURIComponent(requested)}`
+      : "/portal-select";
   }
 
   async function onSubmit(values: LoginInput) {
