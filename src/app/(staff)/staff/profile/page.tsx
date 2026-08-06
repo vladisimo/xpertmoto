@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
@@ -23,7 +24,27 @@ function getInitials(firstName: string, lastName: string, email: string): string
   return (email[0] ?? "U").toUpperCase();
 }
 
-export default async function StaffProfilePage() {
+// Sync page + async content behind Suspense: the session + profile reads stay
+// fenced so prefetch/navigation validation never sees an unfenced runtime read.
+export default function StaffProfilePage() {
+  return (
+    <PageShell className="max-w-3xl">
+      <Suspense
+        fallback={
+          <div aria-busy="true" className="space-y-4">
+            <div className="h-7 w-56 animate-pulse rounded-md bg-muted" />
+            <div className="h-4 w-80 animate-pulse rounded bg-muted" />
+            <div className="mt-4 h-72 animate-pulse rounded-lg bg-muted/60" />
+          </div>
+        }
+      >
+        <ProfileContent />
+      </Suspense>
+    </PageShell>
+  );
+}
+
+async function ProfileContent() {
   const session = await auth();
   const user = await prisma.user.findUnique({
     where: { id: session!.user.id },
@@ -45,7 +66,7 @@ export default async function StaffProfilePage() {
   const hasPassword = !!user.passwordHash;
 
   return (
-    <PageShell className="max-w-3xl">
+    <>
       <PageHeader
         eyebrow={`${roleLabel}${user.depot?.name ? ` · ${user.depot.name}` : ""}`}
         title="My Profile"
@@ -90,6 +111,6 @@ export default async function StaffProfilePage() {
           </p>
         )}
       </PageSection>
-    </PageShell>
+    </>
   );
 }

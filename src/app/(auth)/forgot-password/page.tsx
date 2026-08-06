@@ -1,18 +1,14 @@
+import { Suspense } from "react";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { LoginImageCarousel } from "../login/login-image-carousel";
 import { ForgotPasswordForm } from "./forgot-password-form";
 
-export default async function ForgotPasswordPage() {
-  const session = await auth();
-  if (session?.user) {
-    const role = session.user.role;
-    if (role === "ADMIN" || role === "SUPER_ADMIN") redirect("/admin/dashboard");
-    if (role === "STAFF" || role === "MANAGER") redirect("/staff/dashboard");
-    redirect("/dashboard");
-  }
-
+// Sync page + async gate behind Suspense (same shape as /login): the static
+// shell prerenders, and the signed-in redirect check never runs as an
+// unfenced runtime read during prefetch/navigation validation.
+export default function ForgotPasswordPage() {
   return (
     <div className="relative min-h-screen grid grid-cols-1 md:grid-cols-2">
       <Image
@@ -30,8 +26,22 @@ export default async function ForgotPasswordPage() {
       </aside>
 
       <main className="flex items-center justify-center p-6 sm:p-10 md:p-12">
-        <ForgotPasswordForm />
+        <Suspense fallback={null}>
+          <ForgotPasswordGate />
+        </Suspense>
       </main>
     </div>
   );
+}
+
+async function ForgotPasswordGate() {
+  const session = await auth();
+  if (session?.user) {
+    const role = session.user.role;
+    if (role === "ADMIN" || role === "SUPER_ADMIN") redirect("/admin/dashboard");
+    if (role === "STAFF" || role === "MANAGER") redirect("/staff/dashboard");
+    redirect("/dashboard");
+  }
+
+  return <ForgotPasswordForm />;
 }

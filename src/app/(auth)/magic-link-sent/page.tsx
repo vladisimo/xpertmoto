@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { BrandLogo } from "@/components/shared/brand-logo";
@@ -12,14 +13,14 @@ import {
 
 type SearchParams = { email?: string | string[] };
 
-export default async function MagicLinkSentPage({
+// Sync page + async child behind Suspense: only the "sent to <email>" line
+// depends on searchParams, so the rest of the card stays prerenderable and
+// prefetch/navigation validation never sees an unfenced runtime read.
+export default function MagicLinkSentPage({
   searchParams,
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  const { email } = await searchParams;
-  const target = Array.isArray(email) ? email[0] : email;
-
   return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-6 p-4">
       <BrandLogo height={36} />
@@ -27,14 +28,9 @@ export default async function MagicLinkSentPage({
         <CardHeader>
           <CardTitle>Check your inbox</CardTitle>
           <CardDescription>
-            {target ? (
-              <>
-                We sent a sign-in link to <strong>{target}</strong>. The link
-                expires in 15 minutes.
-              </>
-            ) : (
-              <>We sent you a sign-in link. It expires in 15 minutes.</>
-            )}
+            <Suspense fallback={<GenericSentLine />}>
+              <SentLine searchParams={searchParams} />
+            </Suspense>
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
@@ -54,5 +50,25 @@ export default async function MagicLinkSentPage({
         </CardFooter>
       </Card>
     </div>
+  );
+}
+
+function GenericSentLine() {
+  return <>We sent you a sign-in link. It expires in 15 minutes.</>;
+}
+
+async function SentLine({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const { email } = await searchParams;
+  const target = Array.isArray(email) ? email[0] : email;
+  if (!target) return <GenericSentLine />;
+  return (
+    <>
+      We sent a sign-in link to <strong>{target}</strong>. The link expires in
+      15 minutes.
+    </>
   );
 }
