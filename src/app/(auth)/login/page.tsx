@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { OAUTH_PROVIDER_IDS, getEnabledOAuthProviders } from "@/lib/auth-providers";
 import { auth } from "@/lib/auth";
 import { getSetting, SETTING_DEFAULTS } from "@/lib/settings";
+import { resolveCallbackUrl } from "@/components/auth/callback-url";
 import { LoginForm } from "./login-form";
 import { LoginImageCarousel } from "./login-image-carousel";
 
@@ -69,7 +70,9 @@ async function LoginGate({
     if (role === "ADMIN" || role === "SUPER_ADMIN") redirect("/admin/dashboard");
     if (role === "STAFF" || role === "MANAGER") redirect("/staff/dashboard");
     const { callbackUrl } = await searchParams;
-    redirect(callbackUrl ?? "/dashboard");
+    // Same-origin relative paths only — the param comes straight off the
+    // URL, so an unchecked redirect here would be an open redirect.
+    redirect(resolveCallbackUrl(callbackUrl, "/dashboard"));
   }
 
   const enabledProviders = getEnabledOAuthProviders();

@@ -22,6 +22,7 @@ import { BrandLogo } from "@/components/shared/brand-logo";
 import { useBranding } from "@/components/shared/branding-provider";
 import { OAuthButtons, type OAuthProviderId } from "@/components/auth/oauth-buttons";
 import { PasswordInput } from "@/components/auth/password-input";
+import { resolveCallbackUrl } from "@/components/auth/callback-url";
 
 const PROVIDER_DISPLAY: Record<OAuthProviderId, string> = {
   google: "Google",
@@ -102,13 +103,22 @@ export function LoginForm({
   });
 
   function redirectPostLogin() {
-    // `/portal-select` is the universal post-login landing — it inspects
+    // `/portal-select` is the default post-login landing — it inspects
     // role + hasCustomerProfile server-side and either renders the
     // multi-portal selector or redirects straight to the single dashboard
-    // the user can access. callbackUrl deep-links are intentionally
-    // dropped here for dual-access users; pure-role users still get
-    // forwarded immediately so they never see the selector.
-    window.location.href = "/portal-select";
+    // the user can access.
+    //
+    // A `?callbackUrl=` on the login URL wins over that default: it is set
+    // by the middleware bounce, the 401 handler and the booking wizard's
+    // sign-in links, so honouring it returns a customer who signed in
+    // mid-booking to the wizard instead of stranding them on /dashboard
+    // (wizard state survives in localStorage). Only same-origin relative
+    // paths are accepted; every destination still enforces its own
+    // role / onboarding / 2FA gates server-side.
+    const requested = new URLSearchParams(window.location.search).get(
+      "callbackUrl",
+    );
+    window.location.href = resolveCallbackUrl(requested, "/portal-select");
   }
 
   async function onSubmit(values: LoginInput) {
@@ -172,10 +182,7 @@ export function LoginForm({
       const requested = new URLSearchParams(window.location.search).get(
         "callbackUrl",
       );
-      const callbackUrl =
-        requested && requested.startsWith("/") && !requested.startsWith("//")
-          ? requested
-          : "/portal-select";
+      const callbackUrl = resolveCallbackUrl(requested, "/portal-select");
       const res = await signIn("nodemailer", {
         email,
         redirect: false,
