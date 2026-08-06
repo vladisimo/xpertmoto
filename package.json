@@ -116,7 +116,7 @@
     "nodemailer": "^9.0.4",
     "openai": "^6.39.0",
     "otpauth": "^9.5.1",
-    "pdf-to-png-converter": "^3.18.0",
+    "pdf-to-png-converter": "^4.2.0",
     "pino": "^10.3.1",
     "playwright": "^1.59.1",
     "qrcode": "^1.5.4",
