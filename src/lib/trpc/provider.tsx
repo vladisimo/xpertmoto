@@ -55,11 +55,14 @@ function handleAuthError(error: unknown) {
 
 function createQueryClient() {
   return new QueryClient({
-    // Ambient probes (e.g. the SentryIdentify/PostHogIdentify `whoAmI` in the
-    // root layout) 401 for anonymous visitors on PUBLIC pages by design —
-    // those must NOT bounce a logged-out browser to /login. Such queries
-    // opt out with `meta: { authOptional: true }`. Mutations are deliberate
-    // user actions, so a 401 there always means "your session expired".
+    // Ambient probes (e.g. the SentryIdentify/PostHogIdentify `whoAmI` in
+    // the root layout) run on PUBLIC pages for anonymous visitors — those
+    // must NOT bounce a logged-out browser to /login, so they opt out with
+    // `meta: { authOptional: true }`. (whoAmI now resolves `null` instead of
+    // 401ing for anonymous sessions, but the opt-out stays: customer.me
+    // still 401s, and any error on an ambient probe means "anonymous", not
+    // "expired".) Mutations are deliberate user actions, so a 401 there
+    // always means "your session expired".
     queryCache: new QueryCache({
       onError: (error, query) => {
         if (query.meta?.authOptional) return;
