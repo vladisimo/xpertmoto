@@ -2,6 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import {
   createTRPCRouter,
+  publicProcedure,
   protectedProcedure,
   adminProcedure,
 } from "../trpc";
@@ -29,11 +30,30 @@ export const sessionRouter = createTRPCRouter({
   // on the NextAuth SessionProvider being mounted. Returns only what a
   // client needs to render role-conditional UI; never leaks session
   // secrets or PII beyond what was already in the JWT.
-  whoAmI: protectedProcedure.query(async ({ ctx }) => ({
-    id: ctx.user.id,
-    role: ctx.user.role,
-    impersonatorId: ctx.session.impersonatorId ?? null,
-  })),
+  //
+  // Deliberately `publicProcedure` returning `T | null`, not
+  // `protectedProcedure`: the SentryIdentify / PostHogIdentify probes in the
+  // root layout fire this on every page view, so under `protectedProcedure`
+  // every anonymous visitor to a public page paid a 401 — a console error
+  // and a wasted round trip. `null` is the honest answer to "who am I?" for
+  // a logged-out browser. Callers still carry `meta: { authOptional: true }`
+  // so the global 401/403 → /login handler in @/lib/trpc/provider stays
+  // opted out if this ever errors for another reason.
+  //
+  // Half-authenticated sessions (pending2fa, requiresOnboarding) read as
+  // null too, so this grants no identity `protectedProcedure` wouldn't have.
+  whoAmI: publicProcedure.query(async ({ ctx }) => {
+    const session = ctx.session;
+    if (!session?.user) return null;
+    if (session.pending2fa === true || session.requiresOnboarding === true) {
+      return null;
+    }
+    return {
+      id: session.user.id,
+      role: session.user.role,
+      impersonatorId: session.impersonatorId ?? null,
+    };
+  }),
 
   // Customer-facing: list my own active sessions (no PII beyond token
   // hash — tokens themselves never leave the server).
