@@ -379,16 +379,19 @@ function TimeField({
     >
       <label className="shrink-0 text-sm font-medium">{label}</label>
       <Select
-        value={time || undefined}
-        // Radix Select's `useControllableState` fires `onValueChange("")`
-        // when `value` transitions from `undefined` to a defined string —
-        // which happens whenever the customer picks a date in the calendar
-        // and the picker writes a default time back into this field.
-        // Forwarding that spurious empty call to the form would clear
-        // pickupDateTime / returnDateTime the moment the user clicked,
-        // which is exactly what made the calendar look unresponsive.
-        // SelectItems only ever carry a real "HH:MM" value, so dropping the
-        // empty payload is safe.
+        // Controlled for the component's whole lifetime. `time` is "" until
+        // a date supplies one, and Radix renders the placeholder for "" just
+        // as it does for `undefined` — but passing `undefined` first made the
+        // Select flip uncontrolled → controlled on the customer's first
+        // calendar click, which logs React's controlled/uncontrolled warning.
+        value={time}
+        // Radix's hidden form-bubble select can still emit `onValueChange("")`
+        // when it syncs a value whose <option> isn't mounted yet (the slot
+        // items only exist while the dropdown is open). Forwarding that empty
+        // payload to the form would clear pickupDateTime / returnDateTime the
+        // moment the user clicked, which is what made the calendar look
+        // unresponsive. SelectItems only ever carry a real "HH:MM" value, so
+        // dropping the empty payload is safe.
         onValueChange={(t) => {
           if (t) onChange(t);
         }}
