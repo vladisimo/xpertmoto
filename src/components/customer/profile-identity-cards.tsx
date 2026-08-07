@@ -111,8 +111,20 @@ export function ProfileIdentityCards({ initial }: Props) {
     },
   });
 
+  // This form posts every field it renders, so a blank passport box is
+  // ambiguous on the wire — the server only removes a stored passport when
+  // asked explicitly. Treat "all three passport fields emptied" as that ask.
+  const hasPassportOnFile = Boolean(
+    initial.passportNumber || initial.passportCountry || initial.passportExpiry,
+  );
+
   async function onSubmit(values: FormValues) {
     setSaveError(null);
+    const passportEmptied =
+      !values.passportNumber?.trim() &&
+      !values.passportCountry?.trim() &&
+      !values.passportExpiry?.trim();
+    const clearPassport = hasPassportOnFile && passportEmptied;
     try {
       await updateProfile.mutateAsync({
         firstName: values.firstName,
@@ -125,9 +137,10 @@ export function ProfileIdentityCards({ initial }: Props) {
           : undefined,
         licenceExpiry: values.licenceExpiry || undefined,
         licenceClass: values.licenceClass,
-        passportNumber: values.passportNumber,
-        passportCountry: values.passportCountry,
-        passportExpiry: values.passportExpiry || undefined,
+        passportNumber: clearPassport ? undefined : values.passportNumber,
+        passportCountry: clearPassport ? undefined : values.passportCountry,
+        passportExpiry: clearPassport ? undefined : values.passportExpiry || undefined,
+        clearPassport: clearPassport || undefined,
         emergencyContactName: values.emergencyContactName,
         emergencyContactPhone: values.emergencyContactPhone,
         companyName: values.companyName || undefined,
@@ -307,6 +320,12 @@ export function ProfileIdentityCards({ initial }: Props) {
 
                   <div className="md:col-span-2">
                     <h4 className="text-sm font-semibold text-muted-foreground">Passport</h4>
+                    {hasPassportOnFile ? (
+                      <p className="text-xs text-muted-foreground">
+                        Clear all three passport fields and save to remove your passport
+                        from your account.
+                      </p>
+                    ) : null}
                   </div>
                   <FormField
                     control={form.control}
