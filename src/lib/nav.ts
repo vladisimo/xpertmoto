@@ -87,6 +87,12 @@ export type BackOfficeNavChild = {
   href: string;
   /** Matches the icon used by the corresponding tab on the destination page. */
   icon: LucideIcon;
+  /**
+   * Set only when the sub-page is gated tighter than its parent section —
+   * i.e. its data procedures reject roles the section itself admits. Omit to
+   * inherit the parent's `allowedRoles`.
+   */
+  allowedRoles?: readonly UserRole[];
 };
 
 export type BackOfficeNavItem = {
@@ -97,8 +103,9 @@ export type BackOfficeNavItem = {
   allowedRoles: readonly UserRole[];
   /**
    * Tabs of the destination page, deep-linked from a hover flyout in the
-   * sidebar. Children inherit the parent's `allowedRoles`. The first child
-   * (the page's default tab) intentionally equals the parent `href`.
+   * sidebar. Children inherit the parent's `allowedRoles` unless they declare
+   * their own. The first child (the page's default tab) intentionally equals
+   * the parent `href`.
    */
   children?: readonly BackOfficeNavChild[];
 };
@@ -146,9 +153,12 @@ export const BACK_OFFICE_NAV: readonly BackOfficeNavItem[] = [
     children: [
       { label: "Log",          href: "/staff/communications",             icon: Inbox },
       { label: "Compose",      href: "/staff/communications/compose",     icon: Send },
-      { label: "Campaigns",    href: "/staff/communications/campaigns",   icon: MessageSquare },
+      // Campaigns and Segments read through `communication.campaignList` /
+      // `communication.segmentList`, both managerProcedure — showing them to
+      // STAFF renders a page that 403s on its own data.
+      { label: "Campaigns",    href: "/staff/communications/campaigns",   icon: MessageSquare, allowedRoles: MANAGER_PLUS },
       { label: "Templates",    href: "/staff/communications/templates",   icon: FileText },
-      { label: "Segments",     href: "/staff/communications/segments",    icon: Target },
+      { label: "Segments",     href: "/staff/communications/segments",    icon: Target,        allowedRoles: MANAGER_PLUS },
       { label: "Preferences",  href: "/staff/communications/preferences", icon: ShieldCheck },
       { label: "Automations",  href: "/staff/communications/automations", icon: Zap },
     ],
@@ -299,6 +309,38 @@ export const CUSTOMER_NAV: readonly CustomerNavItem[] = [
 
 export function canAccess(item: BackOfficeNavItem, role: UserRole | undefined): boolean {
   return !!role && item.allowedRoles.includes(role);
+}
+
+/**
+ * Sub-page role gates keyed by href, derived from the `allowedRoles`
+ * overrides above. Only children gated tighter than their parent appear —
+ * everything else inherits the parent's audience and is absent.
+ */
+const CHILD_ROLE_GATES = new Map<string, readonly UserRole[]>(
+  BACK_OFFICE_NAV.flatMap((item) =>
+    (item.children ?? []).flatMap((child) =>
+      child.allowedRoles ? [[child.href, child.allowedRoles] as const] : [],
+    ),
+  ),
+);
+
+/**
+ * May `role` see the sub-page at `href`? Keyed by route rather than by nav
+ * child so the section top bar — whose own registry is keyed by href — shares
+ * this one declaration instead of restating the gate. Un-gated hrefs inherit
+ * their parent section and are always visible.
+ */
+export function canAccessChildHref(href: string, role: UserRole | undefined): boolean {
+  const gate = CHILD_ROLE_GATES.get(href);
+  return !gate || (!!role && gate.includes(role));
+}
+
+/** The children of `item` that `role` may see. */
+export function visibleChildren(
+  item: BackOfficeNavItem,
+  role: UserRole | undefined,
+): readonly BackOfficeNavChild[] {
+  return item.children?.filter((child) => canAccessChildHref(child.href, role)) ?? [];
 }
 
 export function disabledReason(item: BackOfficeNavItem): string {

@@ -1,5 +1,5 @@
 import { test, expect } from "../_fixtures/test";
-import { BACK_OFFICE_NAV, canAccess } from "@/lib/nav";
+import { BACK_OFFICE_NAV, canAccess, visibleChildren } from "@/lib/nav";
 
 /**
  * The sidebar nav chrome itself — the route sweep deep-links every
@@ -10,8 +10,16 @@ import { BACK_OFFICE_NAV, canAccess } from "@/lib/nav";
 
 test.use({ guardMode: "strict" });
 
+/** Children the STAFF session actually sees — role-gated tabs are filtered out. */
+const STAFF_CHILDREN = new Map(
+  BACK_OFFICE_NAV.map((i) => [i.href, visibleChildren(i, "STAFF")]),
+);
+
 const PARENTS = BACK_OFFICE_NAV.filter(
-  (i) => i.section === "staff" && canAccess(i, "STAFF") && (i.children?.length ?? 0) > 1,
+  (i) =>
+    i.section === "staff" &&
+    canAccess(i, "STAFF") &&
+    (STAFF_CHILDREN.get(i.href)?.length ?? 0) > 1,
 );
 
 test("sidebar flyouts deep-link to their tabs", async ({ page }) => {
@@ -22,7 +30,7 @@ test("sidebar flyouts deep-link to their tabs", async ({ page }) => {
     const link = page.locator(`aside a[href="${parent.href}"]`).first();
     await expect(link, `sidebar link for ${parent.label}`).toBeVisible();
     await link.hover();
-    const child = parent.children![1]!;
+    const child = STAFF_CHILDREN.get(parent.href)![1]!;
     const childLink = page.locator(`a[href="${child.href}"]`).first();
     await expect(childLink, `flyout child "${child.label}" of ${parent.label}`).toBeVisible({
       timeout: 5_000,
