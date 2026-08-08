@@ -12,7 +12,13 @@ import { Label } from "@/components/ui/label";
 import { formatCurrency } from "@/lib/utils";
 import { validateBookingTimes } from "@/lib/validators/booking-times";
 import { DateTimePicker } from "@/components/booking/date-time-picker";
-import { splitLocalDateTime } from "@/lib/booking-time-slots";
+import {
+  combineLocalDateTime,
+  generateTimeSlots,
+  getHoursRowForDate,
+  splitLocalDateTime,
+} from "@/lib/booking-time-slots";
+import type { OperatingHoursRow } from "@/lib/opening-hours";
 
 type CustomerDraft = {
   firstName: string;
@@ -32,21 +38,92 @@ const EMPTY_CUSTOMER: CustomerDraft = {
   licenceState: "QLD",
 };
 
-function toLocalInput(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/** Slot granularity of the sheet's DateTimePicker (its `slotInterval` default). */
+const SLOT_MINUTES = 30;
+/** How far nextOpenSlot looks ahead before giving up (holiday shutdowns). */
+const SEARCH_DAYS = 14;
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+function toLocalDate(d: Date): string {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-function defaultRange(): { pickup: string; ret: string } {
-  const pickup = new Date();
-  pickup.setSeconds(0, 0);
+function toLocalTime(d: Date): string {
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function toLocalInput(d: Date): string {
+  return `${toLocalDate(d)}T${toLocalTime(d)}`;
+}
+
+/**
+ * First bookable slot at or after `now` for a depot with these operating
+ * hours, as a "YYYY-MM-DDTHH:MM" datetime-local string.
+ *
+ * Walks forward day by day through the same `getHoursRowForDate` /
+ * `generateTimeSlots` helpers the DateTimePicker uses, so the answer is
+ * always one of the picker's own options — and therefore always passes
+ * `validateBookingTimes`. Returns null when the depot has no open day in
+ * the window (hours never configured, extended shutdown); the caller then
+ * falls back to a plain clock-based default.
+ *
+ * Wall-clock only: `now` is read through local getters and the result is a
+ * local datetime string, matching how the rest of the sheet maps depot
+ * hours onto datetime-local values.
+ */
+export function nextOpenSlot(
+  hours: OperatingHoursRow[],
+  now: Date,
+  slotInterval: number = SLOT_MINUTES,
+): string | null {
+  if (hours.length === 0 || slotInterval <= 0) return null;
+
+  // Round up to the next slot boundary so the default never lands on a
+  // time the picker doesn't list (otherwise the time select starts empty).
+  const earliest = new Date(now);
+  earliest.setSeconds(0, 0);
+  earliest.setMinutes(
+    Math.ceil(earliest.getMinutes() / slotInterval) * slotInterval,
+  );
+  const earliestTime = toLocalTime(earliest);
+
+  for (let offset = 0; offset < SEARCH_DAYS; offset++) {
+    // Noon, so stepping days can't be swallowed by a DST midnight gap.
+    const day = new Date(
+      earliest.getFullYear(),
+      earliest.getMonth(),
+      earliest.getDate() + offset,
+      12,
+    );
+    const dateStr = toLocalDate(day);
+    const row = getHoursRowForDate(dateStr, hours);
+    if (!row || row.isClosed) continue;
+    const slots = generateTimeSlots(row.openTime, row.closeTime, slotInterval);
+    const slot = offset === 0 ? slots.find((t) => t >= earliestTime) : slots[0];
+    if (slot) return combineLocalDateTime(dateStr, slot);
+  }
+  return null;
+}
+
+function defaultRange(hours?: OperatingHoursRow[]): { pickup: string; ret: string } {
+  const now = new Date();
+  now.setSeconds(0, 0);
   // Snap to the next 30-minute slot so the default lines up with the
   // DateTimePicker's time options (otherwise the time select starts empty).
-  const slotMs = 30 * 60 * 1000;
-  pickup.setTime(Math.ceil(pickup.getTime() / slotMs) * slotMs);
+  const slotMs = SLOT_MINUTES * 60 * 1000;
+  const clockPickup = new Date(Math.ceil(now.getTime() / slotMs) * slotMs);
+  const pickup =
+    (hours ? nextOpenSlot(hours, now) : null) ?? toLocalInput(clockPickup);
+
+  // Keep the one-day default hire; roll forward to the next open slot when
+  // that lands on a closed day or outside hours.
   const ret = new Date(pickup);
   ret.setDate(ret.getDate() + 1);
-  return { pickup: toLocalInput(pickup), ret: toLocalInput(ret) };
+  return {
+    pickup,
+    ret: (hours ? nextOpenSlot(hours, ret) : null) ?? toLocalInput(ret),
+  };
 }
 
 export function WalkInBookingSheet({
@@ -103,6 +180,25 @@ export function WalkInBookingSheet({
     returnDateTime.getTime() > pickupDateTime.getTime();
 
   const selectedDepot = depots?.find((d) => d.id === depotId);
+
+  // Depot hours only arrive with the depot list, i.e. after the first
+  // render's clock-based default. Re-derive the times off the depot's next
+  // open slot each time the sheet opens and whenever the depot changes, so
+  // submit isn't disabled by an out-of-hours default on every walk-in.
+  // Untouched times only — a staff edit always wins. Same
+  // setState-during-render compare pattern as the depot auto-pick above.
+  const [timesTouched, setTimesTouched] = useState(false);
+  const defaultsKey = open ? depotId : null;
+  const [lastDefaultsKey, setLastDefaultsKey] = useState<string | null>(null);
+  if (defaultsKey !== lastDefaultsKey) {
+    setLastDefaultsKey(defaultsKey);
+    if (defaultsKey !== null && !timesTouched) {
+      const fresh = defaultRange(selectedDepot?.operatingHours);
+      setPickupAt(fresh.pickup);
+      setReturnAt(fresh.ret);
+    }
+  }
+
   const hoursIssue = useMemo(() => {
     if (!selectedDepot || !validRange) return null;
     const check = validateBookingTimes({
@@ -169,9 +265,10 @@ export function WalkInBookingSheet({
   }
 
   function resetForm() {
-    const fresh = defaultRange();
+    const fresh = defaultRange(selectedDepot?.operatingHours);
     setPickupAt(fresh.pickup);
     setReturnAt(fresh.ret);
+    setTimesTouched(false);
     setCategoryFilter("");
     setVehicleId("");
     setMethod("CARD");
@@ -450,6 +547,7 @@ export function WalkInBookingSheet({
                   value={pickupAt}
                   onChange={(v) => {
                     setPickupAt(v);
+                    setTimesTouched(true);
                     setVehicleId("");
                   }}
                   depot={selectedDepot ?? null}
@@ -461,6 +559,7 @@ export function WalkInBookingSheet({
                   value={returnAt}
                   onChange={(v) => {
                     setReturnAt(v);
+                    setTimesTouched(true);
                     setVehicleId("");
                   }}
                   depot={selectedDepot ?? null}
