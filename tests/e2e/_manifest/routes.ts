@@ -1,13 +1,14 @@
-import { BACK_OFFICE_NAV, canAccess, type UserRole } from "@/lib/nav";
+import { BACK_OFFICE_NAV, canAccess, visibleChildren, type UserRole } from "@/lib/nav";
 import { e2ePrisma } from "../_fixtures/db";
 
 /**
  * Route manifest for the role-scoped render sweeps. Back-office routes derive
  * from the canonical BACK_OFFICE_NAV (so new nav items are swept automatically,
- * including every `?tab=` flyout child); routes that exist but aren't in the
- * nav are listed explicitly. Dynamic `[id]`/`[slug]` routes resolve a
- * representative id from the seeded e2e database at runtime — a resolver
- * returning null annotate-skips that route rather than failing the sweep.
+ * including every `?tab=` flyout child the swept role can actually see);
+ * routes that exist but aren't in the nav are listed explicitly. Dynamic
+ * `[id]`/`[slug]` routes resolve a representative id from the seeded e2e
+ * database at runtime — a resolver returning null annotate-skips that route
+ * rather than failing the sweep.
  */
 
 export const PUBLIC_ROUTES: readonly string[] = [
@@ -75,7 +76,7 @@ const EXTRA_ADMIN_ROUTES: readonly string[] = [
 
 export function backOfficeRoutes(role: UserRole): string[] {
   const fromNav = BACK_OFFICE_NAV.filter((item) => canAccess(item, role)).flatMap((item) => {
-    const childHrefs = item.children?.map((c) => c.href) ?? [];
+    const childHrefs = visibleChildren(item, role).map((c) => c.href);
     // The first child intentionally duplicates the parent href.
     return [item.href, ...childHrefs.filter((h) => h !== item.href)];
   });
@@ -90,13 +91,12 @@ export function backOfficeRoutes(role: UserRole): string[] {
  * Routes with confirmed open bugs, tracked in docs/frontend-test-findings.md.
  * The sweep marks these test.fixme() so they stay visible in every report
  * without failing the suite; remove the entry when the finding is fixed.
+ *
+ * Currently empty: finding #13's Campaigns/Segments entries came out when the
+ * nav stopped offering those manager-only pages to STAFF — they now leave the
+ * STAFF sweep with the nav and are swept under the admin session instead.
  */
-export const KNOWN_BUG_ROUTES: Readonly<Record<string, string>> = {
-  "/staff/communications/campaigns":
-    "finding #13: nav exposes Campaigns to STAFF but communication.campaignList is managerProcedure → page 403s for staff",
-  "/staff/communications/segments":
-    "finding #13: nav exposes Segments to STAFF but communication.segmentList is managerProcedure → page 403s for staff",
-};
+export const KNOWN_BUG_ROUTES: Readonly<Record<string, string>> = {};
 
 /**
  * Representative dynamic routes, resolved against the seeded e2e DB. Returns
@@ -272,6 +272,19 @@ export const ADMIN_DYNAMIC: readonly DynamicRoute[] = [
     // under the SUPER_ADMIN session instead.
     name: "/staff/fleet/tolls (MANAGER_PLUS)",
     resolve: async () => "/staff/fleet/tolls",
+  },
+  {
+    // MANAGER_PLUS staff route — communication.campaignList is manager-gated,
+    // so the nav hides Campaigns from STAFF and the staff sweep no longer
+    // reaches it. Swept here under the SUPER_ADMIN session instead.
+    name: "/staff/communications/campaigns (MANAGER_PLUS)",
+    resolve: async () => "/staff/communications/campaigns",
+  },
+  {
+    // MANAGER_PLUS staff route — communication.segmentList is manager-gated;
+    // same story as Campaigns above.
+    name: "/staff/communications/segments (MANAGER_PLUS)",
+    resolve: async () => "/staff/communications/segments",
   },
   {
     name: "/admin/ai-insights/[id]",

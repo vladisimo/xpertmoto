@@ -89,6 +89,8 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
+import { canAccessChildHref } from "@/lib/nav";
+import { useBackOfficeRole } from "@/components/layout/back-office-role";
 import { cn } from "@/lib/utils";
 
 export type SectionNavItem = {
@@ -331,10 +333,17 @@ const SECTIONS: Record<SectionKey, SectionDef> = {
 function useSectionState(section: SectionKey, isAdmin: boolean) {
   const def = SECTIONS[section];
   const pathname = usePathname() ?? "";
+  const role = useBackOfficeRole();
 
+  // Two gates, one filtering point for both nav surfaces: the legacy
+  // `adminOnly` flag, plus the per-sub-page role gate declared once in
+  // nav.ts (so a page whose procedures reject a role is never offered to it).
   const items = React.useMemo(
-    () => def.items.filter((i) => isAdmin || !i.adminOnly),
-    [def, isAdmin],
+    () =>
+      def.items.filter(
+        (i) => (isAdmin || !i.adminOnly) && canAccessChildHref(i.href ?? i.key, role),
+      ),
+    [def, isAdmin, role],
   );
 
   // Admin route groups carry the indigo accent; staff carry green. The active

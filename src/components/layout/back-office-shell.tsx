@@ -40,6 +40,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { useBranding } from "@/components/shared/branding-provider";
 import { GlobalSearch } from "@/components/layout/global-search";
+import { BackOfficeRoleProvider } from "@/components/layout/back-office-role";
 
 type BackOfficeUser = {
   name?: string | null;
@@ -742,7 +743,11 @@ export function BackOfficeShell({
                 </div>
               </div>
             ) : null}
-            {children}
+            {/* Publishes the viewer's role to nav chrome rendered by the page
+                itself (the section top bar), which no layout passes it to. */}
+            <BackOfficeRoleProvider role={user.role as UserRole | undefined}>
+              {children}
+            </BackOfficeRoleProvider>
           </main>
         </div>
 
