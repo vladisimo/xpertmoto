@@ -69,6 +69,15 @@ describe("ModelCard content", () => {
     expect(screen.queryByText(/mm$/)).toBeNull();
   });
 
+  it("hides the engine chip when the model has no capacity of its own", () => {
+    // frontend-test-findings #8: the category's coarse figure is never
+    // substituted — the chip just drops out of the glance row.
+    renderCard({ specs: { engineCapacityCc: null, dryWeightKg: 199.5, seatHeightMm: 830 } });
+    expect(screen.queryByText(/cc$/)).toBeNull();
+    expect(screen.getByText("200kg")).toBeDefined();
+    expect(screen.getByText("830mm")).toBeDefined();
+  });
+
   it("links the Book now CTA to the booking href", () => {
     renderCard();
     const cta = screen.getByRole("link", { name: /book now/i });
