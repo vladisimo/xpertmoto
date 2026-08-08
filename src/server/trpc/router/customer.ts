@@ -302,6 +302,8 @@ export const customerRouter = createTRPCRouter({
    *   - licenceNumber / passportNumber go through `writePiiField` (APP-11).
    *   - Date fields (dateOfBirth, licenceExpiry, passportExpiry) accept ISO
    *     strings and are parsed into Date.
+   *   - The passport group (number / country / expiry) is never removed by
+   *     an empty or omitted field — pass `clearPassport: true` instead.
    *   - No image keys here — those go through `uploadIdentityDocument` so
    *     CustomerDocument rows are always the source of truth.
    */
@@ -350,10 +352,16 @@ export const customerRouter = createTRPCRouter({
           .regex(/^[A-Za-z]{2}$/u, "Country must be a 2-letter ISO code")
           .transform((v) => v.toUpperCase())
           .optional(),
-        // Passport triplet — all optional.
+        // Passport triplet — all optional. An empty string means "not
+        // supplied by this form", never "delete": profile forms post every
+        // field they render, so treating "" as a delete silently destroys
+        // verified identity data (and with it LAMS eligibility for
+        // passport-only customers). Removal needs `clearPassport`.
         passportNumber: z.string().optional(),
         passportCountry: z.string().optional(),
         passportExpiry: z.string().optional(),
+        // Explicit "remove my passport" signal — nulls the whole triplet.
+        clearPassport: z.boolean().optional(),
       }),
     )
     .meta(selfAudit)
@@ -365,8 +373,10 @@ export const customerRouter = createTRPCRouter({
         dateOfBirth,
         licenceNumber,
         passportNumber,
+        passportCountry,
         licenceExpiry,
         passportExpiry,
+        clearPassport,
         ...restProfileFields
       } = input;
 
@@ -390,10 +400,8 @@ export const customerRouter = createTRPCRouter({
       }
 
       // Parse date fields explicitly — Prisma @db.Date takes Date objects.
-      for (const [key, raw] of [
-        ["licenceExpiry", licenceExpiry],
-        ["passportExpiry", passportExpiry],
-      ] as const) {
+      // (passportExpiry is handled with the rest of the passport group.)
+      for (const [key, raw] of [["licenceExpiry", licenceExpiry]] as const) {
         if (raw !== undefined) {
           if (raw === "") {
             profileData[key] = null;
@@ -407,11 +415,26 @@ export const customerRouter = createTRPCRouter({
         }
       }
 
-      // Passport number format (PII) — schema-validate before encrypting.
-      if (passportNumber !== undefined) {
-        if (passportNumber === "") {
-          Object.assign(profileData, writePiiField("passportNumber", "passportNumberEnc", null));
-        } else {
+      // Passport group (number + country + expiry) — treated as one unit.
+      // Omitted or blank fields leave the stored values alone; only the
+      // explicit `clearPassport` flag removes them.
+      const passportSupplied =
+        (passportNumber ?? "").trim() !== "" ||
+        (passportCountry ?? "").trim() !== "" ||
+        (passportExpiry ?? "").trim() !== "";
+      if (clearPassport) {
+        if (passportSupplied) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Cannot clear and update the passport in the same request.",
+          });
+        }
+        Object.assign(profileData, writePiiField("passportNumber", "passportNumberEnc", null));
+        profileData.passportCountry = null;
+        profileData.passportExpiry = null;
+      } else {
+        // Passport number format (PII) — schema-validate before encrypting.
+        if (passportNumber !== undefined && passportNumber.trim() !== "") {
           const parsed = passportNumberSchema.safeParse(passportNumber);
           if (!parsed.success) {
             throw new TRPCError({
@@ -423,6 +446,16 @@ export const customerRouter = createTRPCRouter({
             profileData,
             writePiiField("passportNumber", "passportNumberEnc", parsed.data),
           );
+        }
+        if (passportCountry !== undefined && passportCountry.trim() !== "") {
+          profileData.passportCountry = passportCountry.trim();
+        }
+        if (passportExpiry !== undefined && passportExpiry.trim() !== "") {
+          const d = new Date(passportExpiry);
+          if (Number.isNaN(d.getTime())) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid passportExpiry." });
+          }
+          profileData.passportExpiry = d;
         }
       }
 
@@ -508,6 +541,12 @@ export const customerRouter = createTRPCRouter({
       }
 
       const changedFields = [...userFieldsChanging, ...profileFieldsChanging];
+      // `clearPassport` is a command, not a value — spell the resulting
+      // nulls out so the audit diff and the customer email show the
+      // passport going to "(empty)" rather than an opaque flag.
+      const newData: Record<string, unknown> = clearPassport
+        ? { ...input, passportNumber: null, passportCountry: null, passportExpiry: null }
+        : input;
       if (changedFields.length > 0) {
         // Replace the bare auto-audit row (which only carries `newData`)
         // with a manual one that captures the snapshot taken above. The
@@ -529,7 +568,7 @@ export const customerRouter = createTRPCRouter({
           ipAddress: ctx.ipAddress,
           userAgent: ctx.userAgent,
           previousData: previousData ?? undefined,
-          newData: input,
+          newData,
         });
 
         const { getBranding } = await import("@/lib/branding");
@@ -546,7 +585,7 @@ export const customerRouter = createTRPCRouter({
         });
         const changes = buildProfileChangeRows({
           previousData,
-          newData: input as Record<string, unknown>,
+          newData,
           changedFields,
         });
         const html = await renderEmail(

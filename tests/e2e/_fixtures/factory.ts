@@ -58,8 +58,9 @@ export async function createConfirmedBooking(
 ): Promise<FactoryBooking> {
   // Sarah (the customer storage-state user) is licence class C; her LAMS
   // eligibility rides on the seeded passport. Other suite traffic against
-  // the shared user can clear it (updateProfile treats "" as removal) —
-  // reassert the seeded identity so factories are order-independent.
+  // the shared user can still clear it (an explicit clearPassport save, or
+  // a staff edit) — reassert the seeded identity so factories are
+  // order-independent.
   const sarah = await e2ePrisma.user.findUnique({
     where: { email: "sarah.smith@example.com" },
     select: { customerProfile: { select: { id: true, passportNumber: true } } },

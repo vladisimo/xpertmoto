@@ -46,8 +46,8 @@ test("customer cancels a confirmed booking from the detail page", async ({
 }) => {
   test.setTimeout(120_000);
   // Sarah is class C; LAMS eligibility rides on her passport. Other suite
-  // traffic against the shared seed user can clear it (updateProfile treats
-  // "" as "remove my passport") — reassert the seeded state first.
+  // traffic against the shared seed user can still clear it (an explicit
+  // clearPassport save, or a staff edit) — reassert the seeded state first.
   const sarah = await e2ePrisma.user.findUniqueOrThrow({
     where: { email: "sarah.smith@example.com" },
     select: { customerProfile: { select: { id: true, passportNumber: true } } },
