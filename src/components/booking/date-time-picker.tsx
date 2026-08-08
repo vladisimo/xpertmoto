@@ -122,8 +122,16 @@ export function DateTimePicker({
         aria-invalid={rest["aria-invalid"]}
       />
       <Select
-        value={time || undefined}
-        onValueChange={(v) => onChange(combineLocalDateTime(date, v))}
+        // Same controlled-for-life rule as BookingDateRangePicker's TimeField:
+        // "" renders the placeholder exactly like `undefined` would, without
+        // flipping the Select uncontrolled → controlled once a date supplies a
+        // time. The empty-payload guard drops the spurious `onValueChange("")`
+        // Radix's hidden form-bubble select can emit while the slot <option>s
+        // are unmounted — forwarding it would wipe the field.
+        value={time}
+        onValueChange={(v) => {
+          if (v) onChange(combineLocalDateTime(date, v));
+        }}
         disabled={timeDisabled}
       >
         <SelectTrigger aria-invalid={rest["aria-invalid"]} onBlur={onBlur}>
