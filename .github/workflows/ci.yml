@@ -149,7 +149,7 @@ jobs:
       # auth/portal + the stub-Stripe booking funnel. Stripe-real specs are
       # local-only (test:e2e:stripe).
       - run: npm run test:e2e:critical
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-traces
