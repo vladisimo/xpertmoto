@@ -19,7 +19,12 @@ export function StepExtras() {
   useStepContinueAction({
     label: "Continue",
     disabled: false,
-    onClick: () => w.next(),
+    // Block body: `next()` now returns a refusal reason, and the action
+    // signature is `void`. Step 3 can't be refused (reaching it already
+    // satisfies every gate up to step 4), so there's nothing to surface.
+    onClick: () => {
+      w.next();
+    },
   });
 
   // Auto-include required add-ons that haven't been explicitly waived.
