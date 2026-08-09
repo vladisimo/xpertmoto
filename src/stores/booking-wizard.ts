@@ -115,6 +115,30 @@ export type WizardCustomer = {
   emergencyContactPhone: string;
 };
 
+/**
+ * Why the wizard refused to advance. `next()` returns one instead of
+ * clamping in silence: findings #4/#19/#20 were all the same shape — the
+ * step clamp fired, the UI showed nothing, and Continue looked dead.
+ */
+export type AdvanceBlockerCode =
+  | "NOT_HYDRATED"
+  | "SEARCH_INCOMPLETE"
+  | "NO_VEHICLE_CHOICE"
+  | "DETAILS_INCOMPLETE"
+  | "TERMS_NOT_AGREED";
+
+export type AdvanceBlocker = { code: AdvanceBlockerCode; message: string };
+
+const ADVANCE_BLOCKER_MESSAGES: Record<AdvanceBlockerCode, string> = {
+  NOT_HYDRATED: "Just a moment — we're still restoring your booking. Try again in a second.",
+  SEARCH_INCOMPLETE: "Choose a pickup depot, your dates and a category first.",
+  NO_VEHICLE_CHOICE:
+    "Choose a vehicle to continue — or tick “No preference” and we'll allocate one for you.",
+  DETAILS_INCOMPLETE:
+    "We still need a few of your details — check your name, date of birth and ID document before continuing.",
+  TERMS_NOT_AGREED: "Please accept the terms and conditions to continue.",
+};
+
 export type WizardState = {
   step: WizardStep;
   pickupDepotId: string | null;
@@ -151,6 +175,14 @@ export type WizardState = {
    * persisted — belongs in-memory only (functions can't serialise).
    */
   stepContinueAction: WizardContinueAction | null;
+  /**
+   * False until the wizard client's mount reconcile (URL-param seeding +
+   * initial step clamp) has run. Steps disable their Continue CTA while
+   * it's false, so a click landing in that first frame becomes a visible
+   * pending state instead of a silently-clamped no-op (finding #19).
+   * Never persisted — it describes this mount, not the saved cart.
+   */
+  isHydrated: boolean;
 
   setStep: (step: WizardStep) => void;
   /**
@@ -159,7 +191,13 @@ export type WizardState = {
    * reconcile (we use `replaceState` ourselves there, not `pushState`).
    */
   _setStepSilent: (step: WizardStep) => void;
-  next: () => void;
+  /**
+   * Advance one step. Returns `null` when the wizard moved, or the
+   * `AdvanceBlocker` explaining why it didn't — callers that ignore the
+   * return value get exactly the pre-existing behaviour (the clamp still
+   * runs, the same conditions still advance).
+   */
+  next: () => AdvanceBlocker | null;
   back: () => void;
   set: <K extends keyof WizardState>(key: K, value: WizardState[K]) => void;
   setCustomer: (patch: Partial<WizardCustomer>) => void;
@@ -167,6 +205,8 @@ export type WizardState = {
   waiveAddon: (addonId: string) => void;
   unwaiveAddon: (addonId: string) => void;
   setStepContinueAction: (action: WizardContinueAction | null) => void;
+  /** Flip `isHydrated` on. Idempotent; survives `reset()`. */
+  markHydrated: () => void;
   setDraft: (draft: WizardDraft | null) => void;
   reset: () => void;
 };
@@ -285,6 +325,39 @@ export function maxReachableStep(state: WizardState): WizardStep {
   return 6;
 }
 
+/**
+ * Why the wizard won't advance from `from` (defaults to the current
+ * step) — `null` when it will. Pure and state-injectable so the
+ * derivation is unit-testable without a mounted wizard.
+ *
+ * The predicate is exactly the one `setStep()` clamps on, so this only
+ * ever *explains* a refusal; it never changes which advances happen.
+ */
+export function advanceBlocker(
+  state: WizardState,
+  from: WizardStep = state.step,
+): AdvanceBlocker | null {
+  const target = Math.min(6, from + 1) as WizardStep;
+  const max = maxReachableStep(state);
+  if (target <= max) return null;
+  const blocker = (code: AdvanceBlockerCode): AdvanceBlocker => ({
+    code,
+    message: ADVANCE_BLOCKER_MESSAGES[code],
+  });
+  // A refusal before the mount reconcile has run is the one-frame
+  // hydration race (finding #19), not missing input — the customer may
+  // well have entered everything already, so don't blame them for it.
+  if (!state.isHydrated) return blocker("NOT_HYDRATED");
+  // `max` is whatever gate in maxReachableStep() stopped first, which is
+  // a sharper reason than `from`: a step-3 Continue that's refused is
+  // really a step-1/2 input problem. maxReachableStep never returns 3,
+  // and a `max` of 6 can't be blocked (target maxes out at 6).
+  if (max <= 1) return blocker("SEARCH_INCOMPLETE");
+  if (max === 2) return blocker("NO_VEHICLE_CHOICE");
+  if (max <= 4) return blocker("DETAILS_INCOMPLETE");
+  return blocker("TERMS_NOT_AGREED");
+}
+
 const STEP_PARAM = "step";
 
 /**
@@ -325,6 +398,7 @@ export const useBookingWizard = create<WizardState>()(
       signatureDataUrl: null,
       draft: null,
       stepContinueAction: null,
+      isHydrated: false,
 
       setStep: (step) => {
         const clamped = Math.min(step, maxReachableStep(get())) as WizardStep;
@@ -332,7 +406,14 @@ export const useBookingWizard = create<WizardState>()(
         writeStepToUrl(clamped);
       },
       _setStepSilent: (step) => set({ step }),
-      next: () => get().setStep(Math.min(6, get().step + 1) as WizardStep),
+      next: () => {
+        const blocker = advanceBlocker(get());
+        // Route through setStep either way: on a refusal it re-clamps the
+        // step to whatever IS reachable, which is the pre-existing
+        // behaviour. Only the returned reason is new.
+        get().setStep(Math.min(6, get().step + 1) as WizardStep);
+        return blocker;
+      },
       back: () => get().setStep(Math.max(1, get().step - 1) as WizardStep),
       set: (key, value) => set({ [key]: value } as never),
       setCustomer: (patch) => set({ customer: { ...get().customer, ...patch } }),
@@ -359,6 +440,7 @@ export const useBookingWizard = create<WizardState>()(
         });
       },
       setStepContinueAction: (action) => set({ stepContinueAction: action }),
+      markHydrated: () => set({ isHydrated: true }),
       setDraft: (draft) => set({ draft }),
       reset: () =>
         set({
@@ -389,9 +471,11 @@ export const useBookingWizard = create<WizardState>()(
       name: "xpertmoto-booking-wizard",
       // `stepContinueAction` holds a function — exclude it from persistence
       // so we don't serialise an incomplete record and rehydrate with
-      // `onClick` missing.
+      // `onClick` missing. `isHydrated` is per-mount: persisting it would
+      // rehydrate as `true` on the next page load and re-open the very
+      // one-frame race it exists to close.
       partialize: (state) => {
-        const { stepContinueAction: _ignored, ...rest } = state;
+        const { stepContinueAction: _action, isHydrated: _hydrated, ...rest } = state;
         return rest;
       },
     },

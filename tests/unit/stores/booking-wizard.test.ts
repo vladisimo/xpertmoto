@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  advanceBlocker,
   bookingCartSignature,
   flushBookingWizard,
   isCustomerComplete,
@@ -52,6 +53,9 @@ describe("booking wizard store", () => {
     sessionStorage.clear();
     window.history.replaceState({}, "", "/booking");
     useBookingWizard.getState().reset();
+    // reset() deliberately preserves `isHydrated` (it's per-mount, not
+    // part of the cart) — put it back to its fresh-mount value by hand.
+    useBookingWizard.setState({ isHydrated: false });
   });
 
   afterEach(() => {
@@ -386,6 +390,134 @@ describe("booking wizard store", () => {
       useBookingWizard.getState().set("agreedToTerms", true);
       expect(useBookingWizard.getState().signatureDataUrl).toBeNull();
       expect(maxReachableStep(useBookingWizard.getState())).toBe(6);
+    });
+  });
+
+  describe("advanceBlocker()", () => {
+    /** The wizard client marks this once its mount reconcile has run. */
+    const hydrate = () => useBookingWizard.getState().markHydrated();
+
+    it("returns null when the next step is reachable", () => {
+      seedReachable(3);
+      hydrate();
+      useBookingWizard.getState().setStep(2);
+      expect(advanceBlocker(useBookingWizard.getState())).toBeNull();
+    });
+
+    it("blames the search step when depot/dates/category are missing", () => {
+      hydrate();
+      expect(advanceBlocker(useBookingWizard.getState())?.code).toBe("SEARCH_INCOMPLETE");
+    });
+
+    it("step 2 with no vehicle and no 'No preference' reports NO_VEHICLE_CHOICE (#20)", () => {
+      seedReachable(2);
+      hydrate();
+      useBookingWizard.getState().setStep(2);
+      const blocker = advanceBlocker(useBookingWizard.getState());
+      expect(blocker?.code).toBe("NO_VEHICLE_CHOICE");
+      expect(blocker?.message).toMatch(/No preference/);
+    });
+
+    it("ticking 'No preference' clears the step-2 blocker", () => {
+      seedReachable(2);
+      hydrate();
+      useBookingWizard.getState().setStep(2);
+      useBookingWizard.getState().set("noPreference", true);
+      expect(advanceBlocker(useBookingWizard.getState())).toBeNull();
+    });
+
+    it("step 4 with an incomplete profile reports DETAILS_INCOMPLETE (#4's family)", () => {
+      seedReachable(3);
+      hydrate();
+      useBookingWizard.getState().setStep(4);
+      expect(advanceBlocker(useBookingWizard.getState())?.code).toBe("DETAILS_INCOMPLETE");
+    });
+
+    it("step 5 without agreed terms reports TERMS_NOT_AGREED", () => {
+      seedReachable(5);
+      hydrate();
+      useBookingWizard.getState().setStep(5);
+      expect(advanceBlocker(useBookingWizard.getState())?.code).toBe("TERMS_NOT_AGREED");
+    });
+
+    it("names the gate that actually stopped it, not the step asking", () => {
+      // Asking from step 3 while step 2's vehicle decision is unanswered
+      // still points at the vehicle decision.
+      seedReachable(2);
+      hydrate();
+      expect(advanceBlocker(useBookingWizard.getState(), 3)?.code).toBe("NO_VEHICLE_CHOICE");
+    });
+
+    it("reports NOT_HYDRATED before the mount reconcile instead of blaming the customer (#19)", () => {
+      seedReachable(2);
+      // Same state as the NO_VEHICLE_CHOICE case, only un-hydrated: the
+      // one-frame race isn't the customer's missing input.
+      useBookingWizard.getState().setStep(2);
+      const blocker = advanceBlocker(useBookingWizard.getState());
+      expect(blocker?.code).toBe("NOT_HYDRATED");
+      expect(blocker?.message).toBeTruthy();
+
+      hydrate();
+      expect(advanceBlocker(useBookingWizard.getState())?.code).toBe("NO_VEHICLE_CHOICE");
+    });
+
+    it("never reports NOT_HYDRATED for an advance that is allowed anyway", () => {
+      seedReachable(3);
+      useBookingWizard.getState()._setStepSilent(2);
+      expect(useBookingWizard.getState().isHydrated).toBe(false);
+      expect(advanceBlocker(useBookingWizard.getState())).toBeNull();
+    });
+  });
+
+  describe("next() refusal reporting", () => {
+    it("returns null and advances when the step is reachable", () => {
+      seedReachable(3);
+      useBookingWizard.getState().markHydrated();
+      useBookingWizard.getState().setStep(2);
+      expect(useBookingWizard.getState().next()).toBeNull();
+      expect(useBookingWizard.getState().step).toBe(3);
+    });
+
+    it("returns the blocker instead of silently doing nothing", () => {
+      seedReachable(2);
+      useBookingWizard.getState().markHydrated();
+      useBookingWizard.getState().setStep(2);
+      const blocker = useBookingWizard.getState().next();
+      expect(blocker?.code).toBe("NO_VEHICLE_CHOICE");
+      expect(useBookingWizard.getState().step).toBe(2);
+    });
+
+    it("still clamps exactly as before on refusal (rules unchanged)", () => {
+      seedReachable(3);
+      useBookingWizard.getState().markHydrated();
+      useBookingWizard.getState().setStep(4);
+      // Vehicle choice goes away (e.g. sold out and cleared by the picker):
+      // step 4 is no longer reachable, so the refused next() re-clamps down
+      // to step 2 — pre-existing behaviour, now with a reason attached.
+      useBookingWizard.getState().set("preferredVehicleId", null);
+      expect(useBookingWizard.getState().next()?.code).toBe("NO_VEHICLE_CHOICE");
+      expect(useBookingWizard.getState().step).toBe(2);
+    });
+  });
+
+  describe("isHydrated", () => {
+    it("defaults to false and is flipped by markHydrated()", () => {
+      expect(useBookingWizard.getState().isHydrated).toBe(false);
+      useBookingWizard.getState().markHydrated();
+      expect(useBookingWizard.getState().isHydrated).toBe(true);
+    });
+
+    it("survives reset() so a mid-wizard reset can't brick Continue", () => {
+      useBookingWizard.getState().markHydrated();
+      useBookingWizard.getState().reset();
+      expect(useBookingWizard.getState().isHydrated).toBe(true);
+    });
+
+    it("is excluded from persisted localStorage (it describes this mount)", () => {
+      useBookingWizard.getState().markHydrated();
+      const raw = localStorage.getItem("xpertmoto-booking-wizard");
+      expect(raw).not.toBeNull();
+      expect(JSON.parse(raw!).state).not.toHaveProperty("isHydrated");
     });
   });
 

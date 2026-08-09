@@ -336,6 +336,11 @@ export function StepDetails() {
   //   updateProfile before advancing).
   const isUnauthedOrLoading = status === "loading" || !session?.user;
   const continueLabel = mode === "edit" ? "Save & continue" : "Continue";
+  // Finding #19: the wizard's mount reconcile (URL seeding + step clamp)
+  // commits one frame after this UI paints, and an advance in that frame
+  // gets silently clamped. Disabling until it lands makes the race a
+  // visible pending state instead.
+  const continueDisabled = isUnauthedOrLoading || !w.isHydrated;
 
   function handleContinue() {
     if (isUnauthedOrLoading) return;
@@ -355,12 +360,15 @@ export function StepDetails() {
       void form.handleSubmit(onSubmit)();
       return;
     }
-    w.next();
+    // The store can still refuse (finding #4's family: a profile the
+    // review card renders happily but `isCustomerComplete` rejects).
+    // Show the reason rather than appearing dead; clears on success.
+    setSaveError(w.next()?.message ?? null);
   }
 
   useStepContinueAction({
     label: continueLabel,
-    disabled: isUnauthedOrLoading,
+    disabled: continueDisabled,
     pending: updateProfile.isPending,
     onClick: handleContinue,
   });
@@ -470,7 +478,9 @@ export function StepDetails() {
         setSaveError(block);
         return;
       }
-      w.next();
+      // A refused advance after a successful save is the "Save & continue
+      // appeared to work then did nothing" half of finding #4 — say why.
+      setSaveError(w.next()?.message ?? null);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : "Could not save your details.");
     }
@@ -485,6 +495,18 @@ export function StepDetails() {
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
             <span>{eligibilityBlock}</span>
+          </div>
+        )}
+
+        {/* Review mode had no `saveError` outlet at all, so a refused
+            Continue here was invisible (finding #4/#19). */}
+        {saveError && !eligibilityBlock && (
+          <div
+            role="alert"
+            className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+          >
+            <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <span>{saveError}</span>
           </div>
         )}
 
@@ -591,7 +613,9 @@ export function StepDetails() {
         {layout === "desktop" && (
           <div className="flex justify-between">
             <Button type="button" variant="outline" onClick={() => w.back()}>Back</Button>
-            <Button type="button" variant="cta" onClick={handleContinue}>Continue</Button>
+            <Button type="button" variant="cta" disabled={continueDisabled} onClick={handleContinue}>
+              Continue
+            </Button>
           </div>
         )}
       </div>
@@ -1030,7 +1054,7 @@ export function StepDetails() {
         {layout === "desktop" && (
           <div className="flex justify-between">
             <Button type="button" variant="outline" onClick={() => w.back()}>Back</Button>
-            <Button type="submit" variant="cta" disabled={updateProfile.isPending}>
+            <Button type="submit" variant="cta" disabled={updateProfile.isPending || !w.isHydrated}>
               {updateProfile.isPending ? "Saving…" : "Save & continue"}
             </Button>
           </div>

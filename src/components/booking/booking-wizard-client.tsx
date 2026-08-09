@@ -115,6 +115,16 @@ function BookingWizardInner({ flags }: { flags: BookingFlags }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Effects fire in declaration order, so this commits right after the
+  // reconcile above has settled `step` + the seeded params — and it isn't
+  // skipped by any of that effect's early returns. Steps gate their
+  // Continue CTA on the flag, turning the one-frame race (finding #19,
+  // where a click in the pre-reconcile frame was silently clamped) into a
+  // brief disabled state.
+  useEffect(() => {
+    useBookingWizard.getState().markHydrated();
+  }, []);
+
   // Browser back/forward sync: when the user pops the history stack,
   // mirror the new step into the store via the silent setter so we
   // don't re-push another entry.
