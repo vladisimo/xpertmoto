@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -88,6 +88,11 @@ export function FleetTollsTab() {
         onSelect={(id) => setParam("account", id === "all" ? null : id)}
       />
 
+      {/*
+        The panels live inside <Tabs> so each TabsTrigger's aria-controls
+        resolves to a real tabpanel. Radix only renders the selected panel's
+        children, so the inactive tabs' queries still don't fire.
+      */}
       <Tabs value={subTab} onValueChange={(v) => setParam("tollsTab", v)}>
         <TabsList className="w-full justify-start">
           {TOLLS_SUB_TABS.map((t) => (
@@ -101,20 +106,17 @@ export function FleetTollsTab() {
             </TabsTrigger>
           ))}
         </TabsList>
-      </Tabs>
 
-      {subTab === "transactions" && (
-        <TransactionsTab accountId={accountId === "all" ? undefined : accountId} />
-      )}
-      {subTab === "unmatched" && (
-        <UnmatchedTab accountId={accountId === "all" ? undefined : accountId} />
-      )}
-      {subTab === "history" && (
-        <HistoryTab
-          accounts={accounts ?? []}
-          scopedAccount={selectedAccount}
-        />
-      )}
+        <TabsContent value="transactions">
+          <TransactionsTab accountId={accountId === "all" ? undefined : accountId} />
+        </TabsContent>
+        <TabsContent value="unmatched">
+          <UnmatchedTab accountId={accountId === "all" ? undefined : accountId} />
+        </TabsContent>
+        <TabsContent value="history">
+          <HistoryTab accounts={accounts ?? []} scopedAccount={selectedAccount} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

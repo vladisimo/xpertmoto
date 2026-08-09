@@ -5,7 +5,14 @@ import { useMemo, useState } from "react";
 import { AlertTriangle, Code2, Eye, Type } from "lucide-react";
 
 import { Label } from "@/components/ui/label";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  TabsContent,
+  tabsListClassName,
+  tabsTriggerClassName,
+} from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 // Tiptap depends on browser APIs, lazy-load client-side only.
@@ -16,6 +23,15 @@ const WysiwygEditor = dynamic(
 
 export type TemplateFormat = "PLAIN_TEXT" | "HTML";
 export type HtmlSurface = "VISUAL" | "SOURCE";
+
+const FORMAT_OPTIONS = [
+  { value: "PLAIN_TEXT", label: "Plain text", icon: Type },
+  { value: "HTML", label: "HTML", icon: Code2 },
+] as const satisfies ReadonlyArray<{
+  value: TemplateFormat;
+  label: string;
+  icon: typeof Type;
+}>;
 
 export type BodyEditorProps = {
   format: TemplateFormat;
@@ -85,16 +101,33 @@ export function BodyEditor({
       <div className="flex items-center justify-between gap-2">
         <Label>{label}</Label>
         {allowHtml && !htmlOnly && (
-          <Tabs value={format} onValueChange={(v) => onFormatChange(v as TemplateFormat)}>
-            <TabsList className="h-8">
-              <TabsTrigger value="PLAIN_TEXT" className="gap-1.5 text-xs">
-                <Type className="h-3.5 w-3.5" /> Plain text
-              </TabsTrigger>
-              <TabsTrigger value="HTML" className="gap-1.5 text-xs">
-                <Code2 className="h-3.5 w-3.5" /> HTML
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
+          // A segmented control, not a tab interface — it swaps the editor
+          // surface below rather than revealing a tabpanel, so it must not
+          // claim role="tab"/aria-controls. Same classes as the tab strip.
+          <div>
+            <div
+              role="group"
+              aria-label="Body format"
+              className={cn(tabsListClassName, "h-8")}
+            >
+              {FORMAT_OPTIONS.map((option) => {
+                const Icon = option.icon;
+                const selected = format === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={selected}
+                    data-state={selected ? "active" : "inactive"}
+                    onClick={() => onFormatChange(option.value)}
+                    className={cn(tabsTriggerClassName, "gap-1.5 text-xs")}
+                  >
+                    <Icon className="h-3.5 w-3.5" /> {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         )}
       </div>
 

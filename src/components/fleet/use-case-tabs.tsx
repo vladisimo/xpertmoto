@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { tabsListClassName, tabsTriggerClassName } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import {
   ALL_TAB,
   ALL_TAB_LABEL,
@@ -54,30 +55,44 @@ export function UseCaseTabs({ active, includeAll = false, onChange }: UseCaseTab
     });
   }
 
+  const activeSlug = tabToSlug(active);
+  const options: Array<{ slug: string; label: string }> = [
+    ...(includeAll ? [{ slug: ALL_TAB, label: ALL_TAB_LABEL }] : []),
+    ...USE_CASES.map((uc) => ({ slug: USE_CASE_SLUGS[uc], label: USE_CASE_LABELS[uc] })),
+  ];
+
+  // Deliberately NOT a Radix <Tabs>: these buttons filter the grid that sits
+  // beside them (and sync `?use=` on /fleet) — there is no tabpanel for a
+  // `role="tab"` to control, so they are toggle buttons wearing the tab strip's
+  // classes. The outer wrapper stands in for the Tabs root div so the flex
+  // layout the callers rely on is unchanged.
   return (
-    <Tabs value={tabToSlug(active)} onValueChange={handleChange}>
-      <TabsList
-        className="h-auto w-full flex-wrap justify-start gap-x-1 gap-y-0"
+    <div>
+      <div
+        role="group"
+        aria-label="Filter the fleet by use case"
         aria-busy={pending}
-      >
-        {includeAll && (
-          <TabsTrigger
-            value={ALL_TAB}
-            className="px-3 py-2.5 text-sm sm:px-4 sm:py-3"
-          >
-            {ALL_TAB_LABEL}
-          </TabsTrigger>
+        className={cn(
+          tabsListClassName,
+          "h-auto w-full flex-wrap justify-start gap-x-1 gap-y-0",
         )}
-        {USE_CASES.map((uc) => (
-          <TabsTrigger
-            key={uc}
-            value={USE_CASE_SLUGS[uc]}
-            className="px-3 py-2.5 text-sm sm:px-4 sm:py-3"
-          >
-            {USE_CASE_LABELS[uc]}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
+      >
+        {options.map((option) => {
+          const selected = option.slug === activeSlug;
+          return (
+            <button
+              key={option.slug}
+              type="button"
+              aria-pressed={selected}
+              data-state={selected ? "active" : "inactive"}
+              onClick={() => handleChange(option.slug)}
+              className={cn(tabsTriggerClassName, "px-3 py-2.5 text-sm sm:px-4 sm:py-3")}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
