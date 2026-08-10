@@ -21,6 +21,7 @@ vi.mock("@/server/services/audit", () => ({
   skipAutoAudit: vi.fn(),
 }));
 
+import { rateLimit } from "@/lib/rate-limit";
 import { authRouter } from "@/server/trpc/router/auth";
 
 type Over = {
@@ -181,5 +182,146 @@ describe("auth.resendVerification (non-enumerating)", () => {
 
     expect(res).toEqual({ ok: true });
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("auth.requestPasswordReset (non-enumerating)", () => {
+  it("mints a single-use reset token and mails the link for an active account", async () => {
+    const { ctx, prisma } = makeCtx({
+      userFindFirst: { id: "u1", status: "ACTIVE", deletedAt: null },
+    });
+
+    const res = await caller(ctx).requestPasswordReset({ email: "user@example.com" });
+
+    expect(res).toEqual({ ok: true });
+    // Any previous reset token for the address is cleared first — one live
+    // link at a time.
+    expect(prisma.verificationToken.deleteMany).toHaveBeenCalledWith({
+      where: { identifier: "password-reset:user@example.com" },
+    });
+    expect(prisma.verificationToken.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ identifier: "password-reset:user@example.com" }),
+      }),
+    );
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send for an unknown email but still returns ok", async () => {
+    const { ctx, prisma } = makeCtx({ userFindFirst: null });
+
+    const res = await caller(ctx).requestPasswordReset({ email: "nobody@example.com" });
+
+    expect(res).toEqual({ ok: true });
+    expect(prisma.verificationToken.create).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("does not send for a suspended account but still returns ok", async () => {
+    const { ctx } = makeCtx({
+      userFindFirst: { id: "u1", status: "SUSPENDED", deletedAt: null },
+    });
+
+    const res = await caller(ctx).requestPasswordReset({ email: "user@example.com" });
+
+    expect(res).toEqual({ ok: true });
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("auth.resetPassword", () => {
+  const validToken = {
+    token: "reset-tok-123456",
+    identifier: "password-reset:user@example.com",
+    expires: new Date(Date.now() + 60_000),
+  };
+
+  it("rewrites the hash, clears the lockout, and burns the token", async () => {
+    const { ctx, prisma } = makeCtx({
+      token: validToken,
+      userFindFirst: { id: "u1", status: "ACTIVE", deletedAt: null },
+    });
+
+    const res = await caller(ctx).resetPassword({
+      token: validToken.token,
+      password: "Str0ng!Passw0rd",
+    });
+
+    expect(res).toEqual({ ok: true });
+    const update = prisma.user.update.mock.calls[0]![0]! as {
+      data: { passwordHash: string; failedLoginCount: number; lockedUntil: Date | null };
+    };
+    expect(update.data.passwordHash).toMatch(/^\$2[aby]\$/);
+    expect(update.data.passwordHash).not.toBe("Str0ng!Passw0rd");
+    // A successful reset also releases any brute-force lockout.
+    expect(update.data.failedLoginCount).toBe(0);
+    expect(update.data.lockedUntil).toBeNull();
+    expect(prisma.verificationToken.deleteMany).toHaveBeenCalledWith({
+      where: { identifier: validToken.identifier },
+    });
+  });
+
+  it("rejects a token that isn't a password-reset token", async () => {
+    const { ctx, prisma } = makeCtx({
+      token: { ...validToken, identifier: "email-verify:user@example.com" },
+    });
+
+    await expect(
+      caller(ctx).resetPassword({ token: validToken.token, password: "Str0ng!Passw0rd" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects and clears an expired token", async () => {
+    const { ctx, prisma } = makeCtx({
+      token: { ...validToken, expires: new Date(Date.now() - 60_000) },
+    });
+
+    await expect(
+      caller(ctx).resetPassword({ token: validToken.token, password: "Str0ng!Passw0rd" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(prisma.verificationToken.delete).toHaveBeenCalled();
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to reset a suspended account", async () => {
+    const { ctx, prisma } = makeCtx({
+      token: validToken,
+      userFindFirst: { id: "u1", status: "SUSPENDED", deletedAt: null },
+    });
+
+    await expect(
+      caller(ctx).resetPassword({ token: validToken.token, password: "Str0ng!Passw0rd" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("auth.preauth — login rate limiting", () => {
+  it("meters every attempt by IP at 10 per 15 minutes", async () => {
+    const { ctx } = makeCtx({ userFindFirst: null });
+
+    await caller(ctx).preauth({ email: "user@example.com", password: "whatever" });
+
+    expect(rateLimit).toHaveBeenCalledWith("auth:preauth:ip:127.0.0.1", 10, 15 * 60);
+    // Only the IP bucket is metered. `trpcRateLimit` is registered with
+    // `.use()` ahead of `.input()`, so its `input` is still undefined when
+    // the middleware runs and the `identifier: (_ctx, input) => input?.email`
+    // second bucket never keys. Asserting the observed single call keeps this
+    // test honest; widening the limiter to the email bucket is a change to
+    // `src/server/trpc/trpc.ts` call sites, out of scope here.
+    expect(rateLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns TOO_MANY_REQUESTS once the limiter denies, without touching the DB", async () => {
+    const { ctx, prisma } = makeCtx({
+      userFindFirst: { id: "u1", passwordHash: "$2a$10$hash", status: "ACTIVE" },
+    });
+    vi.mocked(rateLimit).mockResolvedValueOnce({ ok: false, remaining: 0, resetAt: 0 });
+
+    await expect(
+      caller(ctx).preauth({ email: "user@example.com", password: "whatever" }),
+    ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS" });
+    expect(prisma.user.findFirst).not.toHaveBeenCalled();
   });
 });

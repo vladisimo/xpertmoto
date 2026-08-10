@@ -272,19 +272,28 @@ Legend:
 
 | # | Missing feature | Why it's not tested |
 |---|---|---|
-| 1 | Password reset flow | No endpoint exists in `src/server/trpc/router/auth.ts`. Field would be added under `reset: publicProcedure`. |
-| 2 | Magic link sign-in provider | Not configured in `src/lib/auth.ts` NextAuth providers. |
-| 3 | Email verification enforcement | `User.emailVerified` field exists but no check in `authorize()` nor a verification endpoint. |
-| 4 | Phone verification enforcement | `User.phoneVerified` field exists but no verification flow. |
-| 5 | 2FA / TOTP for staff | No schema or code; Phase 6 per CLAUDE.md. |
-| 6 | Login rate-limiting (10 attempts / 15 min) | No attempt counter in `authorize()`. |
-| 7 | Session revocation endpoint | JWT strategy relies on expiry only. |
-| 8 | PHONE / AGENT booking source | Enum value exists in Prisma but no dedicated API. |
-| 9 | Inter-depot transfer order | Post-return relocation works; scheduled transfer workflow missing. |
+| 1 | Phone verification enforcement | `User.phoneVerified` exists (and is cleared on anonymisation) but nothing sets it — no send/confirm-code flow and no check-out gate. |
+| 2 | Session revocation endpoint | JWT strategy relies on expiry only; no admin-side force-logout / token epoch. |
+| 3 | PHONE / AGENT booking source | `BookingSource.PHONE` / `.AGENT` exist in Prisma but no code path writes either. |
+| 4 | Inter-depot transfer order | Post-return relocation works; `TransferOrder` model + scheduler + `vehicle.depotId` flip missing. |
 
 When any of these lands, remove the corresponding `.skip` and replace with a
 real test. The gap stubs live in `tests/unit/_gaps.test.ts` so they surface
 as pending in every `npm test` run.
+
+### Closed gaps (reconciled 2026-08-11, NT-016)
+
+Five rows from the original nine-gap audit describe features that have since
+shipped. Their stubs were deleted and replaced by real tests; the old numbers
+are kept here so earlier references still resolve.
+
+| Old # | Feature | Shipped as | Now covered by |
+|---|---|---|---|
+| 1 | Password reset flow | `auth.requestPasswordReset` + `auth.resetPassword`; `/forgot-password`, `/reset-password` | `tests/unit/trpc/router/auth.test.ts` |
+| 2 | Magic link sign-in provider | NextAuth Nodemailer provider in `src/lib/auth.ts` + `emails/magic-link.tsx` | `tests/unit/lib/auth-signin.test.ts` |
+| 3 | Email verification enforcement | QA Round-2 M4 (`scripts/backfill-email-verified.ts`, `/verify-email`) | `tests/unit/trpc/router/auth.test.ts` |
+| 5 | 2FA / TOTP for staff | `src/server/trpc/router/totp.ts`, step-up gate in `src/lib/auth-step-up.ts` | `tests/unit/lib/totp.test.ts`, `tests/unit/lib/auth-step-up-token.test.ts`, `tests/unit/trpc/router/auth-step-up.test.ts` |
+| 6 | Login rate-limiting (10 / 15 min) | `auth:preauth` bucket + `LOADTEST_RATELIMIT_OFF` kill-switch | `tests/unit/lib/rate-limit.test.ts`, `tests/unit/trpc/router/auth.test.ts` |
 
 ---
 
