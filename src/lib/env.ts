@@ -92,6 +92,12 @@ const envSchema = z
     SENTRY_API_BASE_URL: z.string().url().optional(),
     PLATFORM_SENTRY_STATS_CRON: z.string().optional(),
 
+    // Upload malware scanning. Production rejects any upload no scanner
+    // actually looked at (FILE_SCAN_PROVIDER unset, or the unimplemented
+    // `vt` stub); set this to "1" to accept unscanned uploads anyway — each
+    // one is logged. Read via process.env in `file-scan.ts`.
+    FILE_SCAN_ALLOW_UNSCANNED: z.enum(["0", "1"]).optional(),
+
     // Observability / misc.
     LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).optional(),
     SLOW_QUERY_MS: z.coerce.number().int().positive().optional(),
