@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { trpc } from "@/lib/trpc/client";
+import { useAnalyticsConsent } from "./analytics-consent";
 
 /**
  * Associates the anonymous PostHog browser distinct_id with the signed-in
@@ -19,8 +20,14 @@ import { trpc } from "@/lib/trpc/client";
  * we deliberately do NOT re-send PII from the browser — only the stable id
  * plus role. `window.posthog` is the inline-snippet stub, which queues the
  * call until array.js finishes loading, so firing in an effect is safe.
+ *
+ * Gated on analytics consent: without it the snippet never loads, so this
+ * would be a no-op anyway — the explicit check keeps every capture path
+ * reading the same gate, and re-runs the identify if consent is granted
+ * later in the session.
  */
 export function PostHogIdentify() {
+  const consent = useAnalyticsConsent();
   const { data } = trpc.session.whoAmI.useQuery(undefined, {
     retry: false,
     staleTime: Infinity,
@@ -32,8 +39,9 @@ export function PostHogIdentify() {
     meta: { authOptional: true },
   });
   useEffect(() => {
+    if (consent !== "granted") return;
     if (!data?.id) return;
     window.posthog?.identify(data.id, { role: data.role });
-  }, [data?.id, data?.role]);
+  }, [consent, data?.id, data?.role]);
   return null;
 }

@@ -1,11 +1,38 @@
 "use client";
 
+import { useEffect } from "react";
 import Script from "next/script";
+import { useAnalyticsConsent } from "./analytics-consent";
 
 /**
- * Loads the PostHog browser snippet. Rendered only when browser key is
- * configured (checked server-side by the parent layout). Keys come in as
+ * `window.posthog` is typed in src/types/posthog.d.ts with only the methods
+ * app code calls. The opt-in/opt-out pair lives on the loader stub too (it is
+ * in the snippet's method list below, so calls queue until array.js lands) —
+ * declared here rather than widening the global surface for one call site.
+ */
+type ConsentCapable = {
+  opt_in_capturing?: () => void;
+  opt_out_capturing?: () => void;
+};
+
+function getLoadedPostHog(): ConsentCapable | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.posthog as (NonNullable<Window["posthog"]> & ConsentCapable) | undefined;
+}
+
+/**
+ * Loads the PostHog browser snippet. Rendered only when a browser key is
+ * configured (checked server-side by the parent layout) **and** the visitor
+ * has granted analytics consent (see analytics-consent.ts). Keys come in as
  * props so DB rotations land on the next render, no rebuild needed.
+ *
+ * We gate the loader itself rather than initialising with
+ * `opt_out_capturing_by_default`: `posthog-js` is not a dependency here (the
+ * inline array.js snippet is), so opting out after init would still have
+ * fetched array.js and touched storage. Once the snippet HAS loaded it can no
+ * longer be unloaded, so the effect below falls back to the SDK's opt-out for
+ * a mid-session withdrawal — and opts back in on a re-grant, since
+ * `next/script` de-duplicates by `id` and won't re-run the snippet.
  *
  * Session replay + heatmaps are enabled here. Because the booking wizard and
  * portal render licence numbers, DOB, addresses, signatures and uploaded
@@ -23,7 +50,19 @@ import Script from "next/script";
  * for identified customers (see posthog-identify.tsx).
  */
 export function PostHogProvider({ browserKey, host }: { browserKey: string; host: string }) {
-  if (!browserKey) return null;
+  const consent = useAnalyticsConsent();
+  const granted = consent === "granted";
+
+  useEffect(() => {
+    // No-op on the first grant (the snippet has not run yet) and whenever
+    // analytics never loaded — only a mid-session change finds a live SDK.
+    const posthog = getLoadedPostHog();
+    if (!posthog) return;
+    if (granted) posthog.opt_in_capturing?.();
+    else posthog.opt_out_capturing?.();
+  }, [granted]);
+
+  if (!browserKey || !granted) return null;
   const config = JSON.stringify({
     api_host: host,
     person_profiles: "identified_only",
