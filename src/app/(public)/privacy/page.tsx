@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getBranding } from "@/lib/branding";
 import { buildMetadata } from "@/lib/seo/metadata";
+import { AnalyticsConsentReset } from "@/components/shared/analytics-consent-reset";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { legalName } = await getBranding();
@@ -12,8 +13,8 @@ export async function generateMetadata(): Promise<Metadata> {
   });
 }
 
-const VERSION = "2.0";
-const EFFECTIVE_DATE = "21 April 2026";
+const VERSION = "2.1";
+const EFFECTIVE_DATE = "12 August 2026";
 
 export default async function PrivacyPage() {
   const branding = await getBranding();
@@ -369,11 +370,21 @@ export default async function PrivacyPage() {
 
         <h2 className="h3">Cookies and analytics</h2>
         <p>
-          We use cookies and similar technologies to keep you signed in,
-          remember your booking progress and measure site performance. You
-          can disable cookies in your browser, but some parts of the booking
-          flow may stop working.
+          We use strictly necessary cookies to keep you signed in and remember
+          your booking progress. These are required for the site to work — you
+          can disable cookies in your browser, but parts of the booking flow
+          will stop working.
         </p>
+        <p>
+          Analytics cookies are separate and optional. On your first visit we
+          show a small banner asking whether you consent to them; nothing is
+          loaded and no analytics cookie is set unless you choose
+          &ldquo;Accept analytics&rdquo;. Declining is remembered on your
+          device, and you can change your mind at any time — use the control
+          below to bring the banner back, or clear this site&rsquo;s data in
+          your browser.
+        </p>
+        <AnalyticsConsentReset />
 
         <h2 className="h3">Children</h2>
         <p>
@@ -395,7 +406,12 @@ export default async function PrivacyPage() {
         <h2 className="h3">Version history</h2>
         <ul className="list-disc pl-6">
           <li>
-            <strong>2.0</strong> — {EFFECTIVE_DATE}. Restructured into
+            <strong>2.1</strong> — {EFFECTIVE_DATE}. Split cookies into
+            strictly necessary and optional analytics; analytics now requires
+            your consent and can be withdrawn at any time.
+          </li>
+          <li>
+            <strong>2.0</strong> — 21 April 2026. Restructured into
             thirteen APP-indexed sections; added explicit offshore
             sub-processor list, security control summary, and complaint
             handling timeframe.

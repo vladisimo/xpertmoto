@@ -6,6 +6,7 @@ import { TRPCProvider } from "@/lib/trpc/provider";
 import { SilenceExtensionHydrationWarning } from "@/components/shared/silence-extension-hydration-warning";
 import { PostHogProvider } from "@/components/shared/posthog-provider";
 import { PostHogIdentify } from "@/components/shared/posthog-identify";
+import { AnalyticsConsentBanner } from "@/components/shared/analytics-consent-banner";
 import { WebVitalsReporter } from "@/components/shared/web-vitals-reporter";
 import { SentryIdentify } from "@/components/shared/sentry-identify";
 import { getPostHogPublic } from "@/lib/analytics";
@@ -97,7 +98,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         {/* M-8: only inject the PostHog snippet when a browser key is
          *  configured. With an empty key the snippet still loaded array.js +
          *  /array//config.js and 404'd on every page. Mirrors the existing
-         *  <PostHogIdentify> gating below. */}
+         *  <PostHogIdentify> gating below.
+         *  A key is necessary but not sufficient — each of these three also
+         *  waits on analytics consent client-side (analytics-consent.ts), so
+         *  nothing loads or captures until the banner is accepted. */}
         {posthog.browserKey ? (
           <PostHogProvider browserKey={posthog.browserKey} host={posthog.host} />
         ) : null}
@@ -113,6 +117,10 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <Suspense fallback={null}>
               <SupportWidgetGate />
             </Suspense>
+            {/* One banner for the whole app (public site, portal and
+             *  back-office share this layout), so nobody is asked twice and
+             *  no back-office page gets its own prompt. */}
+            {posthog.browserKey ? <AnalyticsConsentBanner /> : null}
           </BrandingProvider>
         </TRPCProvider>
       </body>
