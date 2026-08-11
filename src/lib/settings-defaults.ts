@@ -122,6 +122,15 @@ export const SETTING_DEFAULTS = {
       WEBHOOK: 365,
     },
   },
+
+  // Privacy — identity-document destruction (APP 11.2). Off and in dry-run by
+  // default: an operator must consciously arm both flags. 2555 days = 7 years,
+  // the Australian financial-records horizon.
+  "privacy.identityRetention": {
+    enabled: false,
+    dryRun: true,
+    retentionDays: 2555,
+  },
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
@@ -201,6 +210,7 @@ export const SETTING_GROUP_FOR: Record<SettingKey, string> = {
   "pricing.durationDiscountEnabled": "pricing",
 
   "audit.retention": "audit",
+  "privacy.identityRetention": "audit",
 };
 
 export const SETTING_DESCRIPTIONS: Partial<Record<SettingKey, string>> = {
@@ -269,6 +279,8 @@ export const SETTING_DESCRIPTIONS: Partial<Record<SettingKey, string>> = {
   "notification.managerDailySummary": "Email the daily operations summary to depot managers.",
 
   "audit.retention": "Per-category audit log retention windows. Disabled means no rows are ever deleted.",
+  "privacy.identityRetention":
+    "Destruction of licence and passport imagery for dormant customers (Australian Privacy Principle 11.2). `retentionDays` is measured from the customer's last booking activity — 2555 days (7 years) matches the financial-records horizon. Only customers with no open booking, no outstanding balance, no held bond, no unsettled payment and no documents awaiting staff verification are ever eligible. Leave `dryRun` on to have the nightly job record what it would destroy without deleting anything.",
 
   "auth.oauthAllowedForBackOffice":
     "Allow staff, managers, and admins to sign in with Google, Apple, Microsoft, or GitHub. When disabled, back-office users are forced through email + password (still subject to the existing TOTP enforcement). Customers are unaffected.",
