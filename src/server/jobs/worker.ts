@@ -47,6 +47,7 @@ import { startXeroSyncScheduler } from "./xero-sync";
 import { startLinktSyncScheduler } from "./linkt-sync";
 import { startNominationDeadlineScheduler } from "./nomination-deadline";
 import { startAuditRetentionScheduler } from "./audit-retention";
+import { startIdentityRetentionScheduler } from "./identity-retention";
 import { startPendingPaymentTtlScheduler } from "./pending-payment-ttl";
 import { startSupportNotifyWorker } from "./support-notify";
 import { startBookingConfirmationNotifyWorker } from "./booking-confirmation-notify";
@@ -180,6 +181,9 @@ async function main() {
   // NSW nomination deadline so ops can submit before the statutory cutoff.
   startNominationDeadlineScheduler();
   startAuditRetentionScheduler();
+  // APP 11.2 — destroy licence/passport imagery for dormant customers.
+  // Setting-gated and dry-run by default; inert until an operator arms it.
+  startIdentityRetentionScheduler();
   startPendingPaymentTtlScheduler();
   startSupportNotifyWorker();
   // Event-driven: confirmBookingPayment enqueues the confirmation email/SMS

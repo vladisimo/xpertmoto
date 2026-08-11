@@ -50,6 +50,7 @@ export type QueueName =
   | "linkt-sync"
   | "nomination-deadline"
   | "audit-retention"
+  | "identity-retention"
   | "pending-payment-ttl"
   | "support-notify"
   | "booking-confirmation-notify"
