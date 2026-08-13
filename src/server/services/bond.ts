@@ -61,7 +61,7 @@ export async function ensureFreshBondHold(
     bookingId: string;
     actorUserId?: string | null;
     minRemainingDays?: number;
-    reason: "check-out" | "rolling-reauth" | "walk-in";
+    reason: "check-out" | "rolling-reauth" | "walk-in" | "theft-suspected";
   },
 ): Promise<EnsureFreshBondHoldResult> {
   const minRemainingDays = args.minRemainingDays ?? 2;
@@ -109,7 +109,7 @@ export async function ensureFreshBondHold(
   const profile = booking.customer?.customerProfile;
   const stripeCustomerId = profile?.stripeCustomerId;
   const paymentMethodId = profile?.defaultStripePaymentMethodId;
-  const holdAmount = ledger
+  const remainingHeld = ledger
     ? Math.max(
         0,
         Number(ledger.heldAmount) -
@@ -117,9 +117,25 @@ export async function ensureFreshBondHold(
           Number(ledger.releasedAmount),
       )
     : bondAmount;
+  // A pre-pickup category amendment can change booking.bondAmount after the
+  // initial hold was authorised. While the hold is still untouched (nothing
+  // captured or released), the booking's CURRENT bondAmount is authoritative:
+  // an undersized hold must not silently survive to check-out, and an
+  // oversized one should shrink. Such a hold is treated as stale below and
+  // re-authorised at the new amount.
+  const resizeTarget =
+    ledger &&
+    Number(ledger.capturedAmount) === 0 &&
+    Number(ledger.releasedAmount) === 0 &&
+    bondAmount > 0 &&
+    Math.abs(Number(ledger.heldAmount) - bondAmount) >= 0.005
+      ? bondAmount
+      : null;
+  const holdAmount = resizeTarget ?? remainingHeld;
   if (holdAmount <= 0) return { ok: true, action: "no_bond" };
 
-  // Freshness check for an existing hold.
+  // Freshness check for an existing hold. A live, young hold at a stale
+  // amount (resizeTarget set) is NOT fresh — it re-authorises below.
   if (ledger?.stripePaymentIntentId) {
     const pi = await retrievePaymentIntent(ledger.stripePaymentIntentId);
     if (pi === null) {
@@ -130,7 +146,7 @@ export async function ensureFreshBondHold(
     const authorizedAt = ledger.authorizedAt ?? ledger.createdAt;
     const ageDays = (Date.now() - authorizedAt.getTime()) / 86_400_000;
     const live = pi.status === "requires_capture";
-    if (live && horizon - ageDays > minRemainingDays) {
+    if (live && horizon - ageDays > minRemainingDays && resizeTarget === null) {
       return { ok: true, action: "fresh" };
     }
   }
@@ -213,6 +229,9 @@ export async function ensureFreshBondHold(
         authorizedAt: new Date(),
         reauthCount: { increment: 1 },
         authHistory: history as Prisma.InputJsonValue,
+        // Resize (category amendment changed booking.bondAmount): the new
+        // PI was authorised for the new amount, so the ledger follows it.
+        ...(resizeTarget !== null ? { heldAmount: holdAmount } : {}),
       },
     });
   } else {

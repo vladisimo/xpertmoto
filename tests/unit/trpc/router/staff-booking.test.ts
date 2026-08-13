@@ -77,6 +77,15 @@ vi.mock("@/server/services/booking-termination", () => ({
   previewLossTermination: (...a: unknown[]) => previewLossTerminationMock(...a),
   terminateBookingForLoss: (...a: unknown[]) => terminateBookingForLossMock(...a),
 }));
+// Category-amendment service (Area 4) — the router tests only cover the
+// role gates + Zod combos; the money mechanics live in
+// tests/unit/services/booking-amend-category.test.ts.
+const previewCategoryAmendmentMock = vi.fn();
+const applyCategoryAmendmentMock = vi.fn();
+vi.mock("@/server/services/booking-amend-category", () => ({
+  previewCategoryAmendment: (...a: unknown[]) => previewCategoryAmendmentMock(...a),
+  applyCategoryAmendment: (...a: unknown[]) => applyCategoryAmendmentMock(...a),
+}));
 // Deterministic settings: defaults unless a test writes into the override
 // map (the real getSettings would read whatever the dev DB holds).
 const settingsOverride: Record<string, unknown> = {};
@@ -935,5 +944,163 @@ describe("staffBooking loss termination (Area 2)", () => {
     expect(terminateBookingForLossMock).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking category amendment (Area 4)", () => {
+  const AMEND_INPUT = {
+    bookingId: "b1",
+    newCategoryId: "cat-new",
+    mode: "CHARGE_DELTA" as const,
+  };
+
+  function makeAmendCtx(role: "STAFF" | "MANAGER") {
+    const prisma = {
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot1" })) },
+      $transaction: vi.fn(),
+    };
+    return {
+      ctx: {
+        prisma,
+        user: { id: "u1", role },
+        session: { user: { id: "u1", role } },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        reqId: "r1",
+        _skipAudit: true,
+      },
+      prisma,
+    };
+  }
+
+  beforeEach(() => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100 });
+    applyCategoryAmendmentMock.mockResolvedValue({
+      bookingId: "b1",
+      direction: "INCREASE",
+      delta: 100,
+    });
+  });
+
+  it("staff may execute a CHARGE_DELTA upgrade; the service gets allowNegativeDelta:false", async () => {
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategory(AMEND_INPUT);
+    expect(res).toMatchObject({ direction: "INCREASE" });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        bookingId: "b1",
+        newCategoryId: "cat-new",
+        mode: "CHARGE_DELTA",
+        actorId: "u1",
+        allowNegativeDelta: false,
+      }),
+    );
+  });
+
+  it("staff CANNOT execute a downgrade (preview delta < 0) — FORBIDDEN, service never runs", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: -80 });
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.amendCategory(AMEND_INPUT)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a goodwill upgrade — FORBIDDEN before any service call", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "SERVICE_RECOVERY",
+        goodwillNote: "fleet swap",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a price override — FORBIDDEN", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        managerDelta: -20,
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("manager may run goodwill and downgrades; allowNegativeDelta:true, no gate preview", async () => {
+    const { ctx, prisma } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.amendCategory({
+      ...AMEND_INPUT,
+      mode: "GOODWILL_FREE_UPGRADE",
+      goodwillReason: "FLEET_REASSIGNMENT",
+      goodwillNote: "original bike written off",
+    });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "FLEET_REASSIGNMENT",
+        goodwillNote: "original bike written off",
+        allowNegativeDelta: true,
+      }),
+    );
+    // The manager path never needs the router-side gate preview.
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("Zod rejects bad mode combos before any service call", async () => {
+    const { ctx } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    // GOODWILL without reason/note.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, mode: "GOODWILL_FREE_UPGRADE" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // OVERRIDE without a delta.
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // CHARGE_DELTA smuggling override/goodwill fields.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, managerDelta: -50 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, goodwillReason: "RETENTION" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("amendCategoryPreview is staff-visible and quote-only", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100, direction: "INCREASE" });
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategoryPreview({
+      bookingId: "b1",
+      newCategoryId: "cat-new",
+    });
+    expect(res).toMatchObject({ delta: 100 });
+    // The mode defaults to CHARGE_DELTA when omitted.
+    expect(previewCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ bookingId: "b1", mode: "CHARGE_DELTA" }),
+    );
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

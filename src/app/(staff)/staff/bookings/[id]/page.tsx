@@ -16,6 +16,7 @@ import { BookingTabActivity } from "@/components/staff/booking-tab-activity";
 import { UnallocatedVehicleBanner } from "@/components/staff/unallocated-vehicle-banner";
 import { PaymentConsole } from "@/components/staff/payment-console";
 import { SwapVehicleButton } from "@/components/staff/swap-vehicle-button";
+import { ChangeCategoryDialog } from "@/components/staff/change-category-dialog";
 import { TerminateForLossDialog } from "@/components/staff/terminate-for-loss-dialog";
 import { BookingSwapHistory } from "@/components/staff/booking-swap-history";
 import { BookingHeaderActions } from "@/components/staff/booking-header-actions";
@@ -203,6 +204,13 @@ export default async function StaffBookingDetail({
           status={b.status}
           hasVehicle={!!b.vehicleId}
           hasPendingSwap={b.swaps.length > 0}
+        />
+        <ChangeCategoryDialog
+          bookingId={b.id}
+          status={b.status}
+          currentCategoryId={b.categoryId}
+          currentCategoryName={b.category.name}
+          canManage={canFetchAuthoritative}
         />
         <TerminateForLossDialog
           bookingId={b.id}

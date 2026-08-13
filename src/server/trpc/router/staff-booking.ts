@@ -63,6 +63,10 @@ import {
   previewLossTermination,
   terminateBookingForLoss,
 } from "@/server/services/booking-termination";
+import {
+  previewCategoryAmendment,
+  applyCategoryAmendment,
+} from "@/server/services/booking-amend-category";
 
 // In-memory rate limiters for the staff resend actions. Module-scope Map —
 // survives across requests in a single Node process. For multi-instance
@@ -76,6 +80,55 @@ const resendConfirmationLastSent = new Map<string, number>();
 /** Per-relation cap on the booking-detail child collections. */
 const DETAIL_CHILD_TAKE = 50;
 const resendInvoiceLastSent = new Map<string, number>();
+
+// Area 4 — counter / pre-pickup category change.
+const amendCategoryModeSchema = z.enum([
+  "CHARGE_DELTA",
+  "GOODWILL_FREE_UPGRADE",
+  "MANAGER_PRICE_OVERRIDE",
+]);
+const goodwillReasonSchema = z.enum([
+  "SERVICE_RECOVERY",
+  "FLEET_REASSIGNMENT",
+  "RETENTION",
+  "OTHER",
+]);
+export const amendCategoryInputSchema = z
+  .object({
+    bookingId: z.string(),
+    newCategoryId: z.string(),
+    mode: amendCategoryModeSchema,
+    /** MANAGER_PRICE_OVERRIDE only: custom delta (negative = refund). */
+    managerDelta: z.number().finite().optional(),
+    overrideReason: z.string().trim().min(3).max(500).optional(),
+    goodwillReason: goodwillReasonSchema.optional(),
+    goodwillNote: z.string().trim().min(3).max(500).optional(),
+  })
+  .superRefine((v, ctx) => {
+    const reject = (path: string, message: string) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    if (v.mode === "GOODWILL_FREE_UPGRADE") {
+      if (!v.goodwillReason) reject("goodwillReason", "A goodwill upgrade needs a reason.");
+      if (!v.goodwillNote) reject("goodwillNote", "A goodwill upgrade needs a short note.");
+      if (v.managerDelta !== undefined)
+        reject("managerDelta", "A goodwill upgrade is always free — no delta allowed.");
+      if (v.overrideReason !== undefined)
+        reject("overrideReason", "overrideReason only applies to MANAGER_PRICE_OVERRIDE.");
+    } else if (v.mode === "MANAGER_PRICE_OVERRIDE") {
+      if (v.managerDelta === undefined)
+        reject("managerDelta", "A price override needs the delta to charge (0 for no charge).");
+      if (!v.overrideReason) reject("overrideReason", "A price override needs a reason.");
+      if (v.goodwillReason !== undefined || v.goodwillNote !== undefined)
+        reject("goodwillReason", "Goodwill fields only apply to GOODWILL_FREE_UPGRADE.");
+    } else {
+      if (v.managerDelta !== undefined)
+        reject("managerDelta", "managerDelta only applies to MANAGER_PRICE_OVERRIDE.");
+      if (v.goodwillReason !== undefined || v.goodwillNote !== undefined)
+        reject("goodwillReason", "Goodwill fields only apply to GOODWILL_FREE_UPGRADE.");
+      if (v.overrideReason !== undefined)
+        reject("overrideReason", "overrideReason only applies to MANAGER_PRICE_OVERRIDE.");
+    }
+  });
 
 export const staffBookingRouter = createTRPCRouter({
   checkoutPrereqs: staffProcedure.query(async ({ ctx }) => {
@@ -1323,6 +1376,68 @@ export const staffBookingRouter = createTRPCRouter({
         },
       });
       return result;
+    }),
+
+  /**
+   * Area 4: read-only preview of a counter / pre-pickup category change.
+   * Returns the quoted delta, eligibility verdict against the new category
+   * and an advisory availability count — the dialog renders these before
+   * Confirm. Quote-only: never mutates, never audits.
+   */
+  amendCategoryPreview: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        newCategoryId: z.string(),
+        mode: amendCategoryModeSchema.default("CHARGE_DELTA"),
+        managerDelta: z.number().finite().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return previewCategoryAmendment(ctx.prisma, input);
+    }),
+
+  /**
+   * Area 4: commit a counter / pre-pickup category change. Role gates mirror
+   * booking-swap's: staff may execute CHARGE_DELTA upgrades (delta >= 0);
+   * a downgrade refund, a goodwill free upgrade and a manager price override
+   * all require MANAGER+. The service re-enforces the downgrade gate via
+   * `allowNegativeDelta` so a delta sign-flip between the gate preview and
+   * the commit can never let staff execute a refund.
+   */
+  amendCategory: staffProcedure
+    .input(amendCategoryInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const isManager = ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role);
+      if (input.mode !== "CHARGE_DELTA" && !isManager) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            input.mode === "GOODWILL_FREE_UPGRADE"
+              ? "A goodwill free upgrade requires a manager."
+              : "A price override requires a manager.",
+        });
+      }
+      if (input.mode === "CHARGE_DELTA" && !isManager) {
+        const gate = await previewCategoryAmendment(ctx.prisma, input);
+        if (gate.delta < 0) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "A category downgrade refund requires a manager.",
+          });
+        }
+      }
+      // The service returns a narrow serialisable summary and writes its own
+      // audit rows (BOOKING_CATEGORY_AMENDED / BOOKING_GOODWILL_UPGRADE).
+      return applyCategoryAmendment(ctx.prisma, {
+        ...input,
+        actorId: ctx.user.id,
+        allowNegativeDelta: isManager,
+        reqId: ctx.reqId,
+      });
     }),
 
   // Live quote for the staff extend-booking flow. Runs the same
