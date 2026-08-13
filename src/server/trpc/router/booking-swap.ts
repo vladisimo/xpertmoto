@@ -7,6 +7,7 @@ import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
 import { isVehicleFree } from "@/server/services/availability";
 import { quoteSwapDelta } from "@/server/services/pricing";
+import { aud, gstFromInclusive, roundCents, toNumber } from "@/lib/money";
 import { refundCharge } from "@/lib/stripe";
 import { renderSwapAgreementPdf } from "@/lib/pdf/swap-agreement";
 import { uploadFile } from "@/lib/storage";
@@ -265,6 +266,9 @@ export const bookingSwapRouter = createTRPCRouter({
       z.object({
         bookingId: z.string(),
         newCategoryId: z.string(),
+        // Vehicle-level pricing (baseRateOverride / model rates / vehicle
+        // tiers) only applies when the candidate is known.
+        incomingVehicleId: z.string().optional(),
         reason: z.enum([
           "UPGRADE",
           "DOWNGRADE",
@@ -279,23 +283,28 @@ export const bookingSwapRouter = createTRPCRouter({
       await assertBookingDepotAccess(ctx, input.bookingId);
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
-        select: { categoryId: true, returnDateTime: true, status: true },
+        select: { categoryId: true, vehicleId: true, returnDateTime: true, status: true },
       });
       const zeroDelta = (NO_DELTA_REASONS as readonly string[]).includes(input.reason);
       const sameCategory = b.categoryId === input.newCategoryId;
+      // UPGRADE/DOWNGRADE carry the vehicle-level rate difference even within
+      // one category; LATERAL keeps the same-category forced zero.
+      const specChange = input.reason === "UPGRADE" || input.reason === "DOWNGRADE";
       const raw = await quoteSwapDelta(ctx.prisma, {
         oldCategoryId: b.categoryId,
         newCategoryId: input.newCategoryId,
+        oldVehicleId: b.vehicleId ?? undefined,
+        newVehicleId: input.incomingVehicleId,
         swapAt: new Date(),
         returnDateTime: b.returnDateTime,
       });
-      if (zeroDelta || sameCategory) {
+      if (zeroDelta || (sameCategory && !specChange)) {
         return {
           ...raw,
           deltaAmount: 0,
           gstAmount: 0,
           direction: "NONE" as const,
-          forcedZero: zeroDelta ? "reason" : sameCategory ? "same-category" : null,
+          forcedZero: zeroDelta ? "reason" : ("same-category" as const),
         };
       }
       return { ...raw, forcedZero: null };
@@ -616,18 +625,6 @@ export const bookingSwapRouter = createTRPCRouter({
           message: "LATERAL swap must stay within the same category.",
         });
       }
-      if (draft.reason === "UPGRADE" && !categoryChanged) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "UPGRADE must change category; use LATERAL for same-category swaps.",
-        });
-      }
-      if (draft.reason === "DOWNGRADE" && !categoryChanged) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "DOWNGRADE must change category.",
-        });
-      }
       if (draft.reason === "ACCIDENT_DAMAGE" && !input.incidentSeverity) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -635,17 +632,30 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      // Re-quote pricing at commit time. Zero out if reason forces it or
-      // if same category. Override is allowed for managers only, within 5¢.
+      // Re-quote pricing at commit time, vehicle-aware: baseRateOverride /
+      // model rates / vehicle-scoped tiers can price two same-category
+      // vehicles differently, so UPGRADE/DOWNGRADE keep the computed delta
+      // even without a category change. LATERAL and the no-delta reasons
+      // stay forced to zero. Override is allowed for managers only, within 5¢.
       const zeroDelta = (NO_DELTA_REASONS as readonly string[]).includes(draft.reason);
+      const specChange = draft.reason === "UPGRADE" || draft.reason === "DOWNGRADE";
       const quote = await quoteSwapDelta(ctx.prisma, {
         oldCategoryId: booking.categoryId,
         newCategoryId: incomingVehicle.categoryId,
+        oldVehicleId: booking.vehicleId,
+        newVehicleId: incomingVehicle.id,
         swapAt: new Date(),
         returnDateTime: booking.returnDateTime,
       });
-      let deltaAmount = zeroDelta || !categoryChanged ? 0 : quote.deltaAmount;
-      let gstAmount = zeroDelta || !categoryChanged ? 0 : quote.gstAmount;
+      const useQuoted = !zeroDelta && (categoryChanged || specChange);
+      let deltaAmount = useQuoted ? quote.deltaAmount : 0;
+      let gstAmount = useQuoted ? quote.gstAmount : 0;
+      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
+        });
+      }
 
       if (input.priceAdjustmentOverride !== undefined) {
         if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
@@ -658,7 +668,7 @@ export const bookingSwapRouter = createTRPCRouter({
           // Manager is setting a different value — accept it explicitly.
           deltaAmount = input.priceAdjustmentOverride;
           // GST: still 1/11 of the absolute delta for display.
-          gstAmount = Math.round((Math.abs(deltaAmount) / 11) * 100) / 100;
+          gstAmount = toNumber(gstFromInclusive(Math.abs(deltaAmount)));
         }
       }
 
@@ -712,6 +722,14 @@ export const bookingSwapRouter = createTRPCRouter({
       // Stripe refund happens BEFORE the DB transaction so a refund
       // failure doesn't leave DB state inconsistent. Charge rows are
       // created PENDING and captured by G5 off-session.
+      //
+      // A downgrade delta offsets the customer's outstanding balance before
+      // any cash moves: the unpaid base is balanceDue minus PENDING raises
+      // (those already belong to the capture sweep — same exclusion as
+      // pickup-remainder). Only the surplus over that debt is refunded via
+      // Stripe. A fully-offset delta is a pure balance write-down — no
+      // Stripe call and no Payment row; the DECREASE adjustment note below
+      // still documents the full delta.
       let refundPaymentData:
         | {
             stripeChargeId: string | null;
@@ -719,43 +737,61 @@ export const bookingSwapRouter = createTRPCRouter({
           }
         | null = null;
       let fallbackToCredit = false;
+      let refundOffset = 0;
+      let refundCash = 0;
       if (direction === "REFUND") {
-        const sourcePayment = booking.payments[0];
-        if (!sourcePayment) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message:
-              "No SUCCEEDED booking payment found to refund against. Contact finance.",
-          });
-        }
-        const chargeAt = sourcePayment.processedAt ?? sourcePayment.createdAt;
-        const daysSince = (Date.now() - chargeAt.getTime()) / (1000 * 60 * 60 * 24);
-        if (daysSince > 180) {
-          fallbackToCredit = true;
-        } else if (Number(sourcePayment.amount) < absDelta - 0.01) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: `Refund A$${absDelta.toFixed(2)} exceeds original charge A$${Number(sourcePayment.amount).toFixed(2)}.`,
-          });
-        } else {
-          try {
-            const res = await refundCharge({
-              paymentIntentId: sourcePayment.stripePaymentIntentId,
-              chargeId: sourcePayment.stripeChargeId,
-              amountCents: Math.round(absDelta * 100),
-              reason: "requested_by_customer",
-              idempotencyKey: `swap-refund-${draft.id}`,
-              metadata: { swapId: draft.id, paymentId: sourcePayment.id, staffId: ctx.user.id },
+        const pendingRaised = await ctx.prisma.payment.aggregate({
+          where: { bookingId: booking.id, status: "PENDING" },
+          _sum: { amount: true },
+        });
+        const unpaidBase = Math.max(
+          0,
+          toNumber(
+            roundCents(
+              aud(booking.balanceDue).minus(aud(Number(pendingRaised._sum.amount ?? 0))),
+            ),
+          ),
+        );
+        refundOffset = Math.min(absDelta, unpaidBase);
+        refundCash = toNumber(roundCents(aud(absDelta).minus(refundOffset)));
+        if (refundCash > 0.005) {
+          const sourcePayment = booking.payments[0];
+          if (!sourcePayment) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message:
+                "No SUCCEEDED booking payment found to refund against. Contact finance.",
             });
-            refundPaymentData = {
-              stripeChargeId: res.id,
-              status: res.status === "succeeded" ? "SUCCEEDED" : "PENDING",
-            };
-          } catch {
-            refundPaymentData = {
-              stripeChargeId: null,
-              status: "FAILED",
-            };
+          }
+          const chargeAt = sourcePayment.processedAt ?? sourcePayment.createdAt;
+          const daysSince = (Date.now() - chargeAt.getTime()) / (1000 * 60 * 60 * 24);
+          if (daysSince > 180) {
+            fallbackToCredit = true;
+          } else if (Number(sourcePayment.amount) < refundCash - 0.01) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Refund A$${refundCash.toFixed(2)} exceeds original charge A$${Number(sourcePayment.amount).toFixed(2)}.`,
+            });
+          } else {
+            try {
+              const res = await refundCharge({
+                paymentIntentId: sourcePayment.stripePaymentIntentId,
+                chargeId: sourcePayment.stripeChargeId,
+                amountCents: Math.round(refundCash * 100),
+                reason: "requested_by_customer",
+                idempotencyKey: `swap-refund-${draft.id}`,
+                metadata: { swapId: draft.id, paymentId: sourcePayment.id, staffId: ctx.user.id },
+              });
+              refundPaymentData = {
+                stripeChargeId: res.id,
+                status: res.status === "succeeded" ? "SUCCEEDED" : "PENDING",
+              };
+            } catch {
+              refundPaymentData = {
+                stripeChargeId: null,
+                status: "FAILED",
+              };
+            }
           }
         }
       }
@@ -877,11 +913,16 @@ export const bookingSwapRouter = createTRPCRouter({
           },
         });
 
-        // 5. Booking vehicle reassignment + booking log + note.
+        // 5. Booking vehicle reassignment + booking log + note. categoryId
+        // follows the incoming vehicle so later consumers (late fees,
+        // extensions, a second swap's quote) price off the category the
+        // customer is actually riding; history stays on the BookingSwap
+        // chain + audit rows.
         await tx.booking.update({
           where: { id: booking.id },
           data: {
             vehicleId: incomingVehicle.id,
+            categoryId: incomingVehicle.categoryId,
             bookingNotes: {
               create: {
                 userId: ctx.user.id,
@@ -991,11 +1032,20 @@ export const bookingSwapRouter = createTRPCRouter({
           // SWAP_ADJUSTMENT is balance-affecting, so its capture decrements
           // balanceDue — without this increment the capture would eat into
           // UNRELATED debt on the booking and silently stop it being dunned.
+          // Totals move with the raise (extend's arithmetic) so a later
+          // re-quote or swap-back prices off the upgraded consideration.
           await tx.booking.update({
             where: { id: booking.id },
-            data: { balanceDue: { increment: absDelta } },
+            data: {
+              balanceDue: { increment: absDelta },
+              totalAmount: { increment: absDelta },
+              gstAmount: { increment: gstAmount },
+            },
           });
         } else if (direction === "REFUND") {
+          // Payment rows only cover the cash slice; the offset slice is a
+          // debt reduction with no ledger row of its own.
+          const cashGst = toNumber(gstFromInclusive(refundCash));
           if (fallbackToCredit) {
             // >180d — record as MANUAL_CREDIT so the ledger reflects
             // intent; manager reconciles via bank transfer.
@@ -1006,8 +1056,8 @@ export const bookingSwapRouter = createTRPCRouter({
                 bookingId: booking.id,
                 type: "MANUAL_CREDIT",
                 method: "BANK_TRANSFER",
-                amount: absDelta,
-                gstAmount,
+                amount: refundCash,
+                gstAmount: cashGst,
                 status: "PENDING",
                 processedById: ctx.user.id,
                 notes: `Swap DOWNGRADE refund >180d: needs manual reconcile via credit note / bank transfer.`,
@@ -1022,8 +1072,8 @@ export const bookingSwapRouter = createTRPCRouter({
                 bookingId: booking.id,
                 type: "REFUND",
                 method: "STRIPE",
-                amount: absDelta,
-                gstAmount,
+                amount: refundCash,
+                gstAmount: cashGst,
                 status: refundPaymentData.status,
                 stripeChargeId: refundPaymentData.stripeChargeId,
                 processedAt: refundPaymentData.status === "SUCCEEDED" ? new Date() : null,
@@ -1037,7 +1087,7 @@ export const bookingSwapRouter = createTRPCRouter({
               const source = booking.payments[0];
               if (source) {
                 const newStatus =
-                  absDelta >= Number(source.amount) - 0.01
+                  refundCash >= Number(source.amount) - 0.01
                     ? "REFUNDED"
                     : "PARTIALLY_REFUNDED";
                 await tx.payment.update({
@@ -1046,6 +1096,27 @@ export const bookingSwapRouter = createTRPCRouter({
                 });
               }
             }
+          }
+          // Ledger write-down: totals drop by the full delta (the reduced
+          // consideration), balanceDue by the offset slice, amountPaid only
+          // by cash that actually left via Stripe — the MANUAL_CREDIT slice
+          // decrements amountPaid at reconcileCreditTransfer instead. A
+          // FAILED Stripe refund leaves the ledger untouched; the manager
+          // notification after the transaction owns the follow-up.
+          if (refundPaymentData?.status !== "FAILED") {
+            await tx.booking.update({
+              where: { id: booking.id },
+              data: {
+                totalAmount: { decrement: absDelta },
+                gstAmount: { decrement: gstAmount },
+                ...(refundOffset > 0.005
+                  ? { balanceDue: { decrement: refundOffset } }
+                  : {}),
+                ...(refundPaymentData?.status === "SUCCEEDED"
+                  ? { amountPaid: { decrement: refundCash } }
+                  : {}),
+              },
+            });
           }
         }
 
@@ -1295,6 +1366,41 @@ export const bookingSwapRouter = createTRPCRouter({
         }
       }
 
+      // A FAILED Stripe refund committed the swap but moved no money and
+      // wrote no ledger decrements — page depot managers so the downgrade
+      // refund is chased manually instead of silently going stale.
+      if (direction === "REFUND" && refundPaymentData?.status === "FAILED") {
+        const managers = await ctx.prisma.user.findMany({
+          where: {
+            role: { in: ["MANAGER", "ADMIN"] },
+            deletedAt: null,
+            OR: [{ depotId: incomingVehicle.depotId }, { depotId: null }],
+          },
+          select: { id: true },
+        });
+        const subject = `Swap refund FAILED on booking ${booking.bookingReference}`;
+        for (const m of managers) {
+          await sendNotification({
+            userId: m.id,
+            type: "BOOKING_MODIFIED",
+            category: "OPERATIONAL",
+            channels: ["IN_APP", "EMAIL"],
+            subject,
+            title: subject,
+            body: `The Stripe refund of A$${refundCash.toFixed(2)} for the ${draft.reason} swap on ${booking.bookingReference} failed. The swap is committed but the customer has NOT been refunded and the booking ledger was not written down — refund manually and reconcile.`,
+            data: {
+              swapId: result.committed.id,
+              bookingId: booking.id,
+              paymentId: result.paymentId,
+              refundCash,
+              reason: draft.reason,
+            },
+            sentById: ctx.user.id,
+            dedupKey: `swap-refund-failed:${result.committed.id}:${m.id}`,
+          });
+        }
+      }
+
       // Customer notification — render the dedicated VehicleSwap email so
       // the customer gets the same branded look as every other booking
       // event. Any GST adjustment note is delivered separately by the
@@ -1439,14 +1545,26 @@ export const bookingSwapRouter = createTRPCRouter({
           message: "Only PENDING MANUAL_CREDIT payments can be reconciled here.",
         });
       }
-      return ctx.prisma.payment.update({
-        where: { id: p.id },
-        data: {
-          status: "SUCCEEDED",
-          processedAt: new Date(),
-          processedById: ctx.user.id,
-          notes: `${p.notes ?? ""}\nReconciled via bank transfer ref ${input.reference} by ${ctx.user.id}.`,
-        },
+      return ctx.prisma.$transaction(async (tx) => {
+        const updated = await tx.payment.update({
+          where: { id: p.id },
+          data: {
+            status: "SUCCEEDED",
+            processedAt: new Date(),
+            processedById: ctx.user.id,
+            notes: `${p.notes ?? ""}\nReconciled via bank transfer ref ${input.reference} by ${ctx.user.id}.`,
+          },
+        });
+        // The credited cash has now actually left via bank transfer — the
+        // booking's paid-to-date drops by it here, not at swap commit
+        // (totals/balance were already written down in confirmSwap).
+        if (p.bookingId) {
+          await tx.booking.update({
+            where: { id: p.bookingId },
+            data: { amountPaid: { decrement: p.amount } },
+          });
+        }
+        return updated;
       });
     }),
 
