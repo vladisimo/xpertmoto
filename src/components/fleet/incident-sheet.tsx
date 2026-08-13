@@ -47,6 +47,8 @@ const schema = z.object({
   estimatedDamageCost: z.coerce.number().min(0).optional(),
   customerLiable: z.boolean().default(false),
   customerChargeAmount: z.coerce.number().min(0).optional(),
+  policeReportNumber: z.string().optional(),
+  insuranceClaimNumber: z.string().optional(),
 });
 type Values = z.infer<typeof schema>;
 
@@ -61,6 +63,8 @@ function defaults(): Values {
     estimatedDamageCost: 0,
     customerLiable: false,
     customerChargeAmount: 0,
+    policeReportNumber: "",
+    insuranceClaimNumber: "",
   };
 }
 
@@ -84,6 +88,11 @@ export function IncidentSheet({
   const initial = (): Values => ({ ...defaults(), vehicleId: vehicleId ?? "" });
   const form = useForm<Values>({ resolver: zodResolver(schema), defaultValues: initial() });
   const customerLiable = form.watch("customerLiable");
+  const incidentType = form.watch("type");
+  // Police report / insurance claim references only make sense for events
+  // with an external paper trail; other types add them later via the
+  // incident detail page if one materialises.
+  const showClaimFields = incidentType === "THEFT" || incidentType === "ACCIDENT";
 
   async function onSubmit(values: Values) {
     await create.mutateAsync({
@@ -97,6 +106,12 @@ export function IncidentSheet({
       customerLiable: values.customerLiable,
       customerChargeAmount: values.customerLiable
         ? values.customerChargeAmount || undefined
+        : undefined,
+      policeReportNumber: showClaimFields
+        ? values.policeReportNumber?.trim() || undefined
+        : undefined,
+      insuranceClaimNumber: showClaimFields
+        ? values.insuranceClaimNumber?.trim() || undefined
         : undefined,
     });
     form.reset(initial());
@@ -237,6 +252,36 @@ export function IncidentSheet({
                     </FormItem>
                   )}
                 />
+                {showClaimFields && (
+                  <>
+                    <FormField
+                      control={form.control}
+                      name="policeReportNumber"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Police report # (optional)</FormLabel>
+                          <FormControl>
+                            <Input placeholder="Event / report number" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="insuranceClaimNumber"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Insurance claim # (optional)</FormLabel>
+                          <FormControl>
+                            <Input placeholder="Insurer claim number" {...field} />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
+                )}
                 <FormField
                   control={form.control}
                   name="estimatedDamageCost"

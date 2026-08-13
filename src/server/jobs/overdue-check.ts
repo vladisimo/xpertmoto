@@ -1,11 +1,13 @@
 import { render } from "@react-email/render";
 import { createElement } from "react";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { formatCurrency } from "@/lib/utils";
 import { BOOKING_RULES } from "@/lib/constants";
 import { getBranding } from "@/lib/branding";
 import { sendNotification } from "@/server/services/notification-sender";
+import { ensureFreshBondHold } from "@/server/services/bond";
 import OverdueNotice from "../../../emails/overdue-notice";
 import { getQueue, monitorCron, registerWorker } from "./queue";
 import { logger } from "@/lib/logger";
@@ -363,12 +365,53 @@ async function stageThreeManagerEscalation(b: CandidateBooking): Promise<void> {
 }
 
 async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
+  // Last known GPS fix (Area 3): snapshotted onto the incident (write-once)
+  // and dropped into an internal note with a maps link so a recovery attempt
+  // can start from the manager page immediately. A vehicle without live
+  // tracking degrades gracefully — the ladder still fires.
+  let livePosition: {
+    deviceId: string;
+    latitude: number;
+    longitude: number;
+    speedKph: number | null;
+    ignitionOn: boolean | null;
+    timestamp: Date;
+  } | null = null;
+  if (b.vehicle) {
+    try {
+      livePosition = await prisma.vehicleLivePosition.findUnique({
+        where: { vehicleId: b.vehicle.id },
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), vehicleId: b.vehicle.id },
+        "overdue-check: live-position lookup failed; incident proceeds without GPS snapshot",
+      );
+    }
+  }
+  const gpsSnapshot = livePosition
+    ? {
+        lat: livePosition.latitude,
+        lng: livePosition.longitude,
+        speedKph: livePosition.speedKph,
+        ignitionOn: livePosition.ignitionOn,
+        timestamp: livePosition.timestamp.toISOString(),
+        deviceId: livePosition.deviceId,
+      }
+    : null;
+  const mapsLink = livePosition
+    ? `https://www.google.com/maps?q=${livePosition.latitude},${livePosition.longitude}`
+    : null;
+  const fixAgeMinutes = livePosition
+    ? Math.max(0, Math.round((Date.now() - livePosition.timestamp.getTime()) / 60000))
+    : null;
+
   await withUniqueRetry(
     () =>
       prisma.$transaction(async (tx) => {
         await tx.booking.update({ where: { id: b.id }, data: { overdueStage: 4 } });
         if (b.vehicle) {
-          await tx.incident.create({
+          const incident = await tx.incident.create({
             data: {
               incidentNumber: generateIncidentNumber("INC-AUTO"),
               vehicleId: b.vehicle.id,
@@ -380,8 +423,29 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
               dateTime: new Date(),
               description: `Automated: vehicle not returned within 72 hours of scheduled return (${b.returnDateTime.toISOString()}). Review and escalate to police report if appropriate.`,
               customerLiable: true,
+              ...(gpsSnapshot
+                ? { gpsSnapshot: gpsSnapshot as Prisma.InputJsonValue }
+                : {}),
             },
           });
+          if (gpsSnapshot && mapsLink) {
+            await tx.incidentNote.create({
+              data: {
+                incidentId: incident.id,
+                userId: b.customer.id,
+                note:
+                  `Automated: last GPS fix at incident creation — ${gpsSnapshot.lat}, ${gpsSnapshot.lng} ` +
+                  `(${fixAgeMinutes} min old${
+                    gpsSnapshot.speedKph != null ? `, ${Math.round(gpsSnapshot.speedKph)} km/h` : ""
+                  }${
+                    gpsSnapshot.ignitionOn != null
+                      ? `, ignition ${gpsSnapshot.ignitionOn ? "ON" : "off"}`
+                      : ""
+                  }). Map: ${mapsLink}`,
+                isInternal: true,
+              },
+            });
+          }
           await recordIncidentForCustomer(tx, b.customer.id);
         }
         await tx.bookingNote.create({
@@ -395,10 +459,38 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
       }),
     { constraintFields: ["incidentNumber"] },
   );
+
+  // Theft-suspected bond re-hold (Area 3): refresh the manual-capture auth
+  // NOW, before the card network lets it lapse, so a later confirmTheft can
+  // still capture. Failure is non-fatal — it rides the manager alert below.
+  let bondAlertLine = "";
+  try {
+    const holdResult = await ensureFreshBondHold(prisma, {
+      bookingId: b.id,
+      reason: "theft-suspected",
+    });
+    if (!holdResult.ok) {
+      bondAlertLine = ` BOND RE-HOLD FAILED (${holdResult.action}) — the hold may lapse before capture; review urgently.`;
+      logger.warn(
+        { bookingId: b.id, action: holdResult.action },
+        "overdue-check: theft-suspected bond re-hold failed",
+      );
+    }
+  } catch (err) {
+    bondAlertLine = " BOND RE-HOLD ERRORED — the hold may lapse before capture; review urgently.";
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
+      "overdue-check: theft-suspected bond re-hold errored",
+    );
+  }
+
+  const fixLine = gpsSnapshot
+    ? ` Last GPS fix: ${gpsSnapshot.lat}, ${gpsSnapshot.lng} (${fixAgeMinutes} min ago) ${mapsLink}.`
+    : " No live GPS fix on record for this vehicle.";
   await notifyManagers(
     b,
     `72h overdue: incident created for ${b.bookingReference}`,
-    `${b.customer.firstName} ${b.customer.lastName}'s vehicle has not been returned for 72+ hours. Incident created — review now.`,
+    `${b.customer.firstName} ${b.customer.lastName}'s vehicle has not been returned for 72+ hours. Incident created — review now.${fixLine}${bondAlertLine}`,
   );
 }
 

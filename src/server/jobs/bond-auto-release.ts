@@ -59,13 +59,37 @@ export async function runBondAutoRelease(): Promise<number> {
         ],
       },
     });
+    // Area 3 guard: an OPEN customer-liable incident (theft, damage claim)
+    // is a live claim on the bond — never release under it. RESOLVED/CLOSED
+    // incidents have finished their money story (the charge path captures
+    // and terminalises the ledger itself).
+    const openIncidents = await prisma.incident.count({
+      where: {
+        bookingId: bond.bookingId,
+        customerLiable: true,
+        deletedAt: null,
+        status: { notIn: ["RESOLVED", "CLOSED"] },
+      },
+    });
     const balanceDue = Number(bond.booking.balanceDue);
-    if (balanceDue > 0.009 || openDamage > 0) {
+    if (balanceDue > 0.009 || openDamage > 0 || openIncidents > 0) {
+      if (openIncidents > 0) {
+        const { logger } = await import("@/lib/logger");
+        logger.info(
+          {
+            bondLedgerId: bond.id,
+            bookingId: bond.bookingId,
+            openIncidents,
+          },
+          "bond-auto-release: release blocked — open customer-liable incident(s) on the booking",
+        );
+      }
       await alertReleaseBlockedOnce(bond.id, {
         bookingId: bond.bookingId,
         bookingReference: bond.booking.bookingReference,
         balanceDue,
         openDamage,
+        openIncidents,
         heldAud: Number(bond.heldAmount),
       });
       continue;
@@ -159,6 +183,7 @@ async function alertReleaseBlockedOnce(
     bookingReference: string;
     balanceDue: number;
     openDamage: number;
+    openIncidents: number;
     heldAud: number;
   },
 ): Promise<void> {
@@ -186,10 +211,16 @@ async function alertReleaseBlockedOnce(
       title: "Bond auto-release blocked",
       body:
         `The ${formatCurrency(info.heldAud)} bond on booking ${info.bookingReference} is due for auto-release ` +
-        `but ${info.balanceDue > 0 ? `${formatCurrency(info.balanceDue)} is still owed` : ""}` +
-        `${info.balanceDue > 0 && info.openDamage > 0 ? " and " : ""}` +
-        `${info.openDamage > 0 ? `${info.openDamage} damage charge(s) are unresolved` : ""}. ` +
-        `Capture from the bond (Booking → Settlement → Capture bond) or resolve the balance — the release runs automatically once clear.`,
+        `but ${[
+          info.balanceDue > 0 ? `${formatCurrency(info.balanceDue)} is still owed` : null,
+          info.openDamage > 0 ? `${info.openDamage} damage charge(s) are unresolved` : null,
+          info.openIncidents > 0
+            ? `${info.openIncidents} customer-liable incident(s) are still open`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" and ")}. ` +
+        `Capture from the bond (Booking → Settlement → Capture bond) or resolve the balance/incident — the release runs automatically once clear.`,
       bookingId: info.bookingId,
       data: { bondLedgerId, ...info },
     });
