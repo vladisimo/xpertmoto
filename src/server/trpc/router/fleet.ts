@@ -11,11 +11,16 @@ import {
   type AuditCheckKey,
   type AuditSeverity,
 } from "@/server/services/fleet-audit";
-import { reassignFutureBookings } from "@/server/services/fleet-reassign";
+import { reassignFutureBookings, notifyReassignmentOutcome } from "@/server/services/fleet-reassign";
 import { sendNotification } from "@/server/services/notification-sender";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { writeAuditAsync } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
 import { gstFromInclusive } from "@/lib/money";
 import { capturePaymentIntent } from "@/lib/stripe";
@@ -1423,7 +1428,7 @@ export const fleetRouter = createTRPCRouter({
         });
       }
 
-      return ctx.prisma.$transaction(async (tx) => {
+      const result = await ctx.prisma.$transaction(async (tx) => {
         const vehicle = await tx.vehicle.update({
           where: { id: v.id },
           data: {
@@ -1444,6 +1449,27 @@ export const fleetRouter = createTRPCRouter({
         }
         return { vehicle, reassignment };
       });
+
+      // Post-commit fan-out: customer emails for auto-reassigned bookings,
+      // depot-manager digest for the needsManual bucket, availability-cache
+      // invalidation. Best-effort — the status change is already committed.
+      if (result.reassignment) {
+        try {
+          await notifyReassignmentOutcome({
+            vehicleId: v.id,
+            actorUserId: ctx.user.id,
+            summary: result.reassignment,
+            reasonLabel: input.status,
+          });
+        } catch (err) {
+          logger.warn(
+            { vehicleId: v.id, err: err instanceof Error ? err.message : String(err) },
+            "updateVehicleStatus: reassignment fan-out failed",
+          );
+        }
+      }
+
+      return result;
     }),
 
   updateVehicle: managerProcedure
@@ -2101,7 +2127,7 @@ export const fleetRouter = createTRPCRouter({
       // `END_OF_LIFE` so the fleet list makes disposal legible.
       const newStatus = input.reason; // reason enum matches status enum exactly
 
-      return ctx.prisma.$transaction(async (tx) => {
+      const result = await ctx.prisma.$transaction(async (tx) => {
         const previousStatus = (await tx.vehicle.findUniqueOrThrow({ where: { id: input.vehicleId }, select: { status: true } })).status;
         const vehicle = await tx.vehicle.update({
           where: { id: input.vehicleId },
@@ -2125,6 +2151,25 @@ export const fleetRouter = createTRPCRouter({
         );
         return { vehicle, reassignment, activeRentals };
       });
+
+      // Post-commit fan-out: customer emails for auto-reassigned bookings,
+      // depot-manager digest for the needsManual bucket, availability-cache
+      // invalidation. Best-effort — the decommission is already committed.
+      try {
+        await notifyReassignmentOutcome({
+          vehicleId: input.vehicleId,
+          actorUserId: ctx.user.id,
+          summary: result.reassignment,
+          reasonLabel: input.reason,
+        });
+      } catch (err) {
+        logger.warn(
+          { vehicleId: input.vehicleId, err: err instanceof Error ? err.message : String(err) },
+          "decommission: reassignment fan-out failed",
+        );
+      }
+
+      return result;
     }),
 
   // Work orders
@@ -2432,6 +2477,11 @@ export const fleetRouter = createTRPCRouter({
          *  recorded `customerChargeAmount`. */
         amount: z.number().positive().optional(),
         notes: z.string().optional(),
+        /** Manager-attested reason to charge beyond the insurance excess
+         *  cap for this one charge (audited as EXCESS_CAP_OVERRIDDEN).
+         *  Prefer `setIncidentExcessVoided` for §6 grounds that void the
+         *  excess on the incident itself. */
+        overrideExcessCap: z.object({ reason: z.string().min(3) }).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -2449,12 +2499,35 @@ export const fleetRouter = createTRPCRouter({
       if (!incident.customerLiable) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Incident must be marked customerLiable before charging." });
       }
-      const amount = input.amount ?? Number(incident.customerChargeAmount ?? 0);
-      if (amount <= 0) {
+      const requestedAmount = input.amount ?? Number(incident.customerChargeAmount ?? 0);
+      if (requestedAmount <= 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "No charge amount set on incident." });
       }
       const bookingId = incident.booking.id;
       const customerId = incident.booking.customerId;
+
+      // Excess cap (per-hire aggregate): the customer's insurance excess is
+      // the ceiling on TOTAL damage recovery for the hire — return-assessment
+      // lines, quote close-outs and incident charges all draw on it. Clamped
+      // here BEFORE any Payment is created, unless the incident's excess was
+      // voided (§6 grounds via setIncidentExcessVoided) or the manager
+      // explicitly overrides for this one charge (audited below).
+      const bookingExcess = await getBookingExcess(ctx.prisma, bookingId);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, bookingId);
+      const capResult = applyExcessCap({
+        proposed: requestedAmount,
+        used: liabilityUsed,
+        excess: bookingExcess.excess,
+        voided: incident.excessVoided,
+        managerOverride: !!input.overrideExcessCap,
+      });
+      const amount = capResult.chargeable;
+      if (amount <= 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Insurance excess cap exhausted — excess A$${bookingExcess.excess.toFixed(2)}, already recovered A$${liabilityUsed.toFixed(2)}. Nothing chargeable. Void the excess on the incident (manager) or override with a reason to proceed.`,
+        });
+      }
 
       // Idempotency: if a DAMAGE_CHARGE payment already references this
       // incident, abort — the charge has already been applied.
@@ -2579,6 +2652,42 @@ export const fleetRouter = createTRPCRouter({
 
         return { incident: updatedIncident, payments, fromBond, fromCard };
       });
+
+      // Excess-cap audit trail: pre-cap vs charged, or the manager's
+      // attested reason for charging past the cap.
+      if (input.overrideExcessCap) {
+        writeAuditAsync(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_OVERRIDDEN",
+          entity: "Incident",
+          entityId: incident.id,
+          newData: {
+            bookingId,
+            reason: input.overrideExcessCap.reason,
+            uncappedAmount: requestedAmount,
+            charged: amount,
+            excess: bookingExcess.excess,
+            usedBefore: liabilityUsed,
+            capRemaining: capResult.capRemaining,
+          },
+        });
+      } else if (capResult.cappedBy > 0) {
+        writeAuditAsync(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "Incident",
+          entityId: incident.id,
+          newData: {
+            bookingId,
+            preCapAmount: requestedAmount,
+            charged: amount,
+            cappedBy: capResult.cappedBy,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            usedBefore: liabilityUsed,
+          },
+        });
+      }
 
       // Issue an ATO §29-75 adjustment note for the damage charge. Each
       // payment row (bond capture and / or card capture) gets a
@@ -2809,6 +2918,75 @@ export const fleetRouter = createTRPCRouter({
           status: input.status,
           bookingId: updated.bookingId,
           actorUserId: ctx.user.id,
+        },
+      });
+      return updated;
+    }),
+
+  /**
+   * Area 1 — manager-only toggle that voids (or reinstates) the insurance
+   * excess cap for charges raised from this incident. Voiding is for the
+   * rental agreement's §6 grounds (negligence, prohibited use, unauthorised
+   * rider, DUI, etc.) and requires a written reason; the reason lands on the
+   * incident as an internal note and in the audit log.
+   */
+  setIncidentExcessVoided: managerProcedure
+    .input(
+      z
+        .object({
+          incidentId: z.string(),
+          voided: z.boolean(),
+          reason: z.string().trim().optional(),
+        })
+        .refine((v) => !v.voided || (v.reason && v.reason.length >= 3), {
+          message: "A written reason is required to void the excess cap.",
+          path: ["reason"],
+        }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const incident = await ctx.prisma.incident.findUniqueOrThrow({
+        where: { id: input.incidentId },
+        select: { id: true, incidentNumber: true, excessVoided: true, bookingId: true },
+      });
+      const updated = await ctx.prisma.$transaction(async (tx) => {
+        const row = await tx.incident.update({
+          where: { id: incident.id },
+          data: input.voided
+            ? {
+                excessVoided: true,
+                excessVoidReason: input.reason,
+                excessVoidedById: ctx.user.id,
+                excessVoidedAt: new Date(),
+              }
+            : {
+                excessVoided: false,
+                excessVoidReason: null,
+                excessVoidedById: null,
+                excessVoidedAt: null,
+              },
+        });
+        await tx.incidentNote.create({
+          data: {
+            incidentId: incident.id,
+            userId: ctx.user.id,
+            note: input.voided
+              ? `Insurance excess cap VOIDED for this incident — ${input.reason}`
+              : `Insurance excess cap reinstated${input.reason ? ` — ${input.reason}` : ""}`,
+            isInternal: true,
+          },
+        });
+        return row;
+      });
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.user.id,
+        action: input.voided ? "INCIDENT_EXCESS_VOIDED" : "INCIDENT_EXCESS_REINSTATED",
+        entity: "Incident",
+        entityId: incident.id,
+        previousData: { excessVoided: incident.excessVoided },
+        newData: {
+          excessVoided: input.voided,
+          reason: input.reason ?? null,
+          bookingId: incident.bookingId,
         },
       });
       return updated;

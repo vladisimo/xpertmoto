@@ -8,6 +8,11 @@ import {
   recordBookingCompletion,
 } from "./revenue-aggregator";
 import { sendNotification } from "./notification-sender";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "./excess";
 
 type PrismaLike = PrismaClient | typeof defaultPrisma;
 
@@ -73,9 +78,20 @@ export async function closeOutQuotePendingCharges(
   for (const charge of charges) {
     const booking = charge.returnAssessment.booking;
     const cap = Number(charge.quoteCapAmount ?? 0);
-    const billAmount = r2(
+    const ackCapped = r2(
       Math.min(args.actualCost ?? cap, cap > 0 ? cap : args.actualCost ?? 0),
     );
+    // Excess cap (per-hire aggregate): the acknowledged quote cap is one
+    // ceiling, the hire's remaining excess headroom is the other. Recomputed
+    // per charge — each billed line lands as a CONFIRMED DamageCharge, so
+    // the next iteration's `used` figure already includes it.
+    const bookingExcess = await getBookingExcess(prisma, booking.id);
+    const liabilityUsed = await getDamageLiabilityUsed(prisma, booking.id);
+    const { chargeable: billAmount, cappedBy: excessCappedBy } = applyExcessCap({
+      proposed: ackCapped,
+      used: liabilityUsed,
+      excess: bookingExcess.excess,
+    });
 
     try {
       await prisma.$transaction(async (tx) => {
@@ -152,6 +168,9 @@ export async function closeOutQuotePendingCharges(
         capAud: cap,
         actualCostAud: args.actualCost,
         billedAud: billAmount,
+        excessAud: bookingExcess.excess,
+        excessUsedBeforeAud: liabilityUsed,
+        excessCappedByAud: excessCappedBy,
       },
     });
 

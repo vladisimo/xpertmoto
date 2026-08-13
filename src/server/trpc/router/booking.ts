@@ -801,6 +801,16 @@ export const bookingRouter = createTRPCRouter({
         }
       }
 
+      // Excess-cap enforcement: freeze the excess the customer is agreeing
+      // to at attach time. Admin re-pricing of the option later must not
+      // move the liability cap on an already-sold hire.
+      const insuranceOptionForAttach = input.insuranceOptionId
+        ? await ctx.prisma.insuranceOption.findUnique({
+            where: { id: input.insuranceOptionId },
+            select: { excessAmount: true },
+          })
+        : null;
+
       const booking = await withUniqueRetry(
         () =>
           ctx.prisma.booking.create({
@@ -843,6 +853,7 @@ export const bookingRouter = createTRPCRouter({
                       insuranceOptionId: input.insuranceOptionId,
                       dailyRate: pricing.insuranceTotal / pricing.durationDays,
                       totalPrice: pricing.insuranceTotal,
+                      excessAmountSnapshot: insuranceOptionForAttach?.excessAmount ?? null,
                     },
                   }
                 : undefined,
@@ -1531,6 +1542,9 @@ export const bookingRouter = createTRPCRouter({
             insuranceOptionId: option.id,
             dailyRate,
             totalPrice: total,
+            // Excess-cap enforcement: freeze the excess being bought so a
+            // later admin re-price can't move this hire's liability cap.
+            excessAmountSnapshot: option.excessAmount,
             source: input.source,
           },
         });

@@ -55,6 +55,10 @@ import {
 import { markPartnerTransactionsPayable } from "@/server/services/partner";
 import { qualifyReferral } from "@/server/services/referral";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
 
 // In-memory rate limiters for the staff resend actions. Module-scope Map —
 // survives across requests in a single Node process. For multi-instance
@@ -232,6 +236,35 @@ export const staffBookingRouter = createTRPCRouter({
       if (!b) throw new TRPCError({ code: "NOT_FOUND" });
       assertDepotAccess(ctx.user, b.depotId);
       return b;
+    }),
+
+  /**
+   * Area 1 — the hire's insurance-excess position: the per-hire aggregate
+   * damage-liability cap, how much of it has been consumed (return damage
+   * lines, quote close-outs, incident charges — refunds net out), and any
+   * incidents whose excess a manager has voided. Powers the cap banners on
+   * the check-in assess page and the incident detail page.
+   */
+  excessSummary: staffProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const [bookingExcess, used, voidedIncidents] = await Promise.all([
+        getBookingExcess(ctx.prisma, input.bookingId),
+        getDamageLiabilityUsed(ctx.prisma, input.bookingId),
+        ctx.prisma.incident.findMany({
+          where: { bookingId: input.bookingId, excessVoided: true, deletedAt: null },
+          select: { id: true, incidentNumber: true, excessVoidReason: true },
+        }),
+      ]);
+      return {
+        excess: bookingExcess.excess,
+        used,
+        remaining: Math.max(0, Math.round((bookingExcess.excess - used) * 100) / 100),
+        tierName: bookingExcess.tierName,
+        source: bookingExcess.source,
+        voidedIncidents,
+      };
     }),
 
   /**

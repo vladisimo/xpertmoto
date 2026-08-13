@@ -699,6 +699,7 @@ model User {
   inspections              Inspection[]
   reportedIncidents        Incident[]             @relation("IncidentReportedBy")
   assignedIncidents        Incident[]             @relation("IncidentAssignedTo")
+  incidentExcessVoids      Incident[]             @relation("IncidentExcessVoidedBy")
   incidentNotes            IncidentNote[]
   reportedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderReportedBy")
   assignedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderAssignedTo")
@@ -1739,6 +1740,10 @@ model BookingInsurance {
   insuranceOptionId String
   dailyRate         Decimal  @db.Decimal(10, 2)
   totalPrice        Decimal  @db.Decimal(10, 2)
+  /// Excess (customer damage-liability cap) frozen at attach time. The live
+  /// InsuranceOption.excessAmount can be re-priced by admins later — this
+  /// snapshot is what the customer actually agreed to for THIS hire.
+  excessAmountSnapshot Decimal? @db.Decimal(12, 2)
   // Lever 7: tracks where an insurance attach came from. WIZARD for
   // booking-flow selection; the others are mid-/pre-rental upsells.
   addedAt           DateTime @default(now())
@@ -2402,6 +2407,12 @@ model Incident {
   actualDamageCost     Decimal?         @db.Decimal(10, 2)
   customerLiable       Boolean          @default(false)
   customerChargeAmount Decimal?         @db.Decimal(10, 2)
+  /// Manager-only: lifts the insurance excess cap for charges raised from
+  /// this incident (e.g. agreement §6 grounds — negligence, prohibited use).
+  excessVoided         Boolean          @default(false)
+  excessVoidReason     String?
+  excessVoidedById     String?
+  excessVoidedAt       DateTime?        @db.Timestamptz
   thirdPartyInvolved   Boolean          @default(false)
   thirdPartyDetails    Json?
   resolution           String?
@@ -2414,6 +2425,7 @@ model Incident {
   booking        Booking?           @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   reportedBy     User?              @relation("IncidentReportedBy", fields: [reportedById], references: [id], onDelete: SetNull)
   assignedTo     User?              @relation("IncidentAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  excessVoidedBy User?              @relation("IncidentExcessVoidedBy", fields: [excessVoidedById], references: [id], onDelete: SetNull)
   photos         IncidentPhoto[]
   documents      IncidentDocument[]
   notes          IncidentNote[]
