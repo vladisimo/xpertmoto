@@ -577,7 +577,7 @@ const A_DAY = 86_400_000;
 function makeConfirmCtx(
   opts: {
     role?: "STAFF" | "MANAGER";
-    reason?: "UPGRADE" | "DOWNGRADE" | "LATERAL";
+    reason?: "UPGRADE" | "DOWNGRADE" | "LATERAL" | "MECHANICAL_FAULT" | "ACCIDENT_DAMAGE";
     bookingCategoryId?: string;
     incomingCategoryId?: string;
     balanceDue?: number;
@@ -656,8 +656,24 @@ function makeConfirmCtx(
       findUnique: vi.fn(async () => null),
       update: vi.fn(async () => ({})),
     },
-    // isVehicleFree scheduled-work-order block — none.
-    maintenanceWorkOrder: { findMany: vi.fn(async () => []) },
+    // isVehicleFree scheduled-work-order block — none. `create` covers both
+    // the fault work order and the PR7 turnaround-buffer work order.
+    maintenanceWorkOrder: {
+      findMany: vi.fn(async () => []),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "wo-1",
+        ...data,
+      })),
+      // Swap-agreement PDF lookup after commit.
+      findUnique: vi.fn(async () => ({ workOrderNumber: "WO-TEST-1" })),
+    },
+    incident: {
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "inc-1",
+        ...data,
+      })),
+      findUnique: vi.fn(async () => ({ incidentNumber: "INC-TEST-1" })),
+    },
     inspection: {
       // Odometer-rollback guard — no prior reading.
       findFirst: vi.fn(async () => null),
@@ -665,6 +681,10 @@ function makeConfirmCtx(
         id: `insp-${data.type as string}`,
         ...data,
       })),
+    },
+    // PR7: swap markers mirrored into labelled InspectionIssue rows.
+    inspectionIssue: {
+      createMany: vi.fn(async ({ data }: { data: unknown[] }) => ({ count: data.length })),
     },
     bookingSwap: {
       findUnique: vi.fn(async () => draft),
@@ -954,6 +974,202 @@ describe("bookingSwap.confirmSwap money core", () => {
         data: expect.objectContaining({ amount: 123.45, gstAmount: 11.22 }),
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmSwap operational correctness (PR7): overlap → CONFLICT, cleaning
+// buffer via turnaround work order, swap markers → InspectionIssue rows.
+// ---------------------------------------------------------------------------
+
+describe("bookingSwap.confirmSwap operational correctness", () => {
+  beforeEach(() => {
+    refundChargeMock.mockReset();
+    sendNotificationMock.mockClear();
+    tryIssueAdjustmentForBookingMock.mockClear();
+  });
+
+  it("surfaces a Booking_no_overlap violation from the tx as an actionable CONFLICT", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(
+        new Error('conflicting key value violates exclusion constraint "Booking_no_overlap"'),
+        { meta: { code: "23P01" } },
+      ),
+    );
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("choose another vehicle"),
+    });
+  });
+
+  it("rethrows non-overlap transaction errors untouched", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("connection refused"),
+    );
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toThrow("connection refused");
+  });
+
+  it("UPGRADE swap flips the outgoing vehicle AVAILABLE and schedules a cleaning-buffer turnaround work order", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ data: { status?: string } }]
+    >;
+    const outgoingFlip = vehicleUpdates.find((c) => c[0].data.status === "AVAILABLE");
+    expect(outgoingFlip).toBeDefined();
+
+    const turnaround = prisma.maintenanceWorkOrder.create.mock.calls.find((c) =>
+      String((c[0] as { data: { title: string } }).data.title).startsWith(
+        "Post-hire turnaround —",
+      ),
+    );
+    expect(turnaround).toBeDefined();
+    const data = (turnaround![0] as { data: Record<string, unknown> }).data;
+    expect(data).toMatchObject({
+      vehicleId: "v-old",
+      type: "CUSTOM",
+      status: "OPEN",
+      title: "Post-hire turnaround — swap XPM-1001",
+    });
+    // Window spans exactly BOOKING_RULES.bufferHoursBetweenBookings (2h).
+    const start = data.scheduledStartAt as Date;
+    const end = data.scheduledEndAt as Date;
+    expect(end.getTime() - start.getTime()).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it("MECHANICAL_FAULT swap sends the vehicle to maintenance — fault work order, no turnaround", async () => {
+    const { ctx, prisma } = makeConfirmCtx({ reason: "MECHANICAL_FAULT" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ data: { status?: string } }]
+    >;
+    const toMaintenance = vehicleUpdates.find((c) => c[0].data.status === "IN_MAINTENANCE");
+    expect(toMaintenance).toBeDefined();
+    const titles = prisma.maintenanceWorkOrder.create.mock.calls.map((c) =>
+      String((c[0] as { data: { title: string } }).data.title),
+    );
+    expect(titles.some((t) => t.startsWith("Fault reported mid-rental"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("Post-hire turnaround —"))).toBe(false);
+  });
+
+  it("ACCIDENT_DAMAGE swap creates no turnaround work order either", async () => {
+    const { ctx, prisma } = makeConfirmCtx({ reason: "ACCIDENT_DAMAGE" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+      incidentSeverity: "MODERATE",
+    });
+    const titles = prisma.maintenanceWorkOrder.create.mock.calls.map((c) =>
+      String((c[0] as { data: { title: string } }).data.title),
+    );
+    expect(titles.some((t) => t.startsWith("Post-hire turnaround —"))).toBe(false);
+  });
+
+  it("swap markers become InspectionIssue rows — outgoing chargeable, incoming pre-existing", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: {
+        ...inspectionInput(1200),
+        damageMarkers: [
+          {
+            x: 0.4,
+            y: 0.6,
+            severity: "MODERATE" as const,
+            view: "RIGHT" as const,
+            note: "Scrape on fairing",
+            source: "staff" as const,
+          },
+        ],
+      },
+      incomingInspection: {
+        ...inspectionInput(300),
+        damageMarkers: [
+          { x: 0.1, y: 0.2, severity: "MINOR" as const, view: "LEFT" as const, source: "staff" as const },
+        ],
+      },
+    });
+
+    expect(prisma.inspectionIssue.createMany).toHaveBeenCalledTimes(2);
+    const [outCall, inCall] = prisma.inspectionIssue.createMany.mock.calls;
+    // Outgoing (SWAP_OUT): this hire's damage — chargeable at check-in.
+    expect((outCall![0] as { data: unknown[] }).data).toEqual([
+      {
+        inspectionId: "insp-POST_HIRE",
+        side: "RIGHT",
+        label: "Scrape on fairing",
+        severity: "MODERATE",
+        note: "Scrape on fairing",
+        posX: 0.4,
+        posY: 0.6,
+        source: "staff",
+        isPreExisting: false,
+      },
+    ]);
+    // Incoming (SWAP_IN): replacement's baseline — pre-existing, note-less
+    // markers get the fallback label.
+    expect((inCall![0] as { data: unknown[] }).data).toEqual([
+      {
+        inspectionId: "insp-PRE_HIRE",
+        side: "LEFT",
+        label: "Damage marker (MINOR)",
+        severity: "MINOR",
+        note: null,
+        posX: 0.1,
+        posY: 0.2,
+        source: "staff",
+        isPreExisting: true,
+      },
+    ]);
+  });
+
+  it("no markers → no InspectionIssue writes", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+    expect(prisma.inspectionIssue.createMany).not.toHaveBeenCalled();
   });
 });
 

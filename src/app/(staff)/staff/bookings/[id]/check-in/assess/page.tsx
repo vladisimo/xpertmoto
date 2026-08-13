@@ -67,8 +67,18 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     );
   }
 
-  const postHire = inspections?.find((i) => i.type === "POST_HIRE");
-  const issues = postHire?.issues ?? [];
+  // The return inspection is the one the assessment was opened against —
+  // SWAP_OUT inspections are also type POST_HIRE, so match by id first.
+  const returnInspection =
+    inspections?.find((i) => i.id === assessment.inspectionId) ??
+    inspections?.find((i) => i.type === "POST_HIRE" && i.purpose !== "SWAP_OUT");
+  const issues = returnInspection?.issues ?? [];
+  // Damage pinned when a vehicle was swapped off this booking mid-hire.
+  // Still this hire's damage — upsertDamageCharge accepts these issues, so
+  // staff can raise charges from them the same one-tap way.
+  const swapOutIssues = (inspections ?? [])
+    .filter((i) => i.purpose === "SWAP_OUT")
+    .flatMap((i) => i.issues);
   const linkedIssueIds = new Set(
     (assessment.damageCharges ?? []).map((c) => c.inspectionIssueId).filter((x): x is string => !!x),
   );
@@ -136,6 +146,39 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     await utils.return.byBooking.invalidate({ bookingId: id });
   }
 
+  const issueRows = (list: typeof issues) => (
+    <ul className="divide-y">
+      {list.map((iss) => {
+        const linked = linkedIssueIds.has(iss.id);
+        return (
+          <li key={iss.id} className="flex items-center gap-3 py-2">
+            {iss.inspectionPhoto?.url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={iss.inspectionPhoto.url} alt="" className="h-12 w-12 shrink-0 rounded object-cover" />
+            ) : (
+              <div className="h-12 w-12 shrink-0 rounded bg-muted" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{iss.label}</div>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                <StatusBadge status={iss.severity as StatusKey} />
+                {iss.side ? <span>· {sideLabel(iss.side)}</span> : null}
+                {iss.note ? <span className="truncate">· {iss.note}</span> : null}
+              </div>
+            </div>
+            {linked ? (
+              <span className="caption shrink-0">Charged ✓</span>
+            ) : (
+              <Button type="button" size="sm" variant="secondary" onClick={() => raiseFromIssue(iss)}>
+                Raise charge
+              </Button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
   const standardTotal = (assessment.damageCharges ?? [])
     .filter((c) => c.resolution === "STANDARD")
     .reduce((acc, c) => acc + Number(c.amount), 0);
@@ -170,36 +213,22 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
               Damage pinned during the return inspection. Tap “Raise charge” to bill it — a catalogue label pre-fills the
               price and attaches the photo.
             </p>
-            <ul className="divide-y">
-              {issues.map((iss) => {
-                const linked = linkedIssueIds.has(iss.id);
-                return (
-                  <li key={iss.id} className="flex items-center gap-3 py-2">
-                    {iss.inspectionPhoto?.url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={iss.inspectionPhoto.url} alt="" className="h-12 w-12 shrink-0 rounded object-cover" />
-                    ) : (
-                      <div className="h-12 w-12 shrink-0 rounded bg-muted" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{iss.label}</div>
-                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                        <StatusBadge status={iss.severity as StatusKey} />
-                        {iss.side ? <span>· {sideLabel(iss.side)}</span> : null}
-                        {iss.note ? <span className="truncate">· {iss.note}</span> : null}
-                      </div>
-                    </div>
-                    {linked ? (
-                      <span className="caption shrink-0">Charged ✓</span>
-                    ) : (
-                      <Button type="button" size="sm" variant="secondary" onClick={() => raiseFromIssue(iss)}>
-                        Raise charge
-                      </Button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            {issueRows(issues)}
+          </CardContent>
+        </Card>
+      )}
+
+      {swapOutIssues.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">Damage recorded at swap-out</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="caption mb-3">
+              Pinned when a vehicle was swapped off this booking mid-hire. It belongs to this hire — raise a charge the
+              same way.
+            </p>
+            {issueRows(swapOutIssues)}
           </CardContent>
         </Card>
       )}

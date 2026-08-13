@@ -145,14 +145,30 @@ export const returnRouter = createTRPCRouter({
 
       // Link the charge to the labelled inspection issue it came from (if any),
       // and default the evidence photos to that issue's photo so the charge
-      // points at the picture the damage was identified against.
+      // points at the picture the damage was identified against. The issue
+      // may belong to this return's inspection, or to a COMPLETED SWAP_OUT
+      // inspection on the same booking — damage pinned when a vehicle was
+      // swapped off mid-hire is still this hire's damage and is chargeable
+      // at check-in. Issues from other bookings stay rejected.
       let derivedPhotoUrls = input.photoUrls ?? [];
       if (input.inspectionIssueId) {
         const issue = await ctx.prisma.inspectionIssue.findUnique({
           where: { id: input.inspectionIssueId },
-          select: { inspectionId: true, inspectionPhoto: { select: { url: true } } },
+          select: {
+            inspectionId: true,
+            inspectionPhoto: { select: { url: true } },
+            inspection: { select: { bookingId: true, purpose: true, status: true } },
+          },
         });
-        if (!issue || issue.inspectionId !== assessment.inspectionId) {
+        const sameBookingSwapOut =
+          !!issue &&
+          issue.inspection.purpose === "SWAP_OUT" &&
+          issue.inspection.status === "COMPLETED" &&
+          issue.inspection.bookingId === assessment.bookingId;
+        if (
+          !issue ||
+          (issue.inspectionId !== assessment.inspectionId && !sameBookingSwapOut)
+        ) {
           throw new TRPCError({
             code: "BAD_REQUEST",
             message: "Issue does not belong to this return inspection",

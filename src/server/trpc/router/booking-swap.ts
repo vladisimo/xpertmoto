@@ -5,8 +5,10 @@ import type { PrismaClient } from "@prisma/client";
 
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
-import { isVehicleFree } from "@/server/services/availability";
+import { isBookingOverlapViolation, isVehicleFree } from "@/server/services/availability";
 import { quoteSwapDelta } from "@/server/services/pricing";
+import { BOOKING_RULES } from "@/lib/constants";
+import { TURNAROUND_WO_TITLE_PREFIX } from "@/server/jobs/swap-draft-cleanup";
 import { aud, gstFromInclusive, roundCents, toNumber } from "@/lib/money";
 import { refundCharge } from "@/lib/stripe";
 import { renderSwapAgreementPdf } from "@/lib/pdf/swap-agreement";
@@ -24,7 +26,11 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
-import { toStoredMarkers, type DamageMarkerInput } from "./inspection";
+import {
+  toStoredMarkers,
+  type DamageMarkerInput,
+  type StoredDamageMarker,
+} from "./inspection";
 
 /**
  * Mid-rental vehicle-swap router.
@@ -133,6 +139,30 @@ const swapDraftStateSchema = z.object({
   incidentSeverity: z.enum(["MINOR", "MODERATE", "MAJOR", "TOTAL_LOSS"]),
   workOrderPriority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]),
 });
+
+/**
+ * Mirror swap damage markers into first-class `InspectionIssue` rows so
+ * swap-time damage feeds the same charge pipeline as return-time issues
+ * (`return.upsertDamageCharge` accepts same-booking SWAP_OUT issues). The
+ * deprecated `bodyDamageMap` blob is still written for UI back-compat.
+ */
+function markersToIssueRows(
+  inspectionId: string,
+  markers: StoredDamageMarker[],
+  isPreExisting: boolean,
+): Prisma.InspectionIssueCreateManyInput[] {
+  return markers.map((m) => ({
+    inspectionId,
+    side: m.view,
+    label: m.note?.trim() ? m.note.trim() : `Damage marker (${m.severity})`,
+    severity: m.severity,
+    note: m.note ?? null,
+    posX: m.x,
+    posY: m.y,
+    source: m.source,
+    isPreExisting,
+  }));
+}
 
 /** Odometer-rollback guard replicated from `inspectionRouter.create`. */
 async function assertNoOdometerRollback(
@@ -837,6 +867,14 @@ export const bookingSwapRouter = createTRPCRouter({
             status: "COMPLETED",
           },
         });
+        // Outgoing markers are end-of-leg damage on THIS hire — mirrored as
+        // labelled issues so the check-in assess page can raise a
+        // DamageCharge from them (isPreExisting=false → chargeable).
+        if (outgoingMarkers.length > 0) {
+          await tx.inspectionIssue.createMany({
+            data: markersToIssueRows(outgoingInspection.id, outgoingMarkers, false),
+          });
+        }
 
         // 2. Incoming PRE_HIRE inspection (purpose=SWAP_IN).
         const incomingInspection = await tx.inspection.create({
@@ -864,6 +902,14 @@ export const bookingSwapRouter = createTRPCRouter({
             status: "COMPLETED",
           },
         });
+        // Incoming markers record the replacement vehicle's condition at
+        // hand-over — pre-existing by definition, so they baseline the
+        // eventual return diff and can never be charged to the customer.
+        if (incomingMarkers.length > 0) {
+          await tx.inspectionIssue.createMany({
+            data: markersToIssueRows(incomingInspection.id, incomingMarkers, true),
+          });
+        }
 
         // 3. Vehicle odometer hand-off: outgoing POST_HIRE km becomes
         // the outgoing vehicle's current, incoming PRE_HIRE km becomes
@@ -912,6 +958,42 @@ export const bookingSwapRouter = createTRPCRouter({
             },
           },
         });
+
+        // 4b. Cleaning buffer (rule #6): a swapped-out vehicle going straight
+        // back to AVAILABLE would otherwise be bookable immediately — the
+        // usual 2h buffer keys off booking windows, and this hire's window is
+        // still open on the *incoming* vehicle. A scheduled turnaround work
+        // order over `bufferHoursBetweenBookings` blocks it in availability
+        // (`vehiclesBlockedByScheduledWorkOrders`); the nightly
+        // swap-draft-cleanup job auto-completes it once the window lapses.
+        // Fault/accident swaps skip this — the vehicle goes to maintenance.
+        if (outgoingNextStatus === "AVAILABLE") {
+          const turnaroundStart = new Date();
+          const turnaroundEnd = new Date(
+            turnaroundStart.getTime() +
+              BOOKING_RULES.bufferHoursBetweenBookings * 60 * 60 * 1000,
+          );
+          await withUniqueRetry(
+            () =>
+              tx.maintenanceWorkOrder.create({
+                data: {
+                  workOrderNumber: generateWorkOrderNumber(),
+                  vehicleId: outgoingVehicleId,
+                  depotId: incomingVehicle.depotId,
+                  type: "CUSTOM",
+                  priority: "LOW",
+                  status: "OPEN",
+                  title: `${TURNAROUND_WO_TITLE_PREFIX} swap ${booking.bookingReference}`,
+                  description: `Post-swap cleaning/turnaround buffer (${BOOKING_RULES.bufferHoursBetweenBookings}h) after mid-rental swap off ${booking.bookingReference}. Auto-completes once the scheduled window lapses; complete early if the vehicle is turned around sooner.`,
+                  scheduledStartAt: turnaroundStart,
+                  scheduledEndAt: turnaroundEnd,
+                  reportedById: ctx.user.id,
+                  relatedInspectionId: outgoingInspection.id,
+                },
+              }),
+            { constraintFields: ["workOrderNumber"] },
+          );
+        }
 
         // 5. Booking vehicle reassignment + booking log + note. categoryId
         // follows the incoming vehicle so later consumers (late fees,
@@ -1167,6 +1249,20 @@ export const bookingSwapRouter = createTRPCRouter({
         });
 
         return { committed, outgoingInspection, incomingInspection, paymentId, direction, absDelta, gstAmount };
+      }).catch((err: unknown) => {
+        // The Booking_no_overlap exclusion constraint can still fire inside
+        // the transaction after the pre-flight isVehicleFree checks — e.g.
+        // the replacement vehicle holds a CONFIRMED booking that starts
+        // before this hire ends. Surface it as an actionable CONFLICT
+        // instead of a raw 23P01 500 (same classification as checkOut).
+        if (isBookingOverlapViolation(err)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message:
+              "The replacement vehicle has a booking earlier in this hire's window — choose another vehicle.",
+          });
+        }
+        throw err;
       });
 
       // Issue an ATO §29-75 adjustment note for the swap pricing delta.
