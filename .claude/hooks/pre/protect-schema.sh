@@ -17,11 +17,15 @@ transcript_path="$(jq_field "$payload" '.transcript_path')"
 # still inherit intent from the preceding turn that named the change.
 user_prompt=""
 if [ -n "$transcript_path" ] && [ -r "$transcript_path" ]; then
+  # Transcript user turns carry .message.content either as a plain string or
+  # as an array of typed blocks, depending on harness version. Accept both;
+  # collapse each turn to one line so `tail -n 5` approximates "last 5 turns".
   user_prompt="$(
     jq -r 'select(.type == "user")
-           | select((.message.content | type) == "array")
-           | select((.message.content | .[0].type) == "text")
-           | (.message.content | .[0].text)' "$transcript_path" 2>/dev/null \
+           | .message.content
+           | if type == "string" then gsub("\n"; " ")
+             elif type == "array" then (.[0] | select(.type? == "text") | .text | gsub("\n"; " "))
+             else empty end' "$transcript_path" 2>/dev/null \
     | tail -n 5 | tr '\n' ' ' || true
   )"
 fi
