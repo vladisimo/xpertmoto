@@ -17,6 +17,7 @@ import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator"
 import { writeAuditAsync } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
+import { gstFromInclusive } from "@/lib/money";
 import { capturePaymentIntent } from "@/lib/stripe";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
@@ -2506,6 +2507,9 @@ export const fleetRouter = createTRPCRouter({
               type: "DAMAGE_CHARGE",
               method: "STRIPE",
               amount: fromBond,
+              // Bond-funded damage recovery is a taxable supply — GST-inclusive
+              // like the card remainder below (gst-bas-export reads Payment.gstAmount).
+              gstAmount: gstFromInclusive(fromBond),
               status: "SUCCEEDED",
               // Link the Stripe ids so reconcile matches this to the charge.
               stripePaymentIntentId: bond.stripePaymentIntentId,
@@ -2544,6 +2548,7 @@ export const fleetRouter = createTRPCRouter({
               type: "DAMAGE_CHARGE",
               method: "STRIPE",
               amount: fromCard,
+              gstAmount: gstFromInclusive(fromCard),
               status: "PENDING",
               notes:
                 input.notes ??
@@ -2552,6 +2557,14 @@ export const fleetRouter = createTRPCRouter({
             },
           });
           payments.push({ id: cardPayment.id, amount: fromCard, source: "CARD" });
+          // Raise→add half of the balance-due contract (balance-due.ts):
+          // DAMAGE_CHARGE is balance-affecting, so its capture decrements
+          // balanceDue — without this increment the capture would eat into
+          // UNRELATED debt on the booking and silently stop it being dunned.
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { balanceDue: { increment: fromCard } },
+          });
         }
 
         const updatedIncident = await tx.incident.update({
@@ -2593,6 +2606,7 @@ export const fleetRouter = createTRPCRouter({
                 quantity: 1,
                 unitPrice: p.amount,
                 totalPrice: p.amount,
+                gstAmount: gstFromInclusive(p.amount).toNumber(),
                 gstIncluded: true,
               },
             ],
@@ -2831,7 +2845,7 @@ export const fleetRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const { findBookingForVehicleAt } = await import(
+      const { resolveBookingForVehicleAt } = await import(
         "@/server/services/booking-matcher"
       );
       const { computeNominationDeadline, defaultHandlingForType } = await import(
@@ -2841,17 +2855,22 @@ export const fleetRouter = createTRPCRouter({
       // Auto-match the renter who held the vehicle at the offence time unless
       // staff supplied an explicit booking/customer. Matches land in
       // PENDING_REVIEW — never auto-nominated (false nomination is criminal).
+      // Overlapping candidate bookings leave the links null (RECEIVED) with
+      // the candidates noted — staff must pick the renter, never a guess.
       let bookingId = input.bookingId ?? null;
       let customerId = input.customerId ?? null;
+      let ambiguityNote: string | null = null;
       if (!bookingId && !customerId) {
-        const match = await findBookingForVehicleAt(
+        const resolution = await resolveBookingForVehicleAt(
           ctx.prisma,
           input.vehicleId,
           input.offenceDate,
         );
-        if (match) {
-          bookingId = match.id;
-          customerId = match.customerId;
+        if (resolution.kind === "match") {
+          bookingId = resolution.booking.id;
+          customerId = resolution.booking.customerId;
+        } else if (resolution.kind === "ambiguous") {
+          ambiguityNote = `Attribution ambiguous — overlapping bookings held this vehicle at the offence time: ${resolution.candidates.map((c) => c.bookingReference).join(", ")}. Staff must confirm the renter before nomination.`;
         }
       }
 
@@ -2879,6 +2898,7 @@ export const fleetRouter = createTRPCRouter({
           nominationDeadline,
           // A matched renter awaits staff confirmation before any nomination.
           status: bookingId || customerId ? "PENDING_REVIEW" : "RECEIVED",
+          notes: ambiguityNote,
         },
       });
       // Audit row tagged to the vehicle so the toll/infringement surfaces in

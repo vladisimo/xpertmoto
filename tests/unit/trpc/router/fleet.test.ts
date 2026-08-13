@@ -27,6 +27,27 @@ vi.mock("../../../../src/server/services/gps51-live-cache", () => ({
   writeLiveLocationsCache: vi.fn(async () => undefined),
 }));
 
+// chargeCustomerForIncident: stub the Stripe bond capture, the (dynamically
+// imported) adjustment-note pipeline and analytics so the ledger specs stay
+// pure unit tests — MSW errors on any real network call.
+const capturePaymentIntentMock = vi.fn();
+vi.mock("@/lib/stripe", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../src/lib/stripe")>();
+  return {
+    ...actual,
+    capturePaymentIntent: (...args: unknown[]) => capturePaymentIntentMock(...args),
+  };
+});
+const tryIssueAdjustmentForBookingMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/invoice-lifecycle", () => ({
+  tryIssueAdjustmentForBooking: (...args: unknown[]) =>
+    tryIssueAdjustmentForBookingMock(...args),
+}));
+vi.mock("@/lib/analytics", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../src/lib/analytics")>();
+  return { ...actual, trackServer: vi.fn(async () => undefined) };
+});
+
 type Caller = ReturnType<typeof fleetRouter.createCaller>;
 
 function makeCtx(over: { role?: "STAFF" | "MANAGER" | "ADMIN" | "SUPER_ADMIN"; existingCount?: number } = {}) {
@@ -828,5 +849,164 @@ describe("fleet.updateVehicle gpsTrackerId", () => {
     await caller.updateVehicle({ id: "veh1", gpsTrackerId: "" });
     const data = (prisma.vehicle.update.mock.calls[0]?.[0] as { data?: Record<string, unknown> }).data;
     expect(data?.gpsTrackerId).toBeNull();
+  });
+});
+
+describe("fleet.chargeCustomerForIncident", () => {
+  function makeIncidentCtx(over: {
+    role?: "STAFF" | "MANAGER";
+    booking?: Record<string, unknown> | null;
+    customerLiable?: boolean;
+    bondLedger?: Record<string, unknown> | null;
+    existingPayment?: { id: string } | null;
+  } = {}) {
+    const bondLedger =
+      over.bondLedger === undefined
+        ? {
+            heldAmount: 500,
+            capturedAmount: 0,
+            status: "HELD",
+            stripePaymentIntentId: "pi_bond_1",
+            deductions: [],
+          }
+        : over.bondLedger;
+    const booking =
+      over.booking === undefined
+        ? { id: "bk1", customerId: "cust1", bondLedger, pickupDepot: { slug: "brisbane" } }
+        : over.booking;
+    const incident = {
+      id: "incident1",
+      incidentNumber: "2026-0042",
+      customerLiable: over.customerLiable ?? true,
+      customerChargeAmount: null,
+      actualDamageCost: null,
+      resolvedAt: null,
+      booking,
+    };
+    const paymentCreate = vi
+      .fn()
+      .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve({ id: `pay-${data.reference}`, ...data }),
+      );
+    const bookingUpdate = vi.fn().mockResolvedValue({});
+    const prisma = {
+      incident: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue(incident),
+        update: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ id: "incident1", ...data }),
+        ),
+      },
+      payment: {
+        findFirst: vi.fn().mockResolvedValue(over.existingPayment ?? null),
+        create: paymentCreate,
+      },
+      bondLedger: { update: vi.fn().mockResolvedValue({}) },
+      booking: { update: bookingUpdate },
+      $transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+    };
+    capturePaymentIntentMock.mockResolvedValue({
+      id: "pi_bond_1",
+      status: "succeeded",
+      amountReceivedCents: 50000,
+      latestChargeId: "ch_bond_1",
+      captured: true,
+    });
+    const role = over.role ?? "MANAGER";
+    const ctx = {
+      prisma,
+      user: { id: "mgr1", role },
+      session: { user: { id: "mgr1", role } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["chargeCustomerForIncident"]>[0];
+    return { ctx, prisma, paymentCreate, bookingUpdate };
+  }
+
+  it("splits a bond+card charge and raises balanceDue by exactly the card share, GST on both rows", async () => {
+    const { ctx, paymentCreate, bookingUpdate } = makeIncidentCtx();
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 800 });
+
+    expect(res.fromBond).toBe(500);
+    expect(res.fromCard).toBe(300);
+
+    const created = paymentCreate.mock.calls.map(
+      (c) => (c[0] as { data: Record<string, unknown> }).data,
+    );
+    const bondRow = created.find((d) => d.reference === "INC-2026-0042");
+    const cardRow = created.find((d) => d.reference === "INC-2026-0042-CARD");
+    expect(bondRow).toMatchObject({ type: "DAMAGE_CHARGE", status: "SUCCEEDED", amount: 500 });
+    expect(cardRow).toMatchObject({ type: "DAMAGE_CHARGE", status: "PENDING", amount: 300 });
+    // GST-inclusive taxable supply: both rows carry gstAmount = amount / 11
+    // (BAS export reads Payment.gstAmount).
+    expect(Number(bondRow?.gstAmount)).toBeCloseTo(45.45, 2);
+    expect(Number(cardRow?.gstAmount)).toBeCloseTo(27.27, 2);
+
+    // Raise half of the balance-due contract: only the PENDING card overflow
+    // enters balanceDue — the bond capture is settled money, never dunned.
+    expect(bookingUpdate).toHaveBeenCalledTimes(1);
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "bk1" },
+      data: { balanceDue: { increment: 300 } },
+    });
+
+    // The adjustment-note line items carry explicit GST too.
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledTimes(2);
+    const noteGsts = tryIssueAdjustmentForBookingMock.mock.calls.map(
+      (c) =>
+        (c[0] as { lineItems: Array<{ gstAmount?: number }> }).lineItems[0]?.gstAmount,
+    );
+    expect(noteGsts).toEqual(expect.arrayContaining([45.45, 27.27]));
+  });
+
+  it("does not touch balanceDue when the bond covers the whole charge", async () => {
+    const { ctx, bookingUpdate } = makeIncidentCtx();
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 400 });
+
+    expect(res.fromBond).toBe(400);
+    expect(res.fromCard).toBe(0);
+    expect(bookingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incident with no linked booking", async () => {
+    const { ctx } = makeIncidentCtx({ booking: null });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 100 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incident not marked customerLiable", async () => {
+    const { ctx } = makeIncidentCtx({ customerLiable: false });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 100 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("CONFLICTs on a second call once the charge reference exists (idempotency)", async () => {
+    const { ctx, paymentCreate } = makeIncidentCtx({ existingPayment: { id: "pay-prior" } });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 800 }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a STAFF caller (managerProcedure)", async () => {
+    const { ctx } = makeIncidentCtx({ role: "STAFF" });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 100 }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
