@@ -39,6 +39,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
 
 
   const requireLicence = prereqs?.requireLicenceVerification ?? true;
+  const canOverride = prereqs?.canOverride ?? true;
   const canSubmit =
     !!signed &&
     keysHanded &&
@@ -58,7 +59,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
             ? { remainderOverride: { skip: true as const, reason: overrideReason.trim() } }
             : { bondOverride: { skip: true as const, reason: overrideReason.trim() } }
           : {};
-      await checkOut.mutateAsync({
+      const result = await checkOut.mutateAsync({
         bookingId: id,
         odometerKm: preHire.odometerKm,
         fuelLevel: preHire.fuelLevel,
@@ -68,16 +69,18 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
         notes: notes || undefined,
         ...override,
       });
+      // The server reports a failed auto-charge / bond hold as a typed
+      // result so the override panel targets exactly the failing step —
+      // no error-message string matching.
+      if (!result.ok) {
+        setFailedStep(result.failedStep);
+        setErr(result.detail);
+        return;
+      }
       await utils.staffBooking.detail.invalidate({ id });
       router.push(`/staff/bookings/${id}`);
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Check-out failed";
-      setErr(message);
-      // The server blocks handover on a failed auto-charge / bond hold;
-      // classify so the override panel targets only the failing step.
-      if (message.includes("balance is still due")) setFailedStep("remainder");
-      else if (message.toLowerCase().includes("bond")) setFailedStep("bond");
-      else setFailedStep(null);
+      setErr(e instanceof Error ? e.message : "Check-out failed");
     }
   }
 
@@ -237,6 +240,13 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
                 <Link href={`/staff/bookings/${id}`}>Open booking → Record payment</Link>
               </Button>
             )}
+            {!canOverride && (
+              <p className="text-destructive">
+                Manager required — overriding a failed payment or bond hold is
+                restricted to managers. Ask a manager to complete this
+                handover.
+              </p>
+            )}
             <div>
               <Label>Override reason (required to proceed without it)</Label>
               <Input
@@ -251,7 +261,7 @@ export default function CheckOutConfirmPage(props: { params: Promise<{ id: strin
             </div>
             <Button
               variant="destructive"
-              disabled={!overrideReason.trim() || checkOut.isPending}
+              disabled={!canOverride || !overrideReason.trim() || checkOut.isPending}
               onClick={() => submit(true)}
             >
               Override &amp; complete handover

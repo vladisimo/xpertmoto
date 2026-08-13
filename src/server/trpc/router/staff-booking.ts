@@ -14,7 +14,12 @@ import {
   isBookingOverlapViolation,
   isVehicleFree,
 } from "@/server/services/availability";
-import { quoteExtension } from "@/server/services/pricing";
+import {
+  quote as quotePricing,
+  quoteExtension,
+  MinimumRentalPeriodError,
+  OneWayDisallowedError,
+} from "@/server/services/pricing";
 import { calcEarlyReturnRefund } from "@/server/services/fees";
 import { checkEligibility } from "@/server/services/eligibility";
 import {
@@ -41,7 +46,7 @@ import {
 import { trackServer } from "@/lib/analytics";
 import { BOOKING_RULES, CANCELLATION_POLICY } from "@/lib/constants";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
-import { gstFromInclusive } from "@/lib/money";
+import { aud, gstFromInclusive, roundCents } from "@/lib/money";
 import {
   recordBookingCompletion,
   recordAdditionalCharges,
@@ -65,12 +70,23 @@ const DETAIL_CHILD_TAKE = 50;
 const resendInvoiceLastSent = new Map<string, number>();
 
 export const staffBookingRouter = createTRPCRouter({
-  checkoutPrereqs: staffProcedure.query(async () => {
-    const s = await getSettings(["booking.requireLicenceVerification"] as const);
+  checkoutPrereqs: staffProcedure.query(async ({ ctx }) => {
+    const s = await getSettings([
+      "booking.requireLicenceVerification",
+      "booking.checkoutOverridesRequireManager",
+    ] as const);
+    const overridesRequireManager =
+      s["booking.checkoutOverridesRequireManager"] ??
+      SETTING_DEFAULTS["booking.checkoutOverridesRequireManager"];
     return {
       requireLicenceVerification:
         s["booking.requireLicenceVerification"] ??
         SETTING_DEFAULTS["booking.requireLicenceVerification"],
+      overridesRequireManager,
+      // Whether THIS user may take the remainder/bond overrides at check-out.
+      canOverride:
+        !overridesRequireManager ||
+        ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role),
     };
   }),
 
@@ -605,8 +621,15 @@ export const staffBookingRouter = createTRPCRouter({
         });
       }
       const newPaid = Number(b.amountPaid) + input.amount;
-      const newBalance = Math.max(0, Number(b.totalAmount) - newPaid);
-      const fullyPaid = newBalance <= 0.009;
+      // Pure decrement (balance-due contract): PENDING raises (late fees,
+      // damage, manual charges) increment balanceDue without touching
+      // totalAmount, so recomputing from totalAmount − paid silently erased
+      // them. The status flip still keys on the original rental total.
+      const newBalance = Math.max(
+        0,
+        roundCents(aud(b.balanceDue).minus(input.amount)).toNumber(),
+      );
+      const fullyPaid = Number(b.totalAmount) - newPaid <= 0.009;
       const nextStatus = fullyPaid
         ? "CONFIRMED"
         : b.status === "QUOTE"
@@ -1703,6 +1726,47 @@ export const staffBookingRouter = createTRPCRouter({
           message: `Cannot check out from status ${b.status}`,
         });
       }
+      // Remainder/bond overrides hand a vehicle over with money outstanding —
+      // manager territory unless ops relax the setting.
+      if (input.remainderOverride || input.bondOverride) {
+        const s = await getSettings([
+          "booking.checkoutOverridesRequireManager",
+        ] as const);
+        const requireManager =
+          s["booking.checkoutOverridesRequireManager"] ??
+          SETTING_DEFAULTS["booking.checkoutOverridesRequireManager"];
+        if (
+          requireManager &&
+          !["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)
+        ) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              "Overriding a failed pickup payment or bond hold requires a manager. Ask a manager to complete this handover.",
+          });
+        }
+      }
+      // An unpaid online booking must go through confirmBookingPayment —
+      // checking out against an uncaptured deposit PI risks a double charge
+      // when the webhook / TTL rescue later confirms it. Offline bookings
+      // (walk-in / phone) with no PI legitimately pay at the counter, and
+      // that exception path is audited.
+      if (b.status === "PENDING_PAYMENT") {
+        if (b.stripePaymentIntentId != null || b.source === "WEBSITE") {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              "This booking has an unpaid online payment. Complete the payment (or wait for it to confirm) before check-out.",
+          });
+        }
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "BOOKING_CHECKOUT_FROM_PENDING_PAYMENT",
+          entity: "Booking",
+          entityId: b.id,
+          newData: { source: b.source, balanceDueAud: Number(b.balanceDue) },
+        });
+      }
       const requireLicence = await (async () => {
         const s = await getSettings(["booking.requireLicenceVerification"] as const);
         return (
@@ -1843,12 +1907,16 @@ export const staffBookingRouter = createTRPCRouter({
               : remainderResult.outcome === "requires_action"
                 ? "The card requires authentication"
                 : `Card declined (${remainderResult.errorCode ?? "error"})`;
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message:
+          // Typed failure instead of a thrown string: the confirm page
+          // branches on failedStep to target its override panel.
+          return {
+            ok: false as const,
+            failedStep: "remainder" as const,
+            detail:
               `${detail} — A$${remainderResult.amount.toFixed(2)} balance is still due. ` +
               "Take payment at the terminal (Record payment) and retry, or override with a reason to collect later.",
-          });
+            amountAud: remainderResult.amount,
+          };
         }
         await writeAudit(ctx.prisma, {
           userId: ctx.user.id,
@@ -1880,10 +1948,12 @@ export const staffBookingRouter = createTRPCRouter({
               : bondResult.action === "requires_action"
                 ? "The bond hold needs the customer to authenticate the card"
                 : `Bond hold failed (${("errorCode" in bondResult && bondResult.errorCode) || "card declined"})`;
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message: `${detail}. Resolve the card with the customer and retry, or override with a reason to hand over without bond security.`,
-          });
+          return {
+            ok: false as const,
+            failedStep: "bond" as const,
+            detail: `${detail}. Resolve the card with the customer and retry, or override with a reason to hand over without bond security.`,
+            amountAud: Number(b.bondAmount),
+          };
         }
         await writeAudit(ctx.prisma, {
           userId: ctx.user.id,
@@ -1907,6 +1977,43 @@ export const staffBookingRouter = createTRPCRouter({
       let updated, assignedVehicleId: string;
       try {
         const result = await ctx.prisma.$transaction(async (tx) => {
+          // Staff-supplied vehicle switch: mirror assignVehicle's guards so a
+          // stale UI pick (or raw API call) can't hand over a cross-category /
+          // cross-depot / already-committed vehicle.
+          if (input.vehicleId && input.vehicleId !== b.vehicleId) {
+            const v = await tx.vehicle.findUnique({
+              where: { id: input.vehicleId },
+            });
+            if (!v) {
+              throw new TRPCError({
+                code: "NOT_FOUND",
+                message: "Vehicle not found.",
+              });
+            }
+            if (v.categoryId !== b.categoryId) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Vehicle category does not match the booking.",
+              });
+            }
+            if (v.depotId !== b.pickupDepotId) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Vehicle is not at the booking's pickup depot.",
+              });
+            }
+            const free = await isVehicleFree(tx, {
+              vehicleId: v.id,
+              pickup: new Date(Math.max(b.pickupDateTime.getTime(), Date.now())),
+              ret: b.returnDateTime,
+            });
+            if (!free) {
+              throw new TRPCError({
+                code: "CONFLICT",
+                message: `Vehicle ${v.internalCode} has a conflicting booking or maintenance window.`,
+              });
+            }
+          }
           let vehicleId = input.vehicleId ?? b.vehicleId;
           if (!vehicleId) {
             await acquireAllocationLock(tx, b.pickupDepotId, b.categoryId);
@@ -2139,6 +2246,7 @@ export const staffBookingRouter = createTRPCRouter({
       }
 
       return {
+        ok: true as const,
         ...updated,
         eligibilityBasis,
         eligibilityWarnings,
@@ -2884,10 +2992,11 @@ export const staffBookingRouter = createTRPCRouter({
         returnDepotId: z.string(),
         pickupDateTime: z.coerce.date(),
         returnDateTime: z.coerce.date(),
-        totalAmount: z.number(),
-        subtotal: z.number(),
-        gstAmount: z.number(),
-        bondAmount: z.number(),
+        /** The total the sheet displayed (an echo of the server quote it
+         *  fetched). More than 1c of drift against the fresh server price
+         *  rejects CONFLICT so a stale sheet can't silently charge a
+         *  different amount. Money itself is always server-priced. */
+        expectedTotalAmount: z.number().optional(),
         method: z.enum(["CARD", "CASH"]),
       }),
     )
@@ -2920,13 +3029,38 @@ export const staffBookingRouter = createTRPCRouter({
         pickupDateTime: input.pickupDateTime,
         returnDateTime: input.returnDateTime,
       });
-      const durationDays = Math.max(
-        1,
-        Math.ceil(
-          (input.returnDateTime.getTime() - input.pickupDateTime.getTime()) /
-            86400000,
-        ),
-      );
+      // Server-side price: the sheet used to send its own subtotal/GST/total
+      // which were persisted verbatim. The counter price now runs through the
+      // same cascade as every other booking (tiers, seasons, vehicle
+      // overrides, one-way fees) and is snapshotted like booking.create.
+      let pricing;
+      try {
+        pricing = await quotePricing(ctx.prisma, {
+          categoryId: input.categoryId,
+          vehicleId: input.vehicleId,
+          pickupDateTime: input.pickupDateTime,
+          returnDateTime: input.returnDateTime,
+          pickupDepotId: input.pickupDepotId,
+          returnDepotId: input.returnDepotId,
+        });
+      } catch (err) {
+        if (
+          err instanceof OneWayDisallowedError ||
+          err instanceof MinimumRentalPeriodError
+        ) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        throw err;
+      }
+      if (
+        input.expectedTotalAmount !== undefined &&
+        Math.abs(pricing.totalAmount - input.expectedTotalAmount) > 0.01
+      ) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `The price has changed: the current total is A$${pricing.totalAmount.toFixed(2)} (the sheet showed A$${input.expectedTotalAmount.toFixed(2)}). Review the new total with the customer and retry.`,
+        });
+      }
       const reference = `SCT-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, "0")}${String(new Date().getDate()).padStart(2, "0")}-${Math.floor(1000 + Math.random() * 9000)}`;
       const booking = await ctx.prisma.booking.create({
         data: {
@@ -2939,13 +3073,15 @@ export const staffBookingRouter = createTRPCRouter({
           returnDepotId: input.returnDepotId,
           pickupDateTime: input.pickupDateTime,
           returnDateTime: input.returnDateTime,
-          durationDays,
-          subtotal: input.subtotal,
-          totalAmount: input.totalAmount,
-          gstAmount: input.gstAmount,
-          bondAmount: input.bondAmount,
-          amountPaid: input.totalAmount,
+          durationDays: pricing.durationDays,
+          subtotal: pricing.baseSubtotal,
+          discountAmount: pricing.discountAmount,
+          totalAmount: pricing.totalAmount,
+          gstAmount: pricing.gstAmount,
+          bondAmount: pricing.bondAmount,
+          amountPaid: pricing.totalAmount,
           balanceDue: 0,
+          pricingSnapshot: JSON.parse(JSON.stringify(pricing)),
           status: "CONFIRMED",
           source: "WALK_IN",
           agreedToTerms: true,
@@ -2960,8 +3096,8 @@ export const staffBookingRouter = createTRPCRouter({
               customerId: input.customerId,
               type: "BOOKING_PAYMENT",
               method: input.method,
-              amount: input.totalAmount,
-              gstAmount: input.gstAmount,
+              amount: pricing.totalAmount,
+              gstAmount: pricing.gstAmount,
               status: "SUCCEEDED",
               processedById: ctx.user.id,
               processedAt: new Date(),
@@ -2985,7 +3121,7 @@ export const staffBookingRouter = createTRPCRouter({
       return {
         ...booking,
         // The sheet chains into the card + bond-hold step when true.
-        bondRequired: walkInBondEnabled && Number(input.bondAmount) > 0,
+        bondRequired: walkInBondEnabled && pricing.bondAmount > 0,
       };
     }),
 
