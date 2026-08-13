@@ -53,6 +53,10 @@ export async function runPostTripReview(
     where: {
       status: "COMPLETED",
       updatedAt: { gte: windowStart, lte: windowEnd },
+      // Loss-terminated hires land COMPLETED too (Area 2) — never ask a
+      // customer to review a hire that ended because the vehicle was
+      // written off / stolen / destroyed.
+      termination: null,
     },
     include: {
       customer: { include: { customerProfile: true } },

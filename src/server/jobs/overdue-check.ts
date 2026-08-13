@@ -42,6 +42,15 @@ const STAGES = [
   { stage: 4, hoursAfterReturn: 72, name: "auto-incident" },
 ] as const;
 
+/**
+ * Vehicles already in a disposition state are excluded from the whole ladder
+ * (stages 1–4 AND late-fee accrual): the hire can't run late on a vehicle
+ * that no longer exists in service — the loss-termination / theft flows own
+ * those bookings (see booking-termination.ts). Mirrors DISPOSITION_STATUSES
+ * in fleet.ts / depreciation-calc.ts.
+ */
+const DISPOSITION_STATUSES = ["SOLD", "END_OF_LIFE", "STOLEN", "WRITTEN_OFF"] as const;
+
 export type OverdueRunResult = {
   scanned: number;
   transitionedToOverdue: number;
@@ -78,6 +87,25 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
     SETTING_DEFAULTS["booking.lateReturnGraceHours"];
 
   for (const b of candidates) {
+    // Loss-event exclusion: a booking whose vehicle is SOLD / END_OF_LIFE /
+    // STOLEN / WRITTEN_OFF must not accrue late fees or walk the overdue
+    // ladder (incl. the stage-4 auto-theft incident) — the theft/termination
+    // flows own it. Logged so a booking silently parked here is traceable.
+    if (
+      b.vehicle &&
+      (DISPOSITION_STATUSES as readonly string[]).includes(b.vehicle.status)
+    ) {
+      logger.info(
+        {
+          bookingId: b.id,
+          reference: b.bookingReference,
+          vehicleId: b.vehicle.id,
+          vehicleStatus: b.vehicle.status,
+        },
+        "overdue-check: skipping booking — vehicle in disposition status (loss flow owns it)",
+      );
+      continue;
+    }
     const hoursLate = (now - b.returnDateTime.getTime()) / (1000 * 60 * 60);
 
     // Accrue late-day fees as the lateness happens, not only if staff run a
@@ -167,7 +195,7 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
 type CandidateBooking = Awaited<ReturnType<typeof prisma.booking.findMany>>[number] & {
   customer: { id: string; email: string; firstName: string; lastName: string; phone: string | null };
   category: { baseDailyRate: unknown };
-  vehicle: { id: string } | null;
+  vehicle: { id: string; status: string } | null;
 };
 
 /** Auto-raise stops here; a hire this late is a stage-4 incident and the

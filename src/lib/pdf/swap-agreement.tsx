@@ -51,9 +51,14 @@ interface SwapVehicle {
   make: string;
   model: string;
   categoryName: string;
-  odometerKm: number;
-  fuelLevel: number;
-  overallCondition: string;
+  /**
+   * Inspection readings are null when the leg's inspection was waived —
+   * LOSS_REPLACEMENT swaps have no outgoing inspection (the vehicle is
+   * lost), and the document says so instead of printing readings.
+   */
+  odometerKm: number | null;
+  fuelLevel: number | null;
+  overallCondition: string | null;
   notes: string | null;
 }
 
@@ -230,8 +235,9 @@ function SwapVehicleBlock({
           marginTop: theme.spacing.xs,
         }}
       >
-        Odometer {vehicle.odometerKm.toLocaleString()} km · Fuel {vehicle.fuelLevel}% · Condition{" "}
-        {vehicle.overallCondition}
+        {vehicle.odometerKm !== null
+          ? `Odometer ${vehicle.odometerKm.toLocaleString()} km · Fuel ${vehicle.fuelLevel ?? 0}% · Condition ${vehicle.overallCondition ?? "—"}`
+          : "Outgoing inspection waived — vehicle lost."}
       </Text>
       {vehicle.notes ? (
         <Text

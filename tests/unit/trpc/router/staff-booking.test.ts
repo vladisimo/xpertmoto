@@ -68,6 +68,15 @@ vi.mock("@/lib/analytics", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   trackServer: vi.fn().mockResolvedValue(undefined),
 }));
+// Loss-termination service (Area 2) — the router tests only cover the
+// gate/audit wrapper; the money mechanics live in
+// tests/unit/services/booking-termination.test.ts.
+const previewLossTerminationMock = vi.fn();
+const terminateBookingForLossMock = vi.fn();
+vi.mock("@/server/services/booking-termination", () => ({
+  previewLossTermination: (...a: unknown[]) => previewLossTerminationMock(...a),
+  terminateBookingForLoss: (...a: unknown[]) => terminateBookingForLossMock(...a),
+}));
 // Deterministic settings: defaults unless a test writes into the override
 // map (the real getSettings would read whatever the dev DB holds).
 const settingsOverride: Record<string, unknown> = {};
@@ -802,5 +811,129 @@ describe("staffBooking.detail — bounded child collections", () => {
       expect(relInclude, rel).not.toBe(true);
       expect((relInclude as { take?: number }).take, rel).toBe(50);
     }
+  });
+});
+
+describe("staffBooking loss termination (Area 2)", () => {
+  const TERMINATE_INPUT = {
+    bookingId: "b1",
+    cause: "WRITTEN_OFF" as const,
+    refundMode: "REFUND" as const,
+    bondDisposition: "RELEASED" as const,
+  };
+
+  const SERVICE_RESULT = {
+    bookingId: "b1",
+    bookingReference: "XPM-20260810-0001",
+    customerId: "cust1",
+    status: "COMPLETED" as const,
+    terminationId: "term1",
+    cause: "WRITTEN_OFF" as const,
+    refundMode: "REFUND" as const,
+    unusedDays: 3,
+    refundAmount: 360,
+    writedownAmount: 360,
+    waivedLateFeeAmount: 0,
+    cancelledLateFees: 80,
+    bondDisposition: "RELEASED" as const,
+    bondReleasedAmount: 500,
+    creditGiftCardId: null,
+    creditGiftCardCode: null,
+    cardRefundOutcome: "SUCCEEDED" as const,
+  };
+
+  function makeTerminationCtx(role: "STAFF" | "MANAGER") {
+    const prisma = {
+      auditLog: { create: vi.fn(async (_args: { data: Record<string, unknown> }) => null) },
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot1" })) },
+      $transaction: vi.fn(),
+    };
+    return {
+      ctx: {
+        prisma,
+        user: { id: "u1", role },
+        session: { user: { id: "u1", role } },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        reqId: "r1",
+        _skipAudit: true,
+      },
+      prisma,
+    };
+  }
+
+  it("terminateForLoss is manager-gated: STAFF gets FORBIDDEN and the service never runs", async () => {
+    const { ctx } = makeTerminationCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.terminateForLoss(TERMINATE_INPUT)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(terminateBookingForLossMock).not.toHaveBeenCalled();
+  });
+
+  it("manager terminate runs the service with the actor and writes the full-payload audit row", async () => {
+    terminateBookingForLossMock.mockResolvedValue(SERVICE_RESULT);
+    const { ctx, prisma } = makeTerminationCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.terminateForLoss({
+      ...TERMINATE_INPUT,
+      waiveAccruedLateFees: true,
+      notes: "insurer claim CLM-99",
+    });
+
+    expect(terminateBookingForLossMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        bookingId: "b1",
+        cause: "WRITTEN_OFF",
+        refundMode: "REFUND",
+        bondDisposition: "RELEASED",
+        waiveAccruedLateFees: true,
+        notes: "insurer claim CLM-99",
+        actorId: "u1",
+      }),
+    );
+    expect(res).toMatchObject({ status: "COMPLETED", terminationId: "term1" });
+
+    // Full-payload BOOKING_TERMINATED_FOR_LOSS audit row.
+    const auditRow = prisma.auditLog.create.mock.calls
+      .map((c) => (c[0] as { data: Record<string, unknown> }).data)
+      .find((d) => d.action === "BOOKING_TERMINATED_FOR_LOSS" && d.entity === "Booking");
+    expect(auditRow).toBeDefined();
+    expect(auditRow!.entityId).toBe("b1");
+    expect(auditRow!.newData).toMatchObject({
+      cause: "WRITTEN_OFF",
+      refundMode: "REFUND",
+      bondDisposition: "RELEASED",
+      waiveAccruedLateFees: true,
+      terminationId: "term1",
+      unusedDays: 3,
+      refundAmount: 360,
+      writedownAmount: 360,
+      cancelledLateFees: 80,
+      bondReleasedAmount: 500,
+      cardRefundOutcome: "SUCCEEDED",
+    });
+  });
+
+  it("previewLossTermination is staff-visible and quote-only — no mutation, no audit row", async () => {
+    const quote = { bookingId: "b1", unusedDays: 3, writedownAmount: 360 };
+    previewLossTerminationMock.mockResolvedValue(quote);
+    const { ctx, prisma } = makeTerminationCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.previewLossTermination({
+      bookingId: "b1",
+      refundMode: "REFUND",
+    });
+
+    expect(res).toEqual(quote);
+    expect(previewLossTerminationMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ bookingId: "b1", refundMode: "REFUND" }),
+    );
+    expect(terminateBookingForLossMock).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 });

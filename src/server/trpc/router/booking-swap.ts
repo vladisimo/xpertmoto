@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Prisma } from "@prisma/client";
-import type { PrismaClient } from "@prisma/client";
+import type { Inspection, PrismaClient, SwapOrigin, SwapReason } from "@prisma/client";
 
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
@@ -63,13 +63,28 @@ import {
 const SWAP_ALLOWED_STATUSES = ["ACTIVE", "CHECKED_OUT", "OVERDUE"] as const;
 
 // Reason families — keyed off for pricing/workflow decisions.
-const NO_DELTA_REASONS = ["MECHANICAL_FAULT", "ACCIDENT_DAMAGE", "OPERATIONAL"] as const;
+// LOSS_REPLACEMENT (Area 2): the customer didn't choose to lose the vehicle,
+// so the replacement is forced zero-delta like the other involuntary reasons.
+const NO_DELTA_REASONS = [
+  "MECHANICAL_FAULT",
+  "ACCIDENT_DAMAGE",
+  "OPERATIONAL",
+  "LOSS_REPLACEMENT",
+] as const;
+// LOSS_REPLACEMENT deliberately absent: the outgoing vehicle is gone, not
+// repairable — no fault work order is lodged from the swap.
 const REQUIRES_WORK_ORDER = ["MECHANICAL_FAULT", "ACCIDENT_DAMAGE"] as const;
+// A loss event is significant — replacing a lost vehicle mid-hire is
+// manager-only, same gate family as fault/downgrade.
 const REQUIRES_MANAGER = [
   "DOWNGRADE",
   "MECHANICAL_FAULT",
   "ACCIDENT_DAMAGE",
+  "LOSS_REPLACEMENT",
 ] as const;
+
+/** Vehicle disposition statuses that mark the unit as lost to the fleet. */
+const LOST_VEHICLE_STATUSES = ["STOLEN", "WRITTEN_OFF", "END_OF_LIFE"] as const;
 
 const HIGH_DELTA_THRESHOLD = 200; // AUD — swaps above this require manager.
 
@@ -181,6 +196,75 @@ async function assertNoOdometerRollback(
       message: `Odometer rollback on vehicle — entered ${odometerKm}km, previous reading was ${latest.odometerKm}km on ${latest.dateTime.toISOString().slice(0, 10)}.`,
     });
   }
+}
+
+/**
+ * Shared tail of `startSwapDraft` / `startLossReplacementDraft`: enforces the
+ * one-DRAFT-per-booking soft lock, creates the DRAFT row, and writes the
+ * audit pair. Callers own the booking/status/role gates.
+ */
+async function openSwapDraft(
+  ctx: { prisma: PrismaClient; user: { id: string }; reqId: string },
+  args: {
+    bookingId: string;
+    outgoingVehicleId: string;
+    reason: SwapReason;
+    origin: SwapOrigin;
+    reasonNotes: string;
+    originDetails?: string;
+    incidentId?: string;
+  },
+) {
+  const existing = await ctx.prisma.bookingSwap.findFirst({
+    where: { bookingId: args.bookingId, status: "DRAFT" },
+    select: { id: true, swappedById: true },
+  });
+  if (existing) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message:
+        "A swap is already in progress for this booking. Void it first or have the original author complete it.",
+    });
+  }
+
+  const draft = await ctx.prisma.bookingSwap.create({
+    data: {
+      bookingId: args.bookingId,
+      outgoingVehicleId: args.outgoingVehicleId,
+      swappedById: ctx.user.id,
+      reason: args.reason,
+      origin: args.origin,
+      reasonNotes: args.reasonNotes,
+      originDetails: args.originDetails,
+      incidentId: args.incidentId,
+      status: "DRAFT",
+    },
+  });
+  await writeAudit(ctx.prisma, {
+    userId: ctx.user.id,
+    action: "BOOKING_SWAP_DRAFT_STARTED",
+    entity: "BookingSwap",
+    entityId: draft.id,
+    newData: {
+      bookingId: args.bookingId,
+      reason: args.reason,
+      origin: args.origin,
+      ...(args.incidentId ? { incidentId: args.incidentId } : {}),
+    },
+  });
+  // Companion row so the swap draft surfaces on the booking's Activity tab.
+  writeBookingAuditAsync(ctx.prisma, args.bookingId, {
+    userId: ctx.user.id,
+    action: "BOOKING_SWAP_DRAFT_STARTED",
+    reqId: ctx.reqId,
+    newData: {
+      swapId: draft.id,
+      reason: args.reason,
+      origin: args.origin,
+      ...(args.incidentId ? { incidentId: args.incidentId } : {}),
+    },
+  });
+  return draft;
 }
 
 export const bookingSwapRouter = createTRPCRouter({
@@ -399,49 +483,136 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      const existing = await ctx.prisma.bookingSwap.findFirst({
-        where: { bookingId: b.id, status: "DRAFT" },
-        select: { id: true, swappedById: true },
+      return openSwapDraft(ctx, {
+        bookingId: b.id,
+        outgoingVehicleId: b.vehicleId,
+        reason: input.reason,
+        origin: input.origin,
+        reasonNotes: input.reasonNotes,
+        originDetails: input.originDetails,
       });
-      if (existing) {
+    }),
+
+  /**
+   * Open a DRAFT swap for a booking whose current vehicle has been lost
+   * (stolen / written off / destroyed) — the LOSS_REPLACEMENT variant of
+   * `startSwapDraft` (Area 2). Manager-only. Only valid while the loss is
+   * real: the outgoing vehicle must already carry a disposition status
+   * (STOLEN / WRITTEN_OFF / END_OF_LIFE), or an open TOTAL_LOSS incident
+   * must be on file for it. Zero price delta by reason; at commit the
+   * outgoing POST_HIRE inspection is waived and the lost vehicle's status
+   * is left untouched.
+   */
+  startLossReplacementDraft: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        reasonNotes: z.string().min(1),
+        /** Optional link to the loss incident (theft report, write-off). */
+        incidentId: z.string().optional(),
+        // Mirrors startSwapDraft's origin dimension; defaults to the staff
+        // member recording the loss.
+        origin: z
+          .enum([
+            "CUSTOMER_WALK_IN",
+            "CUSTOMER_PHONE_SUPPORT",
+            "CUSTOMER_SELF_SERVICE",
+            "ROADSIDE_ASSIST",
+            "STAFF_OBSERVED",
+            "TELEMATICS_ALERT",
+          ])
+          .default("STAFF_OBSERVED"),
+        originDetails: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const b = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: { id: true, status: true, vehicleId: true },
+      });
+      if (!b.vehicleId) {
         throw new TRPCError({
-          code: "CONFLICT",
-          message:
-            "A swap is already in progress for this booking. Void it first or have the original author complete it.",
+          code: "BAD_REQUEST",
+          message: "Booking has no assigned vehicle to replace.",
+        });
+      }
+      if (!(SWAP_ALLOWED_STATUSES as readonly string[]).includes(b.status)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Cannot swap vehicle from status ${b.status}.`,
+        });
+      }
+      // LOSS_REPLACEMENT is in REQUIRES_MANAGER — a loss event is significant.
+      if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Reason "LOSS_REPLACEMENT" requires a manager-role user.`,
         });
       }
 
-      const draft = await ctx.prisma.bookingSwap.create({
-        data: {
-          bookingId: b.id,
-          outgoingVehicleId: b.vehicleId,
-          swappedById: ctx.user.id,
-          reason: input.reason,
-          origin: input.origin,
-          reasonNotes: input.reasonNotes,
-          originDetails: input.originDetails,
-          status: "DRAFT",
-        },
+      // The current vehicle must actually be lost: disposition status, or an
+      // open TOTAL_LOSS incident on file for it.
+      const vehicle = await ctx.prisma.vehicle.findUniqueOrThrow({
+        where: { id: b.vehicleId },
+        select: { id: true, internalCode: true, status: true },
       });
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "BOOKING_SWAP_DRAFT_STARTED",
-        entity: "BookingSwap",
-        entityId: draft.id,
-        newData: {
-          bookingId: b.id,
-          reason: input.reason,
-          origin: input.origin,
-        },
+      let lost = (LOST_VEHICLE_STATUSES as readonly string[]).includes(vehicle.status);
+      if (!lost) {
+        const openTotalLoss = await ctx.prisma.incident.findFirst({
+          where: {
+            vehicleId: vehicle.id,
+            severity: "TOTAL_LOSS",
+            status: { notIn: ["RESOLVED", "CLOSED"] },
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        lost = openTotalLoss !== null;
+      }
+      if (!lost) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `Vehicle ${vehicle.internalCode} is not recorded as lost (status ${vehicle.status}, no open TOTAL_LOSS incident) — use a normal swap instead.`,
+        });
+      }
+
+      // Optional incident link must reference the outgoing vehicle, and the
+      // 1:1 BookingSwap.incidentId slot must be free.
+      if (input.incidentId) {
+        const incident = await ctx.prisma.incident.findUnique({
+          where: { id: input.incidentId },
+          select: {
+            id: true,
+            vehicleId: true,
+            deletedAt: true,
+            bookingSwap: { select: { id: true } },
+          },
+        });
+        if (!incident || incident.deletedAt || incident.vehicleId !== vehicle.id) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "incidentId does not reference an incident on the outgoing vehicle.",
+          });
+        }
+        if (incident.bookingSwap) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "That incident is already linked to another swap.",
+          });
+        }
+      }
+
+      return openSwapDraft(ctx, {
+        bookingId: b.id,
+        outgoingVehicleId: b.vehicleId,
+        reason: "LOSS_REPLACEMENT",
+        origin: input.origin,
+        reasonNotes: input.reasonNotes,
+        originDetails: input.originDetails,
+        incidentId: input.incidentId,
       });
-      // Companion row so the swap draft surfaces on the booking's Activity tab.
-      writeBookingAuditAsync(ctx.prisma, b.id, {
-        userId: ctx.user.id,
-        action: "BOOKING_SWAP_DRAFT_STARTED",
-        reqId: ctx.reqId,
-        newData: { swapId: draft.id, reason: input.reason, origin: input.origin },
-      });
-      return draft;
     }),
 
   /**
@@ -546,13 +717,21 @@ export const bookingSwapRouter = createTRPCRouter({
    * creates work order (fault), incident (accident), Payment delta
    * row (charge or refund), and generates the swap agreement PDF
    * outside the txn (non-critical).
+   *
+   * LOSS_REPLACEMENT (Area 2) waives the whole outgoing leg: no
+   * POST_HIRE inspection or odometer hand-off, and the lost vehicle's
+   * disposition status (STOLEN / WRITTEN_OFF / END_OF_LIFE) is left
+   * untouched. Incoming side is unchanged.
    */
   confirmSwap: staffProcedure
     .input(
       z.object({
         swapId: z.string(),
         incomingVehicleId: z.string(),
-        outgoingInspection: inspectionPayloadSchema,
+        // Required for every reason except LOSS_REPLACEMENT, where the
+        // outgoing vehicle is gone and the inspection is waived (enforced
+        // below once the draft's reason is known).
+        outgoingInspection: inspectionPayloadSchema.optional(),
         incomingInspection: inspectionPayloadSchema,
         // Accepts storage URL or a `data:image/...` data-URL; the inspection
         // row just stores whichever string the caller supplies.
@@ -620,6 +799,25 @@ export const bookingSwapRouter = createTRPCRouter({
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "Incoming vehicle is the same as the current vehicle.",
+        });
+      }
+
+      // LOSS_REPLACEMENT waives the outgoing leg entirely — the vehicle is
+      // not on hand to inspect, so no outgoing payload is accepted. Every
+      // other reason still requires it.
+      const isLossReplacement = draft.reason === "LOSS_REPLACEMENT";
+      const outgoingPayload = input.outgoingInspection ?? null;
+      if (!isLossReplacement && !outgoingPayload) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "outgoingInspection is required for this swap reason.",
+        });
+      }
+      if (isLossReplacement && outgoingPayload) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "LOSS_REPLACEMENT waives the outgoing inspection — the vehicle is lost and cannot be inspected.",
         });
       }
 
@@ -716,12 +914,16 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      // Odometer rollback guards before we open the transaction.
-      await assertNoOdometerRollback(
-        ctx.prisma,
-        booking.vehicleId,
-        input.outgoingInspection.odometerKm,
-      );
+      // Odometer rollback guards before we open the transaction. The
+      // outgoing guard is skipped for LOSS_REPLACEMENT — there is no
+      // outgoing reading to validate.
+      if (outgoingPayload) {
+        await assertNoOdometerRollback(
+          ctx.prisma,
+          booking.vehicleId,
+          outgoingPayload.odometerKm,
+        );
+      }
       await assertNoOdometerRollback(
         ctx.prisma,
         incomingVehicle.id,
@@ -736,9 +938,9 @@ export const bookingSwapRouter = createTRPCRouter({
             ? "CHARGE"
             : "REFUND";
       const absDelta = Math.abs(deltaAmount);
-      const outgoingMarkers = toStoredMarkers(
-        input.outgoingInspection.damageMarkers as DamageMarkerInput[],
-      );
+      const outgoingMarkers = outgoingPayload
+        ? toStoredMarkers(outgoingPayload.damageMarkers as DamageMarkerInput[])
+        : [];
       const incomingMarkers = toStoredMarkers(
         input.incomingInspection.damageMarkers as DamageMarkerInput[],
       );
@@ -841,39 +1043,43 @@ export const bookingSwapRouter = createTRPCRouter({
           });
         }
 
-        // 1. Outgoing POST_HIRE inspection (purpose=SWAP_OUT).
-        const outgoingInspection = await tx.inspection.create({
-          data: {
-            vehicleId: outgoingVehicleId,
-            bookingId: booking.id,
-            type: "POST_HIRE",
-            purpose: "SWAP_OUT",
-            depotId: incomingVehicle.depotId,
-            inspectorId: ctx.user.id,
-            odometerKm: input.outgoingInspection.odometerKm,
-            fuelLevel: input.outgoingInspection.fuelLevel,
-            overallCondition: input.outgoingInspection.overallCondition,
-            tyreFrontDepth: input.outgoingInspection.tyreFrontDepth,
-            tyreRearDepth: input.outgoingInspection.tyreRearDepth,
-            lightsWorking: input.outgoingInspection.lightsWorking,
-            hornWorking: input.outgoingInspection.hornWorking,
-            indicatorsWorking: input.outgoingInspection.indicatorsWorking,
-            engineRunning: input.outgoingInspection.engineRunning,
-            lockProvided: input.outgoingInspection.lockProvided,
-            notes: input.outgoingInspection.notes,
-            customerSignatureUrl: input.customerSignatureUrl,
-            staffSignatureUrl: input.staffSignatureUrl,
-            bodyDamageMap: { markers: outgoingMarkers } as unknown as Prisma.InputJsonValue,
-            status: "COMPLETED",
-          },
-        });
-        // Outgoing markers are end-of-leg damage on THIS hire — mirrored as
-        // labelled issues so the check-in assess page can raise a
-        // DamageCharge from them (isPreExisting=false → chargeable).
-        if (outgoingMarkers.length > 0) {
-          await tx.inspectionIssue.createMany({
-            data: markersToIssueRows(outgoingInspection.id, outgoingMarkers, false),
+        // 1. Outgoing POST_HIRE inspection (purpose=SWAP_OUT). Waived for
+        // LOSS_REPLACEMENT — the vehicle is lost, there is nothing to inspect.
+        let outgoingInspection: Inspection | null = null;
+        if (outgoingPayload) {
+          outgoingInspection = await tx.inspection.create({
+            data: {
+              vehicleId: outgoingVehicleId,
+              bookingId: booking.id,
+              type: "POST_HIRE",
+              purpose: "SWAP_OUT",
+              depotId: incomingVehicle.depotId,
+              inspectorId: ctx.user.id,
+              odometerKm: outgoingPayload.odometerKm,
+              fuelLevel: outgoingPayload.fuelLevel,
+              overallCondition: outgoingPayload.overallCondition,
+              tyreFrontDepth: outgoingPayload.tyreFrontDepth,
+              tyreRearDepth: outgoingPayload.tyreRearDepth,
+              lightsWorking: outgoingPayload.lightsWorking,
+              hornWorking: outgoingPayload.hornWorking,
+              indicatorsWorking: outgoingPayload.indicatorsWorking,
+              engineRunning: outgoingPayload.engineRunning,
+              lockProvided: outgoingPayload.lockProvided,
+              notes: outgoingPayload.notes,
+              customerSignatureUrl: input.customerSignatureUrl,
+              staffSignatureUrl: input.staffSignatureUrl,
+              bodyDamageMap: { markers: outgoingMarkers } as unknown as Prisma.InputJsonValue,
+              status: "COMPLETED",
+            },
           });
+          // Outgoing markers are end-of-leg damage on THIS hire — mirrored as
+          // labelled issues so the check-in assess page can raise a
+          // DamageCharge from them (isPreExisting=false → chargeable).
+          if (outgoingMarkers.length > 0) {
+            await tx.inspectionIssue.createMany({
+              data: markersToIssueRows(outgoingInspection.id, outgoingMarkers, false),
+            });
+          }
         }
 
         // 2. Incoming PRE_HIRE inspection (purpose=SWAP_IN).
@@ -914,36 +1120,44 @@ export const bookingSwapRouter = createTRPCRouter({
         // 3. Vehicle odometer hand-off: outgoing POST_HIRE km becomes
         // the outgoing vehicle's current, incoming PRE_HIRE km becomes
         // the incoming vehicle's current (may be a correction from a
-        // prior drift).
-        await tx.vehicle.update({
-          where: { id: outgoingVehicleId },
-          data: { currentOdometerKm: input.outgoingInspection.odometerKm },
-        });
+        // prior drift). LOSS_REPLACEMENT has no outgoing reading — the
+        // lost vehicle's odometer stays at its last known value.
+        if (outgoingPayload) {
+          await tx.vehicle.update({
+            where: { id: outgoingVehicleId },
+            data: { currentOdometerKm: outgoingPayload.odometerKm },
+          });
+        }
         await tx.vehicle.update({
           where: { id: incomingVehicle.id },
           data: { currentOdometerKm: input.incomingInspection.odometerKm },
         });
 
-        // 4. Vehicle status transitions + logs.
-        const outgoingNextStatus = (REQUIRES_WORK_ORDER as readonly string[]).includes(
-          draft.reason,
-        )
-          ? "IN_MAINTENANCE"
-          : "AVAILABLE";
-        await tx.vehicle.update({
-          where: { id: outgoingVehicleId },
-          data: {
-            status: outgoingNextStatus,
-            statusLog: {
-              create: {
-                previousStatus: "RENTED",
-                newStatus: outgoingNextStatus,
-                changedById: ctx.user.id,
-                reason: `Swapped off ${booking.bookingReference}: ${draft.reason}`,
+        // 4. Vehicle status transitions + logs. LOSS_REPLACEMENT leaves the
+        // outgoing vehicle completely untouched — it keeps its disposition
+        // status (STOLEN / WRITTEN_OFF / END_OF_LIFE) and never re-enters
+        // the available pool, so no turnaround buffer either.
+        const outgoingNextStatus = isLossReplacement
+          ? null
+          : (REQUIRES_WORK_ORDER as readonly string[]).includes(draft.reason)
+            ? "IN_MAINTENANCE"
+            : "AVAILABLE";
+        if (outgoingNextStatus) {
+          await tx.vehicle.update({
+            where: { id: outgoingVehicleId },
+            data: {
+              status: outgoingNextStatus,
+              statusLog: {
+                create: {
+                  previousStatus: "RENTED",
+                  newStatus: outgoingNextStatus,
+                  changedById: ctx.user.id,
+                  reason: `Swapped off ${booking.bookingReference}: ${draft.reason}`,
+                },
               },
             },
-          },
-        });
+          });
+        }
         await tx.vehicle.update({
           where: { id: incomingVehicle.id },
           data: {
@@ -988,7 +1202,7 @@ export const bookingSwapRouter = createTRPCRouter({
                   scheduledStartAt: turnaroundStart,
                   scheduledEndAt: turnaroundEnd,
                   reportedById: ctx.user.id,
-                  relatedInspectionId: outgoingInspection.id,
+                  relatedInspectionId: outgoingInspection?.id,
                 },
               }),
             { constraintFields: ["workOrderNumber"] },
@@ -1042,7 +1256,7 @@ export const bookingSwapRouter = createTRPCRouter({
                       : `Fault reported mid-rental — ${booking.bookingReference}`,
                   description: `${draft.reasonNotes}\n\nReported via: ${draft.origin}${draft.originDetails ? ` — ${draft.originDetails}` : ""}\nBooking: ${booking.bookingReference}`,
                   reportedById: ctx.user.id,
-                  relatedInspectionId: outgoingInspection.id,
+                  relatedInspectionId: outgoingInspection?.id,
                   logs: {
                     create: {
                       action: "OPEN",
@@ -1237,10 +1451,12 @@ export const bookingSwapRouter = createTRPCRouter({
             priceAdjustmentGst: gstAmount,
             priceAdjustmentDirection: direction,
             paymentId,
-            outgoingInspectionId: outgoingInspection.id,
+            outgoingInspectionId: outgoingInspection?.id ?? null,
             incomingInspectionId: incomingInspection.id,
             workOrderId,
-            incidentId,
+            // Preserve a loss incident linked at draft time (LOSS_REPLACEMENT);
+            // ACCIDENT_DAMAGE swaps set the freshly created incident instead.
+            incidentId: incidentId ?? draft.incidentId,
             customerSignatureUrl: input.customerSignatureUrl,
             staffSignatureUrl: input.staffSignatureUrl,
             bondVarianceAmount: Math.abs(bondVariance) > 0.005 ? bondVariance : null,
@@ -1382,10 +1598,12 @@ export const bookingSwapRouter = createTRPCRouter({
           outgoing: {
             ...outgoingVehicleFull,
             categoryName: booking.category.name,
-            odometerKm: input.outgoingInspection.odometerKm,
-            fuelLevel: input.outgoingInspection.fuelLevel,
-            overallCondition: input.outgoingInspection.overallCondition,
-            notes: input.outgoingInspection.notes ?? null,
+            // Null inspection fields = waived outgoing inspection
+            // (LOSS_REPLACEMENT); the PDF renders an honest waiver line.
+            odometerKm: outgoingPayload?.odometerKm ?? null,
+            fuelLevel: outgoingPayload?.fuelLevel ?? null,
+            overallCondition: outgoingPayload?.overallCondition ?? null,
+            notes: outgoingPayload?.notes ?? null,
           },
           incoming: {
             internalCode: incomingVehicle.internalCode,
@@ -1424,7 +1642,13 @@ export const bookingSwapRouter = createTRPCRouter({
       // Notify depot managers when a fault/accident swap lodges a work order
       // or incident — mirrors fleet.createIncident's broadcast pattern so the
       // maintenance queue sees the same push they'd get from a direct report.
-      if (result.committed.workOrderId || result.committed.incidentId) {
+      // LOSS_REPLACEMENT is excluded: its incident link (if any) is the
+      // pre-existing loss incident, already broadcast when it was reported —
+      // this swap lodges nothing new.
+      if (
+        !isLossReplacement &&
+        (result.committed.workOrderId || result.committed.incidentId)
+      ) {
         const managers = await ctx.prisma.user.findMany({
           where: {
             role: { in: ["MANAGER", "ADMIN"] },
@@ -1599,6 +1823,9 @@ export const bookingSwapRouter = createTRPCRouter({
         where: { id: draft.id },
         data: {
           status: "VOIDED",
+          // Release the 1:1 incident slot (only LOSS_REPLACEMENT drafts link
+          // one pre-commit) so a retry draft can re-link the loss incident.
+          incidentId: null,
           reasonNotes:
             draft.reasonNotes +
             (input.reason ? `\n\n[VOIDED: ${input.reason}]` : "\n\n[VOIDED]"),
