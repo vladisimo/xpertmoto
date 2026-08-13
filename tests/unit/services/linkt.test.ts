@@ -210,7 +210,21 @@ function makePrisma(opts: PrismaStubOpts = {}) {
       findMany: vi.fn(async () => opts.vehicles ?? []),
     },
     booking: {
-      findFirst: vi.fn(async () => opts.booking ?? null),
+      // The swap-aware matcher pulls candidates via findMany. Echo the queried
+      // vehicle id onto the fixture booking (no swaps) so it survives the
+      // matcher's vehicleAt filter for whichever vehicle the trip resolved to.
+      findMany: vi.fn(async ({ where }: { where: { OR: Array<{ vehicleId?: string }> } }) =>
+        opts.booking
+          ? [
+              {
+                ...opts.booking,
+                bookingReference: "XM-1001",
+                vehicleId: where.OR[0]!.vehicleId,
+                swaps: [],
+              },
+            ]
+          : [],
+      ),
     },
   };
 }

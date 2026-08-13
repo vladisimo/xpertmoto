@@ -5,13 +5,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // without a DB. Keep the rest of booking-matcher real (parseLinktExport uses
 // normalisePlate).
 const resolveVehicleByPlate = vi.fn();
-const findBookingForVehicleAt = vi.fn();
+const resolveBookingForVehicleAt = vi.fn();
 vi.mock("@/server/services/booking-matcher", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/services/booking-matcher")>();
   return {
     ...actual,
     resolveVehicleByPlate: (...a: unknown[]) => resolveVehicleByPlate(...a),
-    findBookingForVehicleAt: (...a: unknown[]) => findBookingForVehicleAt(...a),
+    resolveBookingForVehicleAt: (...a: unknown[]) => resolveBookingForVehicleAt(...a),
   };
 });
 const applyInfringementRecoveryCharge = vi.fn().mockResolvedValue({
@@ -249,7 +249,10 @@ beforeEach(() => {
 describe("upsertInfringementFromRow — booking match charges the renter", () => {
   it("creates a CUSTOMER_CHARGED toll and raises the recovery charge (status ⇒ payment invariant)", async () => {
     resolveVehicleByPlate.mockResolvedValue({ id: "veh_1", rego: "ABC123" });
-    findBookingForVehicleAt.mockResolvedValue({ id: "bk_1", customerId: "cust_1" });
+    resolveBookingForVehicleAt.mockResolvedValue({
+      kind: "match",
+      booking: { id: "bk_1", customerId: "cust_1" },
+    });
     const prisma = upsertPrisma();
 
     const result = await upsertInfringementFromRow(prisma, ROW, ACCOUNT);
@@ -268,7 +271,10 @@ describe("upsertInfringementFromRow — booking match charges the renter", () =>
 
   it("resolves a prior pending unmatched row (AUTO_MATCHED) and still charges", async () => {
     resolveVehicleByPlate.mockResolvedValue({ id: "veh_1", rego: "ABC123" });
-    findBookingForVehicleAt.mockResolvedValue({ id: "bk_1", customerId: "cust_1" });
+    resolveBookingForVehicleAt.mockResolvedValue({
+      kind: "match",
+      booking: { id: "bk_1", customerId: "cust_1" },
+    });
     const prisma = upsertPrisma({
       linktUnmatchedRow: {
         findUnique: vi.fn().mockResolvedValue({ id: "u1", resolvedAt: null, resolvedAction: null }),
@@ -292,7 +298,7 @@ describe("upsertInfringementFromRow — booking match charges the renter", () =>
 describe("upsertInfringementFromRow — vehicle-only and no-vehicle", () => {
   it("records a RECEIVED toll with no charge when no booking spanned the trip", async () => {
     resolveVehicleByPlate.mockResolvedValue({ id: "veh_1", rego: "ABC123" });
-    findBookingForVehicleAt.mockResolvedValue(null);
+    resolveBookingForVehicleAt.mockResolvedValue({ kind: "none" });
     const prisma = upsertPrisma();
 
     const result = await upsertInfringementFromRow(prisma, ROW, ACCOUNT);
@@ -302,6 +308,31 @@ describe("upsertInfringementFromRow — vehicle-only and no-vehicle", () => {
       .infringement.create.mock.calls[0]![0] as { data: { status: string; bookingId: string | null } };
     expect(createArgs.data.status).toBe("RECEIVED");
     expect(createArgs.data.bookingId).toBeNull();
+    expect(applyInfringementRecoveryCharge).not.toHaveBeenCalled();
+  });
+
+  it("records an ambiguous match as an unlinked RECEIVED toll with the candidates noted, no charge", async () => {
+    resolveVehicleByPlate.mockResolvedValue({ id: "veh_1", rego: "ABC123" });
+    resolveBookingForVehicleAt.mockResolvedValue({
+      kind: "ambiguous",
+      candidates: [
+        { id: "bk_1", customerId: "cust_1", bookingReference: "XM-1001" },
+        { id: "bk_2", customerId: "cust_2", bookingReference: "XM-1002" },
+      ],
+    });
+    const prisma = upsertPrisma();
+
+    const result = await upsertInfringementFromRow(prisma, ROW, ACCOUNT);
+
+    expect(result).toBe("created");
+    const createArgs = (prisma as never as { infringement: { create: ReturnType<typeof vi.fn> } })
+      .infringement.create.mock.calls[0]![0] as {
+      data: { status: string; bookingId: string | null; notes: string };
+    };
+    expect(createArgs.data.status).toBe("RECEIVED");
+    expect(createArgs.data.bookingId).toBeNull();
+    expect(createArgs.data.notes).toContain("Attribution ambiguous");
+    expect(createArgs.data.notes).toContain("XM-1001, XM-1002");
     expect(applyInfringementRecoveryCharge).not.toHaveBeenCalled();
   });
 
@@ -344,7 +375,10 @@ describe("reconcileReceivedTolls — re-attributes tolls once a booking exists",
   }
 
   it("links the booking, flips to CUSTOMER_CHARGED and charges exactly once", async () => {
-    findBookingForVehicleAt.mockResolvedValue({ id: "bk_1", customerId: "cust_1" });
+    resolveBookingForVehicleAt.mockResolvedValue({
+      kind: "match",
+      booking: { id: "bk_1", customerId: "cust_1" },
+    });
     const prisma = reconcilePrisma([RECEIVED]);
 
     const charged = await reconcileReceivedTolls(prisma, ACCOUNT);
@@ -364,7 +398,26 @@ describe("reconcileReceivedTolls — re-attributes tolls once a booking exists",
   });
 
   it("leaves a still-unattributable toll untouched", async () => {
-    findBookingForVehicleAt.mockResolvedValue(null);
+    resolveBookingForVehicleAt.mockResolvedValue({ kind: "none" });
+    const prisma = reconcilePrisma([RECEIVED]);
+
+    const charged = await reconcileReceivedTolls(prisma, ACCOUNT);
+
+    expect(charged).toBe(0);
+    expect(
+      (prisma as never as { infringement: { update: ReturnType<typeof vi.fn> } }).infringement.update,
+    ).not.toHaveBeenCalled();
+    expect(applyInfringementRecoveryCharge).not.toHaveBeenCalled();
+  });
+
+  it("leaves an ambiguous toll untouched — re-attribution never guesses", async () => {
+    resolveBookingForVehicleAt.mockResolvedValue({
+      kind: "ambiguous",
+      candidates: [
+        { id: "bk_1", customerId: "cust_1", bookingReference: "XM-1001" },
+        { id: "bk_2", customerId: "cust_2", bookingReference: "XM-1002" },
+      ],
+    });
     const prisma = reconcilePrisma([RECEIVED]);
 
     const charged = await reconcileReceivedTolls(prisma, ACCOUNT);
@@ -377,7 +430,7 @@ describe("reconcileReceivedTolls — re-attributes tolls once a booking exists",
   });
 
   it("scopes the lookup to the account by exact issuer, and to unattributed RECEIVED tolls", async () => {
-    findBookingForVehicleAt.mockResolvedValue(null);
+    resolveBookingForVehicleAt.mockResolvedValue({ kind: "none" });
     const prisma = reconcilePrisma([]);
 
     await reconcileReceivedTolls(prisma, ACCOUNT);

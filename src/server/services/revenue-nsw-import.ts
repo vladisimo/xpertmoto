@@ -21,7 +21,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 
 import { computeNominationDeadline, defaultHandlingForType } from "@/lib/nsw-nomination";
 import {
-  findBookingForVehicleAt,
+  resolveBookingForVehicleAt,
   resolveVehicleByPlate,
 } from "./booking-matcher";
 
@@ -242,9 +242,10 @@ export async function importRevenueNswRows(
     }
 
     const vehicle = await resolveVehicleByPlate(prisma, row.rego);
-    const booking = vehicle
-      ? await findBookingForVehicleAt(prisma, vehicle.id, row.offenceDate)
+    const resolution = vehicle
+      ? await resolveBookingForVehicleAt(prisma, vehicle.id, row.offenceDate)
       : null;
+    const booking = resolution?.kind === "match" ? resolution.booking : null;
     if (booking) matched++;
     else unmatched++;
 
@@ -252,6 +253,14 @@ export async function importRevenueNswRows(
     // requires a vehicleId, so skip rows whose rego we can't resolve and leave
     // them for manual entry (surfaced via the import summary count).
     if (!vehicle) continue;
+
+    // Overlapping candidate bookings at the offence time → stay RECEIVED with
+    // the candidates listed for staff, never a guessed link (false nomination
+    // to Revenue NSW is a criminal offence).
+    const ambiguityNote =
+      resolution?.kind === "ambiguous"
+        ? ` Attribution ambiguous — overlapping bookings held this vehicle at the offence time: ${resolution.candidates.map((c) => c.bookingReference).join(", ")}. Staff must confirm the renter before nomination.`
+        : "";
 
     await prisma.infringement.create({
       data: {
@@ -271,7 +280,7 @@ export async function importRevenueNswRows(
         handling: defaultHandlingForType(row.type),
         nominationDeadline: row.issueDate ? computeNominationDeadline(row.issueDate) : null,
         status: booking ? "PENDING_REVIEW" : "RECEIVED",
-        notes: `Imported from Revenue NSW portal export.`,
+        notes: `Imported from Revenue NSW portal export.${ambiguityNote}`,
       },
     });
     created++;

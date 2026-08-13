@@ -51,7 +51,7 @@ describe("classifyOffence", () => {
 function makePrisma(opts: {
   existing?: boolean;
   vehicles?: Array<{ id: string; rego: string; gpsTrackerId: string | null }>;
-  booking?: { id: string; customerId: string | null } | null;
+  bookings?: Array<{ id: string; customerId: string | null; bookingReference?: string }>;
 }) {
   const create = vi.fn(async (_args: { data: Record<string, unknown> }) => ({ id: "inf_new" }));
   return {
@@ -62,7 +62,19 @@ function makePrisma(opts: {
         create,
       },
       vehicle: { findMany: vi.fn(async () => opts.vehicles ?? []) },
-      booking: { findFirst: vi.fn(async () => opts.booking ?? null) },
+      booking: {
+        // The swap-aware matcher pulls candidates via findMany. Echo the
+        // queried vehicle id onto the fixture bookings (no swaps) so they
+        // survive the matcher's vehicleAt filter.
+        findMany: vi.fn(async ({ where }: { where: { OR: Array<{ vehicleId?: string }> } }) =>
+          (opts.bookings ?? []).map((b) => ({
+            bookingReference: `REF-${b.id}`,
+            ...b,
+            vehicleId: where.OR[0]!.vehicleId,
+            swaps: [],
+          })),
+        ),
+      },
     } as unknown as import("@prisma/client").PrismaClient,
   };
 }
@@ -85,7 +97,7 @@ describe("importRevenueNswRows", () => {
   it("creates a matched notice in PENDING_REVIEW with computed deadline", async () => {
     const { prisma, create } = makePrisma({
       vehicles: [{ id: "v1", rego: "ABC123", gpsTrackerId: null }],
-      booking: { id: "bk1", customerId: "c1" },
+      bookings: [{ id: "bk1", customerId: "c1" }],
     });
     const summary = await importRevenueNswRows(prisma, [row]);
     expect(summary).toMatchObject({ created: 1, matched: 1, unmatched: 0, duplicate: 0 });
@@ -107,7 +119,7 @@ describe("importRevenueNswRows", () => {
   it("creates an unmatched (but rego-known) notice in RECEIVED", async () => {
     const { prisma, create } = makePrisma({
       vehicles: [{ id: "v1", rego: "ABC123", gpsTrackerId: null }],
-      booking: null,
+      bookings: [],
     });
     const summary = await importRevenueNswRows(prisma, [row]);
     expect(summary).toMatchObject({ created: 1, matched: 0, unmatched: 1 });
@@ -116,8 +128,31 @@ describe("importRevenueNswRows", () => {
     );
   });
 
+  it("stages an ambiguous notice in RECEIVED with the candidates listed — never a guessed link", async () => {
+    const { prisma, create } = makePrisma({
+      vehicles: [{ id: "v1", rego: "ABC123", gpsTrackerId: null }],
+      bookings: [
+        { id: "bk1", customerId: "c1", bookingReference: "XM-1001" },
+        { id: "bk2", customerId: "c2", bookingReference: "XM-1002" },
+      ],
+    });
+    const summary = await importRevenueNswRows(prisma, [row]);
+    expect(summary).toMatchObject({ created: 1, matched: 0, unmatched: 1 });
+    const data = create.mock.calls[0]![0].data as {
+      status: string;
+      bookingId: string | null;
+      customerId: string | null;
+      notes: string;
+    };
+    expect(data.status).toBe("RECEIVED");
+    expect(data.bookingId).toBeNull();
+    expect(data.customerId).toBeNull();
+    expect(data.notes).toContain("Attribution ambiguous");
+    expect(data.notes).toContain("XM-1001, XM-1002");
+  });
+
   it("skips rows whose rego can't be resolved (no vehicle to attach)", async () => {
-    const { prisma, create } = makePrisma({ vehicles: [], booking: null });
+    const { prisma, create } = makePrisma({ vehicles: [], bookings: [] });
     const summary = await importRevenueNswRows(prisma, [row]);
     expect(summary).toMatchObject({ created: 0, unmatched: 1 });
     expect(create).not.toHaveBeenCalled();
