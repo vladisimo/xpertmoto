@@ -729,9 +729,18 @@ function makeConfirmCtx(
     incomingCategoryId?: string;
     balanceDue?: number;
     pendingSum?: number | null;
+    /** When set, payment.aggregate applies the real where-clause semantics
+     *  (status/type/deletedAt) to these rows instead of returning pendingSum
+     *  blindly — exercises the offset aggregate's type filter. */
+    pendingPayments?: Array<{ type: string; amount: number; deletedAt?: Date | null }>;
+    /** Fresh in-tx balanceDue read (settlement clamp); defaults to the
+     *  pre-Stripe balanceDue when absent. */
+    freshBalanceDue?: number;
     payments?: Array<Record<string, unknown>>;
     /** LOSS_REPLACEMENT: loss incident linked at draft time. */
     draftIncidentId?: string | null;
+    /** Outgoing vehicle's status at commit time (LOSS_REPLACEMENT strand guard). */
+    outgoingVehicleStatus?: string;
   } = {},
 ) {
   // cat-A $50/day, cat-B $80/day over 5 remaining days (below the 7-day
@@ -791,7 +800,14 @@ function makeConfirmCtx(
   const models = {
     booking: {
       findUnique: vi.fn(async () => booking),
-      findUniqueOrThrow: vi.fn(async () => booking),
+      // The in-tx settlement clamp re-reads balanceDue with a narrow select;
+      // every other caller (the pre-flight include-fetch) gets the booking.
+      findUniqueOrThrow: vi.fn(
+        async (args?: { select?: { balanceDue?: boolean } }) =>
+          args?.select?.balanceDue
+            ? { balanceDue: opts.freshBalanceDue ?? booking.balanceDue }
+            : booking,
+      ),
       // isVehicleFree clash search — no clashing booking.
       findFirst: vi.fn(async () => null),
       update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -801,7 +817,13 @@ function makeConfirmCtx(
       }),
     },
     vehicle: {
-      findUniqueOrThrow: vi.fn(async () => incomingVehicle),
+      // Keyed by id: the outgoing vehicle only gets looked up by the
+      // LOSS_REPLACEMENT strand guard (status-only select).
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) =>
+        where.id === "v-old"
+          ? { id: "v-old", status: opts.outgoingVehicleStatus ?? "RENTED" }
+          : incomingVehicle,
+      ),
       // loadVehicleCtx — no vehicle-level rate overrides in these tests.
       findUnique: vi.fn(async () => null),
       update: vi.fn(async () => ({})),
@@ -844,7 +866,29 @@ function makeConfirmCtx(
       })),
     },
     payment: {
-      aggregate: vi.fn(async () => ({ _sum: { amount: opts.pendingSum ?? null } })),
+      aggregate: vi.fn(
+        async (args?: {
+          where?: {
+            status?: string;
+            type?: { in?: string[] };
+            deletedAt?: Date | null;
+          };
+        }) => {
+          if (!opts.pendingPayments) {
+            return { _sum: { amount: opts.pendingSum ?? null } };
+          }
+          // Apply the real filter semantics so an untyped aggregate would
+          // wrongly sweep credits in and the test catches it.
+          const typeFilter = args?.where?.type?.in;
+          const sum = opts.pendingPayments
+            .filter((p) => (typeFilter ? typeFilter.includes(p.type) : true))
+            .filter((p) =>
+              args?.where?.deletedAt === null ? !p.deletedAt : true,
+            )
+            .reduce((acc, p) => acc + p.amount, 0);
+          return { _sum: { amount: sum === 0 ? null : sum } };
+        },
+      ),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
         id: "pay-new",
         ...data,
@@ -1090,11 +1134,14 @@ describe("bookingSwap.confirmSwap money core", () => {
         data: expect.objectContaining({ type: "REFUND", amount: 150, status: "FAILED" }),
       }),
     );
-    // No ledger decrements on a failed refund.
+    // No ledger decrements on a failed refund…
     const settle = prisma.booking.update.mock.calls.find(
       (c) => c[0].data.totalAmount !== undefined,
     );
     expect(settle).toBeUndefined();
+    // …and, since the write-down was skipped, no §29-75 DECREASE note either
+    // — note issuance and ledger write-down share the same gate.
+    expect(tryIssueAdjustmentForBookingMock).not.toHaveBeenCalled();
     // Manager notification flags the unrefunded downgrade.
     const flagged = sendNotificationMock.mock.calls.find((c) =>
       String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-refund-failed:"),
@@ -1103,6 +1150,171 @@ describe("bookingSwap.confirmSwap money core", () => {
     expect(flagged![0]).toMatchObject({
       userId: "mgr-1",
       dedupKey: "swap-refund-failed:swapd-1:mgr-1",
+    });
+  });
+
+  it("PENDING Stripe refund books the consideration reduction + note at commit but defers amountPaid to the webhook", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "pending" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      balanceDue: 40,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // The REFUND row stays PENDING (unsettled cash) with no processedAt —
+    // charge.refund.updated flips it and applies the amountPaid decrement.
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "REFUND",
+          amount: 110,
+          status: "PENDING",
+          processedAt: null,
+        }),
+      }),
+    );
+    // No source-payment rollup flip until the refund actually settles.
+    expect(prisma.payment.update).not.toHaveBeenCalled();
+    // Consideration reduction is booked at commit: totals + offset move,
+    // but amountPaid must NOT — the cash hasn't settled yet.
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 40 },
+    });
+    // The DECREASE note issues at the same moment as the write-down.
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ bookingId: "b1", type: "DECREASE", reason: "SWAP" }),
+    );
+  });
+
+  it("offset aggregate counts only balance-affecting PENDING raises — a PENDING MANUAL_CREDIT does not shrink the unpaid base", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      // $100 of real debt on the booking…
+      balanceDue: 100,
+      // …an $80 credit owed TO the customer must not shrink the unpaid base
+      // (untyped aggregate: unpaidBase 20 → $130 over-refund + zombie
+      // dunning); a real $30 raise still does.
+      pendingPayments: [
+        { type: "MANUAL_CREDIT", amount: 80 },
+        { type: "LATE_FEE", amount: 30 },
+      ],
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // The aggregate is scoped to balance-affecting charge types and live rows.
+    expect(prisma.payment.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          bookingId: "b1",
+          status: "PENDING",
+          type: { in: expect.arrayContaining(["LATE_FEE", "SWAP_ADJUSTMENT"]) },
+          deletedAt: null,
+        }),
+      }),
+    );
+    const typeFilter = (
+      prisma.payment.aggregate.mock.calls[0]![0] as {
+        where: { type: { in: string[] } };
+      }
+    ).where.type.in;
+    expect(typeFilter).not.toContain("MANUAL_CREDIT");
+    expect(typeFilter).not.toContain("REFUND");
+    // unpaidBase = 100 − 30 = 70 → offset 70, cash 80 (not 130).
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 8000 }),
+    );
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 70 },
+      amountPaid: { decrement: 80 },
+    });
+  });
+
+  it("clamps the in-tx balanceDue offset when a concurrent capture shrank the balance during the Stripe round-trip", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      // Pre-Stripe read said $40 outstanding → offset 40, cash 110…
+      balanceDue: 40,
+      // …but a concurrent capture collected $30 of it mid-round-trip.
+      freshBalanceDue: 10,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // Cash already moved for $110 — untouchable. Only the offset half
+    // reacts: clamped to the fresh balance, not the stale $40.
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 11000 }),
+    );
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 10 },
+      amountPaid: { decrement: 110 },
     });
   });
 
@@ -1340,6 +1552,7 @@ describe("bookingSwap.confirmSwap LOSS_REPLACEMENT", () => {
     const { ctx, prisma, booking } = makeConfirmCtx({
       reason: "LOSS_REPLACEMENT",
       draftIncidentId: "inc-9",
+      outgoingVehicleStatus: "STOLEN",
     });
     const caller = bookingSwapRouter.createCaller(ctx as never);
     const res = await caller.confirmSwap({
@@ -1413,6 +1626,53 @@ describe("bookingSwap.confirmSwap LOSS_REPLACEMENT", () => {
       String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-confirmed:"),
     );
     expect(customerPing).toBeDefined();
+  });
+
+  it("parks a still-RENTED outgoing vehicle in IN_MAINTENANCE so it isn't stranded (open TOTAL_LOSS incident, not yet decommissioned)", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      outgoingVehicleStatus: "RENTED",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string }; data: Record<string, unknown> }]
+    >;
+    const parked = vehicleUpdates.find((c) => c[0].where.id === "v-old");
+    expect(parked).toBeDefined();
+    expect(parked![0].data).toMatchObject({
+      status: "IN_MAINTENANCE",
+      statusLog: {
+        create: expect.objectContaining({
+          previousStatus: "RENTED",
+          newStatus: "IN_MAINTENANCE",
+          reason: expect.stringContaining("awaiting write-off/theft confirmation"),
+        }),
+      },
+    });
+  });
+
+  it("leaves a WRITTEN_OFF outgoing vehicle untouched — disposition statuses are final", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      outgoingVehicleStatus: "WRITTEN_OFF",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string } }]
+    >;
+    expect(vehicleUpdates.filter((c) => c[0].where.id === "v-old")).toEqual([]);
   });
 
   it("rejects an outgoing inspection payload on a LOSS_REPLACEMENT draft", async () => {
@@ -1504,7 +1764,10 @@ describe("bookingSwap.quoteDelta vehicle-level rates", () => {
 });
 
 describe("bookingSwap.reconcileCreditTransfer", () => {
-  it("decrements booking.amountPaid by the credited amount when the transfer is marked SUCCEEDED", async () => {
+  /** Simulates the row's actual state: the status-guarded updateMany only
+   *  matches while the row is still PENDING, so a second call loses the
+   *  race (count 0) instead of double-decrementing. */
+  function makeReconcileCtx() {
     const credit = {
       id: "p-credit",
       type: "MANUAL_CREDIT",
@@ -1515,11 +1778,22 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
     };
     const models = {
       payment: {
-        findUniqueOrThrow: vi.fn(async () => credit),
-        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
-          ...credit,
-          ...data,
-        })),
+        findUniqueOrThrow: vi.fn(async () => ({ ...credit })),
+        updateMany: vi.fn(
+          async ({
+            where,
+            data,
+          }: {
+            where: { status?: string };
+            data: Record<string, unknown>;
+          }) => {
+            if (where.status === "PENDING" && credit.status !== "PENDING") {
+              return { count: 0 };
+            }
+            Object.assign(credit, data);
+            return { count: 1 };
+          },
+        ),
       },
       booking: { update: vi.fn(async () => ({})) },
       auditLog: { create: vi.fn(async () => null) },
@@ -1536,16 +1810,48 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
       reqId: "r1",
       _skipAudit: true,
     };
+    return { ctx, models, credit };
+  }
+
+  it("decrements booking.amountPaid by the credited amount when the transfer is marked SUCCEEDED", async () => {
+    const { ctx, models, credit } = makeReconcileCtx();
     const caller = bookingSwapRouter.createCaller(ctx as never);
     const res = await caller.reconcileCreditTransfer({
       paymentId: "p-credit",
       reference: "BT-2026-08-13",
     });
     expect(res).toMatchObject({ status: "SUCCEEDED" });
+    // The flip is status-guarded so it cannot re-match a reconciled row.
+    expect(models.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "p-credit", status: "PENDING" } }),
+    );
     expect(models.booking.update).toHaveBeenCalledWith({
       where: { id: "b1" },
       data: { amountPaid: { decrement: credit.amount } },
     });
+  });
+
+  it("a second (racing) reconcile call loses the status-guarded flip and decrements amountPaid exactly once", async () => {
+    const { ctx, models } = makeReconcileCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-1" }),
+    ).resolves.toMatchObject({ status: "SUCCEEDED" });
+    // Simulate the check-then-act race: the second call's pre-check read the
+    // row while it was still PENDING (before the first call's flip landed);
+    // only the status-guarded updateMany sees the committed SUCCEEDED state.
+    models.payment.findUniqueOrThrow.mockResolvedValueOnce({
+      id: "p-credit",
+      type: "MANUAL_CREDIT",
+      status: "PENDING",
+      bookingId: "b1",
+      amount: new Prisma.Decimal(110),
+      notes: "swap credit",
+    });
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-2" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(models.booking.update).toHaveBeenCalledTimes(1);
   });
 
   it("rejects non-PENDING or non-MANUAL_CREDIT payments", async () => {
