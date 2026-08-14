@@ -17,8 +17,6 @@ import { logger } from "@/lib/logger";
  * A PNG body at `/favicon.ico` is fine for every modern browser.
  */
 
-/** Bundled fallback — the only square asset in `public/brand/`. */
-const FALLBACK_ASSET = ["public", "brand", "xpert-logo-white-square.png"];
 const CACHE_CONTROL = "public, max-age=86400";
 const UPSTREAM_TIMEOUT_MS = 3_000;
 
@@ -68,7 +66,13 @@ export async function GET(): Promise<NextResponse> {
   if (configured) return configured;
 
   try {
-    const bytes = await readFile(path.join(process.cwd(), ...FALLBACK_ASSET));
+    // Literal segments, not a spread array: Turbopack resolves this path at
+    // build time, and a dynamic argument reads as open-ended filesystem
+    // access — which traces every source file and all of `public/` into the
+    // server bundle. The only square asset in `public/brand/`.
+    const bytes = await readFile(
+      path.join(process.cwd(), "public", "brand", "xpert-logo-white-square.png"),
+    );
     return imageResponse(new Uint8Array(bytes), "image/png");
   } catch (err) {
     logger.error({ err }, "favicon: bundled fallback asset is unreadable");
