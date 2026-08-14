@@ -81,13 +81,16 @@ export async function getBookingExcess(
  * close-outs, and incident charges together.
  *
  * Composition:
- *   + DamageCharge rows (via the booking's return assessments) in
- *     CONFIRMED | CAPTURED — `amount` is the customer's liability for the
- *     line whether it was bond-funded or card-charged.
- *   + DAMAGE_CHARGE Payment rows referenced `INC-%` (incident charges,
- *     which have no DamageCharge row yet) in PENDING | SUCCEEDED — except
- *     any already linked from a DamageCharge.capturedPaymentId (dedupe:
- *     the charge row's amount was already counted).
+ *   + DamageCharge rows — parented by the booking's return assessments OR
+ *     (since the damage surface unified) by an incident linked to the
+ *     booking — in CONFIRMED | CAPTURED. `amount` is the customer's
+ *     liability for the line whether it was bond-funded or card-charged.
+ *   + DAMAGE_CHARGE Payment rows referenced `INC-%` in PENDING | SUCCEEDED
+ *     — the fallback for HISTORICAL incident charges raised before the
+ *     unification, which have no DamageCharge row. Payments already linked
+ *     from a DamageCharge.capturedPaymentId are deduped out (post-
+ *     unification incident slices carry both a charge row and an INC-%
+ *     payment; the charge row's amount was already counted).
  *   − REFUND rows (PENDING | SUCCEEDED) whose parent is any DAMAGE_CHARGE
  *     payment on the booking — a refunded recovery frees the cap back up.
  */
@@ -97,7 +100,7 @@ export async function getDamageLiabilityUsed(
 ): Promise<number> {
   const charges = await prisma.damageCharge.findMany({
     where: {
-      returnAssessment: { bookingId },
+      OR: [{ returnAssessment: { bookingId } }, { incident: { bookingId } }],
       status: { in: ["CONFIRMED", "CAPTURED"] },
     },
     select: { amount: true, capturedPaymentId: true },

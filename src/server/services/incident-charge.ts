@@ -142,6 +142,14 @@ export async function chargeCustomerForIncident(
     }
   }
 
+  // Unified damage surface: every money slice below also lands a
+  // DamageCharge row parented by the incident (DB CHECK: a charge needs a
+  // return assessment OR an incident). `getDamageLiabilityUsed` counts the
+  // charge rows and dedupes their linked payments out of the historical
+  // INC-% Payment fallback via `capturedPaymentId`.
+  const chargeDescription =
+    `Incident ${incident.incidentNumber} — ${incident.description}`.slice(0, 500);
+
   const result = await prisma.$transaction(async (tx) => {
     const payments: { id: string; amount: number; source: "BOND" | "CARD" }[] = [];
 
@@ -184,6 +192,23 @@ export async function chargeCustomerForIncident(
         },
       });
       payments.push({ id: bondPayment.id, amount: fromBond, source: "BOND" });
+      // Bond slice charge row: money already captured, so the charge lands
+      // terminal (CAPTURED) with the bond deduction recorded.
+      await tx.damageCharge.create({
+        data: {
+          incidentId: incident.id,
+          description: chargeDescription,
+          severity: incident.severity,
+          resolution: "STANDARD",
+          amount: fromBond,
+          status: "CAPTURED",
+          capturedPaymentId: bondPayment.id,
+          bondDeductionCents: Math.round(fromBond * 100),
+          createdById: input.actorId,
+          resolvedById: input.actorId,
+          resolvedAt: new Date(),
+        },
+      });
     }
 
     if (fromCard > 0) {
@@ -204,6 +229,20 @@ export async function chargeCustomerForIncident(
         },
       });
       payments.push({ id: cardPayment.id, amount: fromCard, source: "CARD" });
+      // Card slice charge row: CONFIRMED (raised, capture pending) linked to
+      // the PENDING card Payment the off-session sweep collects.
+      await tx.damageCharge.create({
+        data: {
+          incidentId: incident.id,
+          description: chargeDescription,
+          severity: incident.severity,
+          resolution: "STANDARD",
+          amount: fromCard,
+          status: "CONFIRMED",
+          capturedPaymentId: cardPayment.id,
+          createdById: input.actorId,
+        },
+      });
       // Raise→add half of the balance-due contract (balance-due.ts):
       // DAMAGE_CHARGE is balance-affecting, so its capture decrements
       // balanceDue — without this increment the capture would eat into
@@ -323,4 +362,144 @@ export async function chargeCustomerForIncident(
   });
 
   return result;
+}
+
+/**
+ * Area 5 — work-order → incident actual-cost feedback. Called from
+ * `fleet.updateWorkOrderStatus` when a work order with `relatedIncidentId`
+ * completes:
+ *
+ *   - Backfills `Incident.actualDamageCost` from the work order's actual
+ *     cost when the incident doesn't have one yet (audited).
+ *   - Customer-liable but not yet charged → nudge depot managers to review
+ *     the incident charge now a real cost exists.
+ *   - Already charged more than the actual repair cost → nudge managers to
+ *     issue a partial refund (manual action — under the ACL we cannot
+ *     retain more than the actual loss).
+ *
+ * Notifications are best-effort; the cost write is the only state change.
+ */
+export async function recordWorkOrderCostForIncident(
+  prisma: PrismaLike,
+  args: {
+    incidentId: string;
+    workOrderNumber: string;
+    /** Work order's recorded actual cost in AUD (null when not captured). */
+    actualCost: number | null;
+    actorId: string;
+  },
+): Promise<{ actualDamageCostWritten: boolean }> {
+  const incident = await prisma.incident.findUnique({
+    where: { id: args.incidentId },
+    select: {
+      id: true,
+      incidentNumber: true,
+      customerLiable: true,
+      actualDamageCost: true,
+      vehicle: { select: { depotId: true, internalCode: true } },
+    },
+  });
+  if (!incident) return { actualDamageCostWritten: false };
+  const actualCost =
+    args.actualCost != null && Number.isFinite(args.actualCost) && args.actualCost >= 0
+      ? Math.round(args.actualCost * 100) / 100
+      : null;
+
+  let actualDamageCostWritten = false;
+  if (incident.actualDamageCost == null && actualCost != null) {
+    await prisma.incident.update({
+      where: { id: incident.id },
+      data: { actualDamageCost: actualCost },
+    });
+    writeAuditAsync(prisma, {
+      userId: args.actorId,
+      action: "INCIDENT_ACTUAL_COST_RECORDED",
+      entity: "Incident",
+      entityId: incident.id,
+      previousData: { actualDamageCost: null },
+      newData: {
+        actualDamageCost: actualCost,
+        source: `work order ${args.workOrderNumber}`,
+      },
+    });
+    actualDamageCostWritten = true;
+  }
+
+  if (!incident.customerLiable || actualCost == null) {
+    return { actualDamageCostWritten };
+  }
+
+  // Has this incident been charged? Post-unification slices AND historical
+  // pre-unification charges both carry INC-<num> Payment references.
+  const chargeReference = `INC-${incident.incidentNumber}`;
+  const chargePayments = await prisma.payment.findMany({
+    where: {
+      reference: { in: [chargeReference, `${chargeReference}-CARD`] },
+      type: "DAMAGE_CHARGE",
+      status: { in: ["PENDING", "SUCCEEDED"] },
+      deletedAt: null,
+    },
+    select: { amount: true },
+  });
+  const chargedTotal =
+    Math.round(chargePayments.reduce((acc, p) => acc + Number(p.amount), 0) * 100) / 100;
+
+  let subject: string | null = null;
+  let body: string | null = null;
+  if (chargePayments.length === 0) {
+    subject = `Incident ${incident.incidentNumber} — actual repair cost recorded`;
+    body =
+      `Work order ${args.workOrderNumber} on ${incident.vehicle.internalCode} completed with an actual repair cost of ` +
+      `A$${actualCost.toFixed(2)}. The incident is marked customer-liable but the customer has not been charged yet — ` +
+      `review the incident and raise the charge if appropriate.`;
+  } else if (actualCost < chargedTotal) {
+    subject = `Incident ${incident.incidentNumber} — actual cost below amount charged`;
+    body =
+      `Work order ${args.workOrderNumber} on ${incident.vehicle.internalCode} completed with an actual repair cost of ` +
+      `A$${actualCost.toFixed(2)}, but the customer was charged A$${chargedTotal.toFixed(2)} for this incident. ` +
+      `Under the ACL we cannot retain more than the actual loss — review and issue a partial refund of ` +
+      `A$${(Math.round((chargedTotal - actualCost) * 100) / 100).toFixed(2)}.`;
+  }
+  if (!subject || !body) return { actualDamageCostWritten };
+
+  try {
+    const { sendNotification } = await import("@/server/services/notification-sender");
+    const managers = await prisma.user.findMany({
+      where: {
+        role: { in: ["MANAGER", "ADMIN"] },
+        deletedAt: null,
+        OR: [{ depotId: incident.vehicle.depotId ?? undefined }, { depotId: null }],
+      },
+      select: { id: true },
+    });
+    for (const m of managers) {
+      await sendNotification({
+        userId: m.id,
+        type: "INCIDENT_REPORTED",
+        category: "OPERATIONAL",
+        channels: ["IN_APP", "EMAIL"],
+        subject,
+        title: subject,
+        body,
+        data: {
+          incidentId: incident.id,
+          incidentNumber: incident.incidentNumber,
+          actualCostAud: actualCost,
+          chargedAud: chargedTotal,
+        },
+        sentById: args.actorId,
+      });
+    }
+  } catch (err) {
+    const { logger } = await import("@/lib/logger");
+    logger.error(
+      {
+        err: err instanceof Error ? err.message : String(err),
+        incidentId: incident.id,
+      },
+      "incident-charge: work-order cost feedback notification failed",
+    );
+  }
+
+  return { actualDamageCostWritten };
 }

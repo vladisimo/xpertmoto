@@ -48,6 +48,10 @@ export async function closeOutQuotePendingCharges(
       resolution: "QUOTE_PENDING",
       status: { in: ["PROVISIONAL", "CONFIRMED"] },
       capturedPaymentId: null,
+      // Assessment-parented flow only: since the damage surface unified,
+      // charges can be parented by an Incident instead — those are billed
+      // through the incident-charge service, never a quote close-out.
+      returnAssessmentId: { not: null },
     },
     include: {
       returnAssessment: {
@@ -76,6 +80,9 @@ export async function closeOutQuotePendingCharges(
   let billed = 0;
   let bookingCompleted = false;
   for (const charge of charges) {
+    // TS can't see the `returnAssessmentId: { not: null }` filter above —
+    // narrow explicitly (never bill a charge whose booking we can't resolve).
+    if (!charge.returnAssessment) continue;
     const booking = charge.returnAssessment.booking;
     const cap = Number(charge.quoteCapAmount ?? 0);
     const ackCapped = r2(

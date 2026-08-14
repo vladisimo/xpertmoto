@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -37,8 +38,16 @@ const TYPES = [
 ] as const;
 const SEVERITIES = ["MINOR", "MODERATE", "MAJOR", "TOTAL_LOSS"] as const;
 
+/** Sentinel for the explicit "no linked booking" choice in the select. */
+const NO_BOOKING = "NONE";
+
+/** Stable placeholder for the disabled candidate query (a fresh `new Date()`
+ *  per render would churn the TanStack query key). */
+const EPOCH = new Date(0);
+
 const schema = z.object({
   vehicleId: z.string().min(1, "Required"),
+  bookingId: z.string().optional(),
   type: z.enum(TYPES),
   severity: z.enum(SEVERITIES),
   dateTime: z.string().min(1, "Required"),
@@ -55,6 +64,7 @@ type Values = z.infer<typeof schema>;
 function defaults(): Values {
   return {
     vehicleId: "",
+    bookingId: "",
     type: "ACCIDENT",
     severity: "MINOR",
     dateTime: new Date().toISOString().slice(0, 16),
@@ -94,9 +104,58 @@ export function IncidentSheet({
   // incident detail page if one materialises.
   const showClaimFields = incidentType === "THEFT" || incidentType === "ACCIDENT";
 
+  // Booking linkage (Area 5): once the vehicle + occurrence time are known,
+  // ask the swap-aware matcher who held the vehicle then and offer the
+  // candidates in a select. A manual pick that disagrees with the matcher
+  // warns but never blocks.
+  const watchedVehicleId = form.watch("vehicleId");
+  const watchedDateTime = form.watch("dateTime");
+  const occurredAt =
+    watchedDateTime && !Number.isNaN(Date.parse(watchedDateTime))
+      ? new Date(watchedDateTime)
+      : null;
+  const { data: candidates } = trpc.fleet.candidateBookingsForIncident.useQuery(
+    { vehicleId: watchedVehicleId, at: occurredAt ?? EPOCH },
+    { enabled: !!watchedVehicleId && !!occurredAt },
+  );
+  const selectedBookingId = form.watch("bookingId") ?? "";
+  const singleMatch =
+    candidates && candidates.length === 1 && candidates[0]?.confidence === "match"
+      ? candidates[0]
+      : null;
+  useEffect(() => {
+    // Auto-suggest: pre-select an unambiguous match while the field is
+    // untouched; clear a stale pick when the candidate list changes under it.
+    const current = form.getValues("bookingId") ?? "";
+    const inList = (id: string) => (candidates ?? []).some((c) => c.bookingId === id);
+    if (current && current !== NO_BOOKING && !inList(current)) {
+      form.setValue("bookingId", "");
+    } else if (!current && singleMatch) {
+      form.setValue("bookingId", singleMatch.bookingId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidates]);
+  const mismatchWarning =
+    candidates && candidates.length > 0
+      ? selectedBookingId === NO_BOOKING
+        ? `The matcher attributes this vehicle at that time to ${candidates
+            .map((c) => c.bookingReference)
+            .join(", ")} — double-check before reporting without a booking.`
+        : singleMatch && selectedBookingId && selectedBookingId !== singleMatch.bookingId
+          ? `The matcher suggests ${singleMatch.bookingReference} (${singleMatch.customerName}) held this vehicle at that time.`
+          : null
+      : null;
+
   async function onSubmit(values: Values) {
+    const linkedBookingId =
+      values.bookingId && values.bookingId !== NO_BOOKING ? values.bookingId : undefined;
+    const linkedCustomerId = linkedBookingId
+      ? (candidates ?? []).find((c) => c.bookingId === linkedBookingId)?.customerId
+      : undefined;
     await create.mutateAsync({
       vehicleId: values.vehicleId,
+      bookingId: linkedBookingId,
+      customerId: linkedCustomerId,
       type: values.type,
       severity: values.severity,
       dateTime: new Date(values.dateTime),
@@ -223,6 +282,50 @@ export function IncidentSheet({
                     </FormItem>
                   )}
                 />
+                {watchedVehicleId && occurredAt && (
+                  <FormField
+                    control={form.control}
+                    name="bookingId"
+                    render={({ field }) => (
+                      <FormItem className="md:col-span-2">
+                        <FormLabel>Linked booking</FormLabel>
+                        <Select onValueChange={field.onChange} value={field.value ?? ""}>
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select booking…" />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            {(candidates ?? []).map((c) => (
+                              <SelectItem key={c.bookingId} value={c.bookingId}>
+                                {c.bookingReference} · {c.customerName}
+                                {c.confidence === "match" ? " (suggested)" : ""}
+                              </SelectItem>
+                            ))}
+                            <SelectItem value={NO_BOOKING}>No linked booking</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {candidates && candidates.length > 1 && (
+                          <p className="text-xs text-muted-foreground">
+                            Multiple bookings overlap this vehicle at that time — pick
+                            deliberately.
+                          </p>
+                        )}
+                        {candidates && candidates.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            No booking held this vehicle at that time.
+                          </p>
+                        )}
+                        {mismatchWarning && (
+                          <p className="caption rounded-md border border-border bg-muted p-2">
+                            {mismatchWarning}
+                          </p>
+                        )}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
                 <FormField
                   control={form.control}
                   name="location"

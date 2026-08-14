@@ -91,6 +91,20 @@ const sendNotificationMock = vi.fn(async (..._a: unknown[]) => undefined);
 vi.mock("@/server/services/notification-sender", () => ({
   sendNotification: (...a: unknown[]) => sendNotificationMock(...a),
 }));
+// Area 5 — candidateBookingsForIncident delegates to the swap-aware matcher
+// (mirror-tested in tests/unit/services/booking-matcher.test.ts); stub it so
+// the router specs assert the match/ambiguous shaping only.
+const findCandidateBookingsForVehicleAtMock = vi.fn();
+vi.mock("@/server/services/booking-matcher", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../../../src/server/services/booking-matcher")
+  >();
+  return {
+    ...actual,
+    findCandidateBookingsForVehicleAt: (...a: unknown[]) =>
+      findCandidateBookingsForVehicleAtMock(...a),
+  };
+});
 
 type Caller = ReturnType<typeof fleetRouter.createCaller>;
 
@@ -922,6 +936,8 @@ describe("fleet.chargeCustomerForIncident", () => {
     const incident = {
       id: "incident1",
       incidentNumber: "2026-0042",
+      severity: "MODERATE",
+      description: "Dropped at the lights",
       customerLiable: over.customerLiable ?? true,
       customerChargeAmount: null,
       actualDamageCost: null,
@@ -952,6 +968,11 @@ describe("fleet.chargeCustomerForIncident", () => {
       },
       bondLedger: { update: vi.fn().mockResolvedValue({}) },
       booking: { update: bookingUpdate },
+      damageCharge: {
+        create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+          Promise.resolve({ id: "dc1", ...data }),
+        ),
+      },
       $transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
     };
     capturePaymentIntentMock.mockResolvedValue({
@@ -1128,7 +1149,14 @@ describe("fleet.setIncidentExcessVoided", () => {
 });
 
 describe("fleet.updateIncidentDetails", () => {
-  function makeDetailsCtx(over: { role?: "STAFF" | "MANAGER"; anon?: boolean } = {}) {
+  function makeDetailsCtx(
+    over: {
+      role?: "STAFF" | "MANAGER";
+      anon?: boolean;
+      incidentBookingId?: string | null;
+      linkTarget?: { id: string; customerId: string; deletedAt?: Date | null } | null;
+    } = {},
+  ) {
     const incidentUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
       id: "incident1",
       incidentNumber: "2026-0042",
@@ -1137,8 +1165,17 @@ describe("fleet.updateIncidentDetails", () => {
       location: null,
       thirdPartyInvolved: false,
       thirdPartyDetails: null,
+      bookingId: over.incidentBookingId === undefined ? "bk1" : over.incidentBookingId,
+      customerId: null,
+      customerLiable: false,
       ...data,
     }));
+    const bookingFindUnique = vi.fn(async () =>
+      over.linkTarget === undefined
+        ? { id: "bk9", customerId: "cust9", deletedAt: null }
+        : over.linkTarget,
+    );
+    const profileUpdateMany = vi.fn(async () => ({ count: 1 }));
     const prisma = {
       incident: {
         findUniqueOrThrow: vi.fn(async () => ({
@@ -1148,10 +1185,14 @@ describe("fleet.updateIncidentDetails", () => {
           insuranceClaimNumber: null,
           location: null,
           thirdPartyInvolved: false,
-          bookingId: "bk1",
+          bookingId: over.incidentBookingId === undefined ? "bk1" : over.incidentBookingId,
+          customerId: null,
+          customerLiable: false,
         })),
         update: incidentUpdate,
       },
+      booking: { findUnique: bookingFindUnique },
+      customerProfile: { updateMany: profileUpdateMany },
     };
     const role = over.role ?? "STAFF";
     const ctx = over.anon
@@ -1163,7 +1204,7 @@ describe("fleet.updateIncidentDetails", () => {
           logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
           reqId: "r1",
         };
-    return { ctx: ctx as never, incidentUpdate };
+    return { ctx: ctx as never, incidentUpdate, bookingFindUnique, profileUpdateMany };
   }
 
   it("writes the claim references and audits the change", async () => {
@@ -1214,6 +1255,251 @@ describe("fleet.updateIncidentDetails", () => {
     await expect(
       caller.updateIncidentDetails({ id: "incident1", policeReportNumber: "X-1" }),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  // ---- Area 5: booking linkage + customerLiable toggle ----
+
+  it("links a booking, derives customerId from it, records the incident counter and audits", async () => {
+    const { ctx, incidentUpdate, profileUpdateMany } = makeDetailsCtx({
+      incidentBookingId: null,
+    });
+    const caller = fleetRouter.createCaller(ctx);
+
+    const res = await caller.updateIncidentDetails({ id: "incident1", bookingId: "bk9" });
+
+    expect(incidentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ bookingId: "bk9", customerId: "cust9" }),
+      }),
+    );
+    expect(res.bookingId).toBe("bk9");
+    expect(res.customerId).toBe("cust9");
+    // Late linkage keeps CustomerProfile.incidentCount honest.
+    expect(profileUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "cust9" } }),
+    );
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "INCIDENT_DETAILS_UPDATED",
+        previousData: expect.objectContaining({ bookingId: null }),
+        newData: expect.objectContaining({ bookingId: "bk9", customerId: "cust9" }),
+      }),
+    );
+  });
+
+  it("unlinks with bookingId null, clearing customerId too", async () => {
+    const { ctx, incidentUpdate, bookingFindUnique } = makeDetailsCtx();
+    const caller = fleetRouter.createCaller(ctx);
+
+    await caller.updateIncidentDetails({ id: "incident1", bookingId: null });
+
+    expect(bookingFindUnique).not.toHaveBeenCalled();
+    expect(incidentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ bookingId: null, customerId: null }),
+      }),
+    );
+  });
+
+  it("NOT_FOUNDs a link to a missing or deleted booking", async () => {
+    const { ctx, incidentUpdate } = makeDetailsCtx({ linkTarget: null });
+    const caller = fleetRouter.createCaller(ctx);
+
+    await expect(
+      caller.updateIncidentDetails({ id: "incident1", bookingId: "bk-missing" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(incidentUpdate).not.toHaveBeenCalled();
+  });
+
+  it("toggles customerLiable (charge-card precondition)", async () => {
+    const { ctx, incidentUpdate } = makeDetailsCtx();
+    const caller = fleetRouter.createCaller(ctx);
+
+    await caller.updateIncidentDetails({ id: "incident1", customerLiable: true });
+
+    expect(incidentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ customerLiable: true }) }),
+    );
+  });
+});
+
+describe("fleet.candidateBookingsForIncident", () => {
+  function makeCandidateCtx(over: { anon?: boolean } = {}) {
+    const prisma = {};
+    const ctx = over.anon
+      ? { prisma, user: null, session: null, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, reqId: "r1" }
+      : {
+          prisma,
+          user: { id: "staff1", role: "STAFF" },
+          session: { user: { id: "staff1", role: "STAFF" } },
+          logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+          reqId: "r1",
+        };
+    return { ctx: ctx as never };
+  }
+  const candidate = (n: number) => ({
+    id: `bk${n}`,
+    bookingReference: `XPM-2026-000${n}`,
+    customerId: `cust${n}`,
+    status: "ACTIVE",
+    pickupDateTime: new Date("2026-08-01T09:00:00+10:00"),
+    returnDateTime: new Date("2026-08-10T09:00:00+10:00"),
+    customer: { firstName: "Ada", lastName: `L${n}`, email: `a${n}@x.com` },
+  });
+
+  it("marks a single candidate as a match", async () => {
+    findCandidateBookingsForVehicleAtMock.mockResolvedValue([candidate(1)]);
+    const { ctx } = makeCandidateCtx();
+    const caller = fleetRouter.createCaller(ctx);
+
+    const res = await caller.candidateBookingsForIncident({
+      vehicleId: "veh1",
+      at: new Date("2026-08-05T12:00:00+10:00"),
+    });
+
+    expect(res).toEqual([
+      {
+        bookingId: "bk1",
+        bookingReference: "XPM-2026-0001",
+        customerId: "cust1",
+        customerName: "Ada L1",
+        confidence: "match",
+      },
+    ]);
+  });
+
+  it("flags every candidate ambiguous when rentals overlap", async () => {
+    findCandidateBookingsForVehicleAtMock.mockResolvedValue([candidate(1), candidate(2)]);
+    const { ctx } = makeCandidateCtx();
+    const caller = fleetRouter.createCaller(ctx);
+
+    const res = await caller.candidateBookingsForIncident({
+      vehicleId: "veh1",
+      at: new Date("2026-08-05T12:00:00+10:00"),
+    });
+
+    expect(res).toHaveLength(2);
+    expect(res.map((c) => c.confidence)).toEqual(["ambiguous", "ambiguous"]);
+  });
+
+  it("returns an empty list when nobody held the vehicle", async () => {
+    findCandidateBookingsForVehicleAtMock.mockResolvedValue([]);
+    const { ctx } = makeCandidateCtx();
+    const caller = fleetRouter.createCaller(ctx);
+
+    expect(
+      await caller.candidateBookingsForIncident({ vehicleId: "veh1", at: new Date() }),
+    ).toEqual([]);
+  });
+
+  it("rejects an anonymous caller (staffProcedure)", async () => {
+    const { ctx } = makeCandidateCtx({ anon: true });
+    const caller = fleetRouter.createCaller(ctx);
+    await expect(
+      caller.candidateBookingsForIncident({ vehicleId: "veh1", at: new Date() }),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+});
+
+describe("fleet.updateWorkOrderStatus — incident actual-cost feedback (Area 5)", () => {
+  function makeWoCtx(over: {
+    relatedIncidentId?: string | null;
+    incident?: Record<string, unknown> | null;
+    incPayments?: Array<{ amount: number }>;
+  } = {}) {
+    const wo = {
+      id: "wo1",
+      workOrderNumber: "WO-100",
+      vehicleId: "veh1",
+      startedAt: new Date(),
+      actualCost: null,
+      relatedIncidentId:
+        over.relatedIncidentId === undefined ? "incident1" : over.relatedIncidentId,
+      // AVAILABLE so the back-to-available vehicle write is skipped — these
+      // specs are about the incident feedback only.
+      vehicle: { status: "AVAILABLE", currentOdometerKm: 1200, depot: { slug: "brisbane" } },
+    };
+    const incident =
+      over.incident === null
+        ? null
+        : {
+            id: "incident1",
+            incidentNumber: "2026-0042",
+            customerLiable: true,
+            actualDamageCost: null,
+            vehicle: { depotId: "d1", internalCode: "MTB-1" },
+            ...(over.incident ?? {}),
+          };
+    const incidentUpdate = vi.fn(async () => ({}));
+    const incidentFindUnique = vi.fn(async () => incident);
+    const prisma = {
+      maintenanceWorkOrder: {
+        findUniqueOrThrow: vi.fn(async () => wo),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "wo1",
+          ...data,
+        })),
+      },
+      staffTaskActivity: { findMany: vi.fn(async () => []) },
+      // Quote close-out sweep: no QUOTE_PENDING charges on this WO.
+      damageCharge: { findMany: vi.fn(async () => []) },
+      incident: { findUnique: incidentFindUnique, update: incidentUpdate },
+      payment: { findMany: vi.fn(async () => over.incPayments ?? []) },
+      user: { findMany: vi.fn(async () => [{ id: "mgrA" }]) },
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" },
+      session: { user: { id: "staff1", role: "STAFF" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["updateWorkOrderStatus"]>[0];
+    return { ctx, incidentUpdate, incidentFindUnique };
+  }
+
+  it("backfills Incident.actualDamageCost on COMPLETED and nudges managers to review the un-raised charge", async () => {
+    const { ctx, incidentUpdate } = makeWoCtx({ incPayments: [] });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await caller.updateWorkOrderStatus({ id: "wo1", status: "COMPLETED", actualCost: 480 });
+
+    expect(incidentUpdate).toHaveBeenCalledWith({
+      where: { id: "incident1" },
+      data: { actualDamageCost: 480 },
+    });
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "INCIDENT_ACTUAL_COST_RECORDED" }),
+    );
+    const notif = sendNotificationMock.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .find((n) => String(n.subject).includes("actual repair cost recorded"));
+    expect(notif).toBeTruthy();
+    expect(String(notif?.body)).toContain("has not been charged yet");
+  });
+
+  it("suggests a partial refund when the actual cost lands under what was charged (ACL)", async () => {
+    const { ctx } = makeWoCtx({ incPayments: [{ amount: 500 }, { amount: 300 }] });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await caller.updateWorkOrderStatus({ id: "wo1", status: "COMPLETED", actualCost: 512.5 });
+
+    const notif = sendNotificationMock.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .find((n) => String(n.subject).includes("below amount charged"));
+    expect(notif).toBeTruthy();
+    expect(String(notif?.body)).toContain("287.50");
+  });
+
+  it("leaves incidents alone when the work order has no relatedIncidentId", async () => {
+    const { ctx, incidentFindUnique } = makeWoCtx({ relatedIncidentId: null });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await caller.updateWorkOrderStatus({ id: "wo1", status: "COMPLETED", actualCost: 480 });
+
+    expect(incidentFindUnique).not.toHaveBeenCalled();
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1327,6 +1613,12 @@ describe("fleet.confirmTheft", () => {
       },
       staffTaskActivity: { findMany: vi.fn(async () => []) },
       payment: { findFirst: vi.fn(async () => null), create: paymentCreate },
+      damageCharge: {
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "dc1",
+          ...data,
+        })),
+      },
       bondLedger: { update: vi.fn(async () => ({})) },
       booking: {
         update: vi.fn(async () => ({})),

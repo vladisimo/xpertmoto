@@ -25,6 +25,19 @@ const tx = {
 };
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
+// The excess cap's DB readers are unit-tested in tests/unit/services/
+// excess.test.ts — stub them here (generous headroom, nothing consumed) so
+// this suite keeps exercising the close-out billing math; the pure
+// applyExcessCap stays real.
+vi.mock("@/server/services/excess", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getBookingExcess: vi.fn(async () => ({
+    excess: 3000,
+    source: "SETTING",
+    tierName: null,
+  })),
+  getDamageLiabilityUsed: vi.fn(async () => 0),
+}));
 vi.mock("@/server/services/revenue-aggregator", () => ({
   recordAdditionalCharges: (...a: unknown[]) => recordAdditionalCharges(...a),
   recordBookingCompletion: (...a: unknown[]) => recordBookingCompletion(...a),

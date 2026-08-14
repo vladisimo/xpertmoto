@@ -255,6 +255,14 @@ export const returnRouter = createTRPCRouter({
         where: { id: input.chargeId },
         include: { returnAssessment: true },
       });
+      if (!charge.returnAssessment) {
+        // Unified damage surface: incident-parented charges are managed via
+        // the incident detail flow, never the return wizard.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — manage it from the incident detail page.",
+        });
+      }
       captureBookingId(ctx, charge.returnAssessment.bookingId);
       if (charge.returnAssessment.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Assessment sealed" });
@@ -1169,6 +1177,15 @@ export const returnRouter = createTRPCRouter({
         },
       });
 
+      if (!charge.returnAssessment) {
+        // Unified damage surface: confirmCharge stays assessment-parented
+        // only. Incident-parented charges are raised (already CONFIRMED /
+        // CAPTURED with their Payment) by the incident-charge service.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — it is billed via the incident charge flow.",
+        });
+      }
       if (charge.returnAssessment.status !== "SIGNED") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -1336,6 +1353,14 @@ export const returnRouter = createTRPCRouter({
           },
         },
       });
+      if (!charge.returnAssessment) {
+        // Unified damage surface: incident-parented charges never go through
+        // the quote close-out — they're billed by the incident-charge service.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — it is billed via the incident charge flow.",
+        });
+      }
       captureBookingId(ctx, charge.returnAssessment.bookingId);
       if (charge.resolution !== "QUOTE_PENDING") {
         throw new TRPCError({

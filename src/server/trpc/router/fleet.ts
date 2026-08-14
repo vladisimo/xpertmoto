@@ -17,7 +17,11 @@ import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator"
 import { writeAuditAsync } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import { getBookingExcess, getDamageLiabilityUsed } from "@/server/services/excess";
-import { chargeCustomerForIncident } from "@/server/services/incident-charge";
+import {
+  chargeCustomerForIncident,
+  recordWorkOrderCostForIncident,
+} from "@/server/services/incident-charge";
+import { findCandidateBookingsForVehicleAt } from "@/server/services/booking-matcher";
 import {
   terminateBookingForLoss,
   TERMINATABLE_STATUSES,
@@ -2362,6 +2366,21 @@ export const fleetRouter = createTRPCRouter({
           actualCost: input.actualCost ?? null,
           staffUserId: ctx.user.id,
         });
+
+        // Area 5: repair work order tied to an incident — feed the actual
+        // cost back (backfill Incident.actualDamageCost, nudge managers to
+        // review the incident charge / issue a partial refund when the
+        // actual cost came in under what was charged).
+        if (wo.relatedIncidentId) {
+          await recordWorkOrderCostForIncident(ctx.prisma, {
+            incidentId: wo.relatedIncidentId,
+            workOrderNumber: wo.workOrderNumber,
+            actualCost:
+              input.actualCost ??
+              (wo.actualCost != null ? Number(wo.actualCost) : null),
+            actorId: ctx.user.id,
+          });
+        }
       }
 
       await trackServer({
@@ -2480,19 +2499,79 @@ export const fleetRouter = createTRPCRouter({
     }),
   ),
 
-  incidentDetail: staffProcedure.input(z.object({ id: z.string() })).query(({ ctx, input }) =>
-    ctx.prisma.incident.findUnique({
+  incidentDetail: staffProcedure.input(z.object({ id: z.string() })).query(async ({ ctx, input }) => {
+    const incident = await ctx.prisma.incident.findUnique({
       where: { id: input.id },
       include: {
         vehicle: { include: { category: true } },
-        booking: { include: { customer: true } },
+        booking: {
+          include: {
+            customer: true,
+            // Bond-vs-card split preview on the charge card: how much of a
+            // still-HELD bond the charge would capture before card follow-up.
+            bondLedger: {
+              select: { status: true, heldAmount: true, capturedAmount: true },
+            },
+          },
+        },
         reportedBy: true,
         assignedTo: true,
         photos: true,
         notes: { include: { user: true }, orderBy: { createdAt: "desc" } },
+        // Unified damage surface: charge rows parented by this incident.
+        damageCharges: { orderBy: { createdAt: "asc" } },
       },
+    });
+    if (!incident) return null;
+    // INC-% payments for this incident (bond capture + card follow-up).
+    // Historical pre-unification charges have these payments but no
+    // DamageCharge rows, so the payment list is the authoritative "has this
+    // incident been charged" surface.
+    const chargeReference = `INC-${incident.incidentNumber}`;
+    const chargePayments = await ctx.prisma.payment.findMany({
+      where: {
+        reference: { in: [chargeReference, `${chargeReference}-CARD`] },
+        deletedAt: null,
+      },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        reference: true,
+        amount: true,
+        status: true,
+        method: true,
+        createdAt: true,
+        processedAt: true,
+      },
+    });
+    return { ...incident, chargePayments };
+  }),
+
+  /**
+   * Area 5 — who held this vehicle when the incident happened? Wires the
+   * swap-aware matcher (`booking-matcher.ts`) so the incident sheet / detail
+   * page can suggest the booking to link. One candidate → `match`;
+   * overlapping rentals → every candidate flagged `ambiguous` so staff pick
+   * deliberately (a mismatching manual pick warns, never blocks).
+   */
+  candidateBookingsForIncident: staffProcedure
+    .input(z.object({ vehicleId: z.string(), at: z.coerce.date() }))
+    .query(async ({ ctx, input }) => {
+      const candidates = await findCandidateBookingsForVehicleAt(
+        ctx.prisma as PrismaClient,
+        input.vehicleId,
+        input.at,
+      );
+      const confidence: "match" | "ambiguous" =
+        candidates.length === 1 ? "match" : "ambiguous";
+      return candidates.map((b) => ({
+        bookingId: b.id,
+        bookingReference: b.bookingReference,
+        customerId: b.customerId,
+        customerName: `${b.customer.firstName} ${b.customer.lastName}`.trim(),
+        confidence,
+      }));
     }),
-  ),
 
   /**
    * D2: one-click "charge customer" on an incident. Thin auth/input wrapper
@@ -2717,6 +2796,12 @@ export const fleetRouter = createTRPCRouter({
         location: z.string().trim().max(300).nullish(),
         thirdPartyInvolved: z.boolean().optional(),
         thirdPartyDetails: z.record(z.unknown()).nullish(),
+        /** Area 5 — link (or unlink with null) the booking that held the
+         *  vehicle at the incident time. Linking derives `customerId` from
+         *  the booking; unlinking clears both. */
+        bookingId: z.string().nullish(),
+        /** Area 5 — charge-card precondition: mark the customer liable. */
+        customerLiable: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -2730,9 +2815,11 @@ export const fleetRouter = createTRPCRouter({
           location: true,
           thirdPartyInvolved: true,
           bookingId: true,
+          customerId: true,
+          customerLiable: true,
         },
       });
-      const data: Prisma.IncidentUpdateInput = {};
+      const data: Prisma.IncidentUncheckedUpdateInput = {};
       if (input.policeReportNumber !== undefined) {
         data.policeReportNumber = input.policeReportNumber || null;
       }
@@ -2749,6 +2836,25 @@ export const fleetRouter = createTRPCRouter({
             ? Prisma.DbNull
             : (input.thirdPartyDetails as Prisma.InputJsonValue);
       }
+      if (input.customerLiable !== undefined) {
+        data.customerLiable = input.customerLiable;
+      }
+      if (input.bookingId !== undefined) {
+        if (input.bookingId === null) {
+          data.bookingId = null;
+          data.customerId = null;
+        } else if (input.bookingId !== incident.bookingId) {
+          const booking = await ctx.prisma.booking.findUnique({
+            where: { id: input.bookingId },
+            select: { id: true, customerId: true, deletedAt: true },
+          });
+          if (!booking || booking.deletedAt) {
+            throw new TRPCError({ code: "NOT_FOUND", message: "Booking not found." });
+          }
+          data.bookingId = booking.id;
+          data.customerId = booking.customerId;
+        }
+      }
       const updated = await ctx.prisma.incident.update({
         where: { id: incident.id },
         data,
@@ -2760,8 +2866,16 @@ export const fleetRouter = createTRPCRouter({
           location: true,
           thirdPartyInvolved: true,
           thirdPartyDetails: true,
+          bookingId: true,
+          customerId: true,
+          customerLiable: true,
         },
       });
+      // Late linkage keeps the customer's incident counter honest — the
+      // create path only records when a customer was known up front.
+      if (!incident.customerId && updated.customerId) {
+        await recordIncidentForCustomer(ctx.prisma, updated.customerId);
+      }
       writeAuditAsync(ctx.prisma, {
         userId: ctx.user.id,
         action: "INCIDENT_DETAILS_UPDATED",
@@ -2772,13 +2886,18 @@ export const fleetRouter = createTRPCRouter({
           insuranceClaimNumber: incident.insuranceClaimNumber,
           location: incident.location,
           thirdPartyInvolved: incident.thirdPartyInvolved,
+          bookingId: incident.bookingId,
+          customerId: incident.customerId,
+          customerLiable: incident.customerLiable,
         },
         newData: {
           policeReportNumber: updated.policeReportNumber,
           insuranceClaimNumber: updated.insuranceClaimNumber,
           location: updated.location,
           thirdPartyInvolved: updated.thirdPartyInvolved,
-          bookingId: incident.bookingId,
+          bookingId: updated.bookingId,
+          customerId: updated.customerId,
+          customerLiable: updated.customerLiable,
         },
       });
       return updated;

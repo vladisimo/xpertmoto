@@ -1,8 +1,17 @@
 "use client";
 import { useMemo, useState, use } from "react";
 import Link from "next/link";
-import { Loader2, ShieldAlert } from "lucide-react";
+import { Check, Circle, Loader2, ShieldAlert } from "lucide-react";
+import type { inferRouterOutputs } from "@trpc/server";
+import type { AppRouter } from "@/server/trpc/router";
 import { trpc } from "@/lib/trpc/client";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -342,6 +351,19 @@ export default function IncidentDetailPage(props: { params: Promise<{ id: string
         </Card>
       )}
 
+      {isManager && (
+        <ChargeCustomerCard
+          inc={inc}
+          excess={excess ?? null}
+          onDone={() => {
+            void util.fleet.incidentDetail.invalidate({ id });
+            if (inc.booking?.id) {
+              void util.staffBooking.excessSummary.invalidate({ bookingId: inc.booking.id });
+            }
+          }}
+        />
+      )}
+
       <Card>
         <CardHeader><CardTitle className="h3">Update status</CardTitle></CardHeader>
         <CardContent className="space-y-4">
@@ -378,6 +400,320 @@ export default function IncidentDetailPage(props: { params: Promise<{ id: string
         </CardContent>
       </Card>
     </PageShell>
+  );
+}
+
+type IncidentDetail = NonNullable<
+  inferRouterOutputs<AppRouter>["fleet"]["incidentDetail"]
+>;
+type ExcessSummary = inferRouterOutputs<AppRouter>["staffBooking"]["excessSummary"];
+
+function ChecklistRow({ ok, children }: { ok: boolean; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-2">
+      {ok ? (
+        <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-label="Done" />
+      ) : (
+        <Circle
+          className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
+          aria-label="Outstanding"
+        />
+      )}
+      <span className={ok ? "" : "text-muted-foreground"}>{children}</span>
+    </li>
+  );
+}
+
+/**
+ * Area 5 — manager-only "Charge customer" card (server enforces manager on
+ * the mutation too). Walks the preconditions (booking linked, customer
+ * liable, amount set), previews the excess-capped result and the
+ * bond-vs-card split, then raises the charge through
+ * `fleet.chargeCustomerForIncident` (bond-first capture, excess cap,
+ * DamageCharge rows — all in the incident-charge service). Once charged,
+ * lists the INC-% payments instead.
+ */
+function ChargeCustomerCard({
+  inc,
+  excess,
+  onDone,
+}: {
+  inc: IncidentDetail;
+  excess: ExcessSummary | null;
+  onDone: () => void;
+}) {
+  const defaultAmount = inc.actualDamageCost ?? inc.estimatedDamageCost;
+  const [amountInput, setAmountInput] = useState(() =>
+    defaultAmount != null ? Number(defaultAmount).toFixed(2) : "",
+  );
+  const [overrideReason, setOverrideReason] = useState("");
+  const [linkChoice, setLinkChoice] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const updateDetails = trpc.fleet.updateIncidentDetails.useMutation({
+    onSuccess: () => {
+      setError(null);
+      onDone();
+    },
+    onError: (e) => setError(e.message),
+  });
+  const charge = trpc.fleet.chargeCustomerForIncident.useMutation({
+    onSuccess: () => {
+      setError(null);
+      setOverrideReason("");
+      onDone();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  // Link-booking control (only fetched while unlinked): the swap-aware
+  // matcher suggests who held the vehicle at the incident time.
+  const { data: candidates } = trpc.fleet.candidateBookingsForIncident.useQuery(
+    { vehicleId: inc.vehicle.id, at: new Date(inc.dateTime) },
+    { enabled: !inc.booking },
+  );
+
+  const amount = useMemo(() => {
+    const n = Number(amountInput);
+    return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+  }, [amountInput]);
+
+  const alreadyCharged = inc.chargePayments.length > 0;
+  const bond = inc.booking?.bondLedger ?? null;
+  const bondAvailable =
+    bond && bond.status === "HELD"
+      ? Math.max(0, Number(bond.heldAmount) - Number(bond.capturedAmount))
+      : 0;
+
+  const overriding = overrideReason.trim().length >= 3;
+  const capApplies = !inc.excessVoided && !overriding && excess != null;
+  const chargeable =
+    amount == null
+      ? null
+      : capApplies
+        ? Math.round(Math.min(amount, excess.remaining) * 100) / 100
+        : amount;
+  const cappedBy =
+    amount != null && chargeable != null
+      ? Math.round((amount - chargeable) * 100) / 100
+      : 0;
+  const fromBond =
+    chargeable != null ? Math.round(Math.min(bondAvailable, chargeable) * 100) / 100 : 0;
+  const fromCard =
+    chargeable != null ? Math.round((chargeable - fromBond) * 100) / 100 : 0;
+
+  const bookValue =
+    inc.vehicle.currentBookValue != null ? Number(inc.vehicle.currentBookValue) : null;
+  const ready =
+    !!inc.booking && inc.customerLiable && chargeable != null && chargeable > 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="h3">Charge customer</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4 text-sm">
+        {alreadyCharged ? (
+          <>
+            <p>The customer has been charged for this incident.</p>
+            <ul className="divide-y rounded-md border">
+              {inc.chargePayments.map((p) => (
+                <li key={p.id} className="flex items-center justify-between gap-3 p-3">
+                  <div>
+                    <div className="font-medium">{p.reference}</div>
+                    <div className="caption text-muted-foreground">
+                      {p.reference.endsWith("-CARD")
+                        ? "Card follow-up"
+                        : "Captured from bond"}
+                      {" · "}
+                      {formatDateTime(p.createdAt)}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{formatCurrency(Number(p.amount))}</span>
+                    <StatusBadge status={p.status as StatusKey} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <>
+            <ul className="space-y-2">
+              <ChecklistRow ok={!!inc.booking}>
+                {inc.booking ? (
+                  <>Booking linked — {inc.booking.bookingReference}</>
+                ) : (
+                  <span className="block space-y-2">
+                    <span className="block">Link the booking that held the vehicle</span>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <Select value={linkChoice} onValueChange={setLinkChoice}>
+                        <SelectTrigger className="w-64">
+                          <SelectValue placeholder="Select booking…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(candidates ?? []).map((c) => (
+                            <SelectItem key={c.bookingId} value={c.bookingId}>
+                              {c.bookingReference} · {c.customerName}
+                              {c.confidence === "match" ? " (suggested)" : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={!linkChoice || updateDetails.isPending}
+                        onClick={() =>
+                          updateDetails.mutate({ id: inc.id, bookingId: linkChoice })
+                        }
+                      >
+                        Link booking
+                      </Button>
+                    </span>
+                    {candidates && candidates.length === 0 && (
+                      <span className="caption block text-muted-foreground">
+                        No booking held this vehicle at the incident time.
+                      </span>
+                    )}
+                    {candidates && candidates.length > 1 && (
+                      <span className="caption block text-muted-foreground">
+                        Multiple bookings overlap this vehicle at that time — pick
+                        deliberately.
+                      </span>
+                    )}
+                  </span>
+                )}
+              </ChecklistRow>
+              <ChecklistRow ok={inc.customerLiable}>
+                <span className="flex flex-wrap items-center gap-2">
+                  Customer marked liable
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={updateDetails.isPending}
+                    onClick={() =>
+                      updateDetails.mutate({
+                        id: inc.id,
+                        customerLiable: !inc.customerLiable,
+                      })
+                    }
+                  >
+                    {inc.customerLiable ? "Unset" : "Mark liable"}
+                  </Button>
+                </span>
+              </ChecklistRow>
+              <ChecklistRow ok={amount != null}>Charge amount set</ChecklistRow>
+            </ul>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="incident-charge-amount">Charge amount (A$)</Label>
+                <Input
+                  id="incident-charge-amount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={amountInput}
+                  onChange={(e) => setAmountInput(e.target.value)}
+                />
+                <p className="caption text-muted-foreground">
+                  Defaults to the actual damage cost when recorded, otherwise the
+                  estimate.
+                </p>
+              </div>
+              {inc.severity === "TOTAL_LOSS" && bookValue != null && (
+                <div className="flex items-end pb-6">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setAmountInput(bookValue.toFixed(2))}
+                  >
+                    Charge book value ({formatCurrency(bookValue)})
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {inc.booking && amount != null && (
+              <div className="space-y-2 rounded-md border bg-muted/40 p-3">
+                {inc.excessVoided ? (
+                  <p>
+                    Excess cap voided for this incident — the full
+                    {" "}{formatCurrency(amount)} is chargeable.
+                  </p>
+                ) : excess ? (
+                  cappedBy > 0 && !overriding ? (
+                    <p>
+                      Insurance excess cap: only {formatCurrency(chargeable ?? 0)} of the
+                      {" "}{formatCurrency(amount)} is chargeable (remaining headroom
+                      {" "}{formatCurrency(excess.remaining)} of {formatCurrency(excess.excess)}).
+                    </p>
+                  ) : (
+                    <p>
+                      Within the insurance excess — {formatCurrency(chargeable ?? 0)}{" "}
+                      chargeable (headroom {formatCurrency(excess.remaining)} of{" "}
+                      {formatCurrency(excess.excess)}).
+                    </p>
+                  )
+                ) : null}
+                <p>
+                  Bond split: {formatCurrency(fromBond)} captured from the bond
+                  {fromCard > 0 ? (
+                    <> · {formatCurrency(fromCard)} follow-up card charge</>
+                  ) : null}
+                  {bondAvailable <= 0 ? " (no active bond hold — card only)" : null}.
+                </p>
+                {!inc.excessVoided && excess != null && cappedBy > 0 && (
+                  <div className="space-y-1.5 pt-1">
+                    <Label htmlFor="incident-charge-override">
+                      Manager override reason (charge past the cap)
+                    </Label>
+                    <Input
+                      id="incident-charge-override"
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="e.g. negligence per agreement §6 — audited"
+                    />
+                    {overriding && (
+                      <p className="caption text-muted-foreground">
+                        Override active — the full {formatCurrency(amount)} will be
+                        charged and audited.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {error && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-destructive">
+                {error}
+              </div>
+            )}
+
+            <Button
+              variant="destructive"
+              disabled={!ready || charge.isPending}
+              onClick={() =>
+                charge.mutate({
+                  incidentId: inc.id,
+                  amount: amount ?? undefined,
+                  overrideExcessCap: overriding
+                    ? { reason: overrideReason.trim() }
+                    : undefined,
+                })
+              }
+            >
+              {charge.isPending && (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden />
+              )}
+              Charge {chargeable != null ? formatCurrency(chargeable) : "customer"}
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

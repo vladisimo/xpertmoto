@@ -40,7 +40,15 @@ vi.mock("@/server/services/audit", async (importOriginal) => {
   };
 });
 
-import { chargeCustomerForIncident } from "../../../src/server/services/incident-charge";
+const sendNotificationMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/notification-sender", () => ({
+  sendNotification: (...a: unknown[]) => sendNotificationMock(...a),
+}));
+
+import {
+  chargeCustomerForIncident,
+  recordWorkOrderCostForIncident,
+} from "../../../src/server/services/incident-charge";
 
 function makeFixture(over: {
   booking?: Record<string, unknown> | null;
@@ -68,6 +76,8 @@ function makeFixture(over: {
     id: "incident1",
     incidentNumber: "2026-0042",
     status: over.incidentStatus ?? "REPORTED",
+    severity: "MODERATE",
+    description: "Dropped at the lights — left fairing cracked",
     customerLiable: over.customerLiable ?? true,
     customerChargeAmount: null,
     actualDamageCost: null,
@@ -90,6 +100,11 @@ function makeFixture(over: {
       Promise.resolve({ id: "incident1", ...data }),
     );
   const bookingUpdate = vi.fn().mockResolvedValue({});
+  const damageChargeCreate = vi
+    .fn()
+    .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
+      Promise.resolve({ id: `dc-${data.capturedPaymentId}`, ...data }),
+    );
   const prisma = {
     incident: {
       findUniqueOrThrow: vi.fn().mockResolvedValue(incident),
@@ -101,6 +116,7 @@ function makeFixture(over: {
     },
     bondLedger: { update: vi.fn().mockResolvedValue({}) },
     booking: { update: bookingUpdate },
+    damageCharge: { create: damageChargeCreate },
     $transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
   };
   capturePaymentIntentMock.mockResolvedValue({
@@ -110,7 +126,13 @@ function makeFixture(over: {
     latestChargeId: "ch_bond_1",
     captured: true,
   });
-  return { prisma: prisma as never, paymentCreate, bookingUpdate, incidentUpdate };
+  return {
+    prisma: prisma as never,
+    paymentCreate,
+    bookingUpdate,
+    incidentUpdate,
+    damageChargeCreate,
+  };
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -299,6 +321,83 @@ describe("chargeCustomerForIncident (service)", () => {
     );
   });
 
+  // ---- Area 5: unified damage surface — DamageCharge rows per money slice ----
+
+  it("creates a DamageCharge row per slice: bond slice CAPTURED with the bond deduction, card slice CONFIRMED on the PENDING payment", async () => {
+    const { prisma, damageChargeCreate } = makeFixture();
+
+    await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 800,
+      actorId: "mgr1",
+    });
+
+    expect(damageChargeCreate).toHaveBeenCalledTimes(2);
+    const rows = damageChargeCreate.mock.calls.map(
+      (c) => (c[0] as { data: Record<string, unknown> }).data,
+    );
+    const bondRow = rows.find((r) => r.status === "CAPTURED");
+    const cardRow = rows.find((r) => r.status === "CONFIRMED");
+    // Bond slice: money already captured — terminal row linked to the
+    // SUCCEEDED bond Payment, with the bond deduction recorded in cents.
+    expect(bondRow).toMatchObject({
+      incidentId: "incident1",
+      resolution: "STANDARD",
+      severity: "MODERATE",
+      amount: 500,
+      capturedPaymentId: "pay-INC-2026-0042",
+      bondDeductionCents: 50000,
+      createdById: "mgr1",
+    });
+    // Card slice: raised but not yet collected — linked to the PENDING
+    // card Payment the off-session sweep captures.
+    expect(cardRow).toMatchObject({
+      incidentId: "incident1",
+      resolution: "STANDARD",
+      severity: "MODERATE",
+      amount: 300,
+      capturedPaymentId: "pay-INC-2026-0042-CARD",
+      createdById: "mgr1",
+    });
+    expect(cardRow?.bondDeductionCents).toBeUndefined();
+    // CHECK-satisfying parent: incidentId set, no return-assessment parent.
+    for (const row of rows) {
+      expect(row.incidentId).toBe("incident1");
+      expect(row.returnAssessmentId).toBeUndefined();
+      expect(typeof row.description).toBe("string");
+      expect((row.description as string).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("creates only the card-slice DamageCharge when no bond hold remains", async () => {
+    const { prisma, damageChargeCreate } = makeFixture({
+      bondLedger: {
+        heldAmount: 500,
+        capturedAmount: 500,
+        status: "FULLY_CAPTURED",
+        stripePaymentIntentId: "pi_bond_1",
+        deductions: [],
+      },
+    });
+
+    await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 250,
+      actorId: "mgr1",
+    });
+
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(damageChargeCreate).toHaveBeenCalledTimes(1);
+    const row = (damageChargeCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> })
+      .data;
+    expect(row).toMatchObject({
+      incidentId: "incident1",
+      status: "CONFIRMED",
+      amount: 250,
+      capturedPaymentId: "pay-INC-2026-0042-CARD",
+    });
+  });
+
   it("skips the cap entirely when the incident's excess was voided", async () => {
     const { prisma } = makeFixture({ excessVoided: true });
     getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
@@ -315,5 +414,160 @@ describe("chargeCustomerForIncident (service)", () => {
       expect.anything(),
       expect.objectContaining({ action: "EXCESS_CAP_APPLIED" }),
     );
+  });
+});
+
+// ---- Area 5: work-order → incident actual-cost feedback ----
+
+function makeWoFixture(over: {
+  actualDamageCost?: number | null;
+  customerLiable?: boolean;
+  chargePayments?: Array<{ amount: number }>;
+  incident?: null;
+} = {}) {
+  const incident =
+    over.incident === null
+      ? null
+      : {
+          id: "incident1",
+          incidentNumber: "2026-0042",
+          customerLiable: over.customerLiable ?? true,
+          actualDamageCost:
+            over.actualDamageCost === undefined ? null : over.actualDamageCost,
+          vehicle: { depotId: "depot1", internalCode: "SC-01" },
+        };
+  const incidentUpdate = vi.fn().mockResolvedValue({});
+  const prisma = {
+    incident: {
+      findUnique: vi.fn().mockResolvedValue(incident),
+      update: incidentUpdate,
+    },
+    payment: {
+      findMany: vi.fn().mockResolvedValue(over.chargePayments ?? []),
+    },
+    user: {
+      findMany: vi.fn().mockResolvedValue([{ id: "mgrA" }, { id: "mgrB" }]),
+    },
+  };
+  return { prisma: prisma as never, incidentUpdate };
+}
+
+describe("recordWorkOrderCostForIncident", () => {
+  it("backfills actualDamageCost when the incident has none, and audits the write", async () => {
+    const { prisma, incidentUpdate } = makeWoFixture({
+      chargePayments: [{ amount: 400 }],
+    });
+
+    const res = await recordWorkOrderCostForIncident(prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+
+    expect(res.actualDamageCostWritten).toBe(true);
+    expect(incidentUpdate).toHaveBeenCalledWith({
+      where: { id: "incident1" },
+      data: { actualDamageCost: 512.5 },
+    });
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "INCIDENT_ACTUAL_COST_RECORDED",
+        entityId: "incident1",
+        newData: expect.objectContaining({ actualDamageCost: 512.5 }),
+      }),
+    );
+  });
+
+  it("does not overwrite an existing actualDamageCost", async () => {
+    const { prisma, incidentUpdate } = makeWoFixture({
+      actualDamageCost: 900,
+      chargePayments: [{ amount: 900 }],
+    });
+
+    const res = await recordWorkOrderCostForIncident(prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+
+    expect(res.actualDamageCostWritten).toBe(false);
+    expect(incidentUpdate).not.toHaveBeenCalled();
+  });
+
+  it("nudges managers to review the charge when customer-liable but not yet charged", async () => {
+    const { prisma } = makeWoFixture({ chargePayments: [] });
+
+    await recordWorkOrderCostForIncident(prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+
+    // One notification per manager (two mocked).
+    expect(sendNotificationMock).toHaveBeenCalledTimes(2);
+    const first = sendNotificationMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(String(first.subject)).toContain("actual repair cost recorded");
+    expect(String(first.body)).toContain("has not been charged yet");
+    expect([first.userId, (sendNotificationMock.mock.calls[1]?.[0] as Record<string, unknown>).userId]).toEqual([
+      "mgrA",
+      "mgrB",
+    ]);
+  });
+
+  it("nudges managers to issue a partial refund when the actual cost came in under what was charged (ACL)", async () => {
+    const { prisma } = makeWoFixture({
+      chargePayments: [{ amount: 500 }, { amount: 300 }],
+    });
+
+    await recordWorkOrderCostForIncident(prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+
+    expect(sendNotificationMock).toHaveBeenCalledTimes(2);
+    const call = sendNotificationMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(String(call.subject)).toContain("below amount charged");
+    // charged 800 − actual 512.50 = 287.50 refund suggestion.
+    expect(String(call.body)).toContain("287.50");
+  });
+
+  it("stays quiet when the charge already matches or undercuts the actual cost", async () => {
+    const { prisma } = makeWoFixture({ chargePayments: [{ amount: 500 }] });
+
+    await recordWorkOrderCostForIncident(prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the customer is not liable or there is no actual cost", async () => {
+    const notLiable = makeWoFixture({ customerLiable: false });
+    await recordWorkOrderCostForIncident(notLiable.prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: 512.5,
+      actorId: "staff1",
+    });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+
+    const noCost = makeWoFixture({});
+    const res = await recordWorkOrderCostForIncident(noCost.prisma, {
+      incidentId: "incident1",
+      workOrderNumber: "WO-77",
+      actualCost: null,
+      actorId: "staff1",
+    });
+    expect(res.actualDamageCostWritten).toBe(false);
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 });

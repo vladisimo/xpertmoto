@@ -125,6 +125,60 @@ describe("getDamageLiabilityUsed — aggregation and dedupe", () => {
     });
     expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(0);
   });
+
+  // ---- Area 5: unified damage surface ----
+
+  it("queries charges parented by return assessments OR incidents on the booking", async () => {
+    const prisma = makePrisma({});
+    await getDamageLiabilityUsed(prisma as never, "b1");
+    expect(prisma.damageCharge.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [{ returnAssessment: { bookingId: "b1" } }, { incident: { bookingId: "b1" } }],
+        }),
+      }),
+    );
+  });
+
+  it("counts post-unification incident slices exactly once — charge rows in, their INC-% payments deduped out", async () => {
+    // The incident-charge service writes BOTH a DamageCharge row and an
+    // INC-% Payment per slice. The charge rows carry the amounts; the
+    // capturedPaymentId link must knock the payments out of the fallback.
+    const prisma = makePrisma({
+      charges: [
+        // Bond slice (CAPTURED) + card slice (CONFIRMED) of one A$800 charge.
+        { amount: 500, capturedPaymentId: "pay-INC-2026-0042" },
+        { amount: 300, capturedPaymentId: "pay-INC-2026-0042-CARD" },
+      ],
+      payments: [
+        [
+          { id: "pay-INC-2026-0042", amount: 500 },
+          { id: "pay-INC-2026-0042-CARD", amount: 300 },
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(800);
+  });
+
+  it("still counts historical pre-unification INC-% payments that have no charge row", async () => {
+    const prisma = makePrisma({
+      charges: [
+        // A post-unification incident slice…
+        { amount: 300, capturedPaymentId: "pay-INC-2026-0042" },
+      ],
+      payments: [
+        [
+          // …its own payment (deduped) plus a legacy incident charge from
+          // before the unification, which only exists as a Payment.
+          { id: "pay-INC-2026-0042", amount: 300 },
+          { id: "pay-INC-2025-0007", amount: 400 },
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(700);
+  });
 });
 
 describe("applyExcessCap", () => {

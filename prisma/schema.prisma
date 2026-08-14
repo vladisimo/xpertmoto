@@ -2505,6 +2505,7 @@ model Incident {
   supportTickets SupportTicket[]
   bookingSwap    BookingSwap?
   terminations   BookingTermination[]
+  damageCharges  DamageCharge[]
 
   @@index([vehicleId, createdAt(sort: Desc)])
   @@index([bookingId, status])
@@ -3195,8 +3196,11 @@ model DamageTariff {
 
 model DamageCharge {
   id                 String           @id @default(cuid())
-  returnAssessmentId String
-  inspectionId       String
+  /// Nullable since the damage surface unified: a charge is parented by a
+  /// return assessment OR an incident (DB CHECK enforces at least one).
+  returnAssessmentId String?
+  inspectionId       String?
+  incidentId         String?
   damageTariffId     String?
   inspectionIssueId  String?
   description        String
@@ -3219,8 +3223,9 @@ model DamageCharge {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
-  returnAssessment ReturnAssessment      @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
-  inspection       Inspection            @relation(fields: [inspectionId], references: [id])
+  returnAssessment ReturnAssessment?     @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
+  inspection       Inspection?           @relation(fields: [inspectionId], references: [id])
+  incident         Incident?             @relation(fields: [incidentId], references: [id], onDelete: SetNull)
   damageTariff     DamageTariff?         @relation(fields: [damageTariffId], references: [id])
   inspectionIssue  InspectionIssue?      @relation(fields: [inspectionIssueId], references: [id], onDelete: SetNull)
   workOrder        MaintenanceWorkOrder? @relation(fields: [workOrderId], references: [id])
@@ -3232,6 +3237,7 @@ model DamageCharge {
   @@index([workOrderId])
   @@index([inspectionId])
   @@index([inspectionIssueId])
+  @@index([incidentId])
   @@index([createdById])
   @@index([resolvedById])
 }
