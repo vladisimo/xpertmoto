@@ -131,6 +131,9 @@ type PrismaOpts = {
   giftPaid?: number;
   sourcePayment?: Row | null;
   newCategory?: Row | null;
+  /** Pre-existing AMEND-REF- / AMEND-REF-GC- / AMEND-CREDIT- rows for the
+   *  refund-sequence max-suffix scan. */
+  priorRefundRefs?: Array<{ reference: string }>;
 };
 
 function makePrisma(booking: Row, opts: PrismaOpts = {}) {
@@ -170,7 +173,8 @@ function makePrisma(booking: Row, opts: PrismaOpts = {}) {
     },
     rentalAgreement: { count: vi.fn(async () => opts.signedAgreements ?? 0) },
     payment: {
-      count: vi.fn(async () => 0), // AMEND-REF-… refund sequence
+      count: vi.fn(async () => 0),
+      findMany: vi.fn(async () => opts.priorRefundRefs ?? []), // AMEND-* refund seq scan
       aggregate: vi.fn(async () => ({ _sum: { amount: -(opts.giftPaid ?? 0) } })),
       findFirst: vi.fn(
         async ({ where }: { where: { type?: string; reference?: string } }) => {
@@ -426,6 +430,142 @@ describe("applyCategoryAmendment — CHARGE_DELTA downgrade", () => {
       .find((d) => d.reference === "AMEND-CREDIT-b1-1");
     expect(creditRow).toMatchObject({ type: "MANUAL_CREDIT", status: "PENDING", amount: 100 });
     expect(res.refundOutcome).toBe("MANUAL_CREDIT");
+  });
+});
+
+// ── Refund sequence robustness ─────────────────────────────────────────────
+// The seq counter must see ALL THREE reference families. A gift-only or
+// credit-only reduction writes no 'AMEND-REF-<id>-N' row, so a plain count
+// of that family recomputes seq=1 on the next reduction and collides on the
+// Payment.reference @unique — after the amendment tx already committed.
+describe("applyCategoryAmendment — refund sequence across reference families", () => {
+  beforeEach(() => {
+    quotePricingMock.mockResolvedValue(makeQuote({ baseSubtotal: 300, totalAmount: 350 }));
+  });
+
+  it("a gift-only prior reduction bumps the seq for the next gift-only reduction", async () => {
+    // giftPaid 200 covers the whole 100 credit → gift-only, no card slice.
+    const { prisma, tx } = makePrisma(makeBooking(), {
+      giftPaid: 200,
+      priorRefundRefs: [{ reference: "AMEND-REF-GC-b1-1" }],
+    });
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      allowNegativeDelta: true,
+    });
+    const giftRow = tx.payment.create.mock.calls
+      .map((c) => (c[0] as { data: Row }).data)
+      .find((d) => typeof d.reference === "string" && d.reference.startsWith("AMEND-REF-GC-"));
+    expect(giftRow!.reference).toBe("AMEND-REF-GC-b1-2"); // NOT -1 again
+    expect(refundChargeMock).not.toHaveBeenCalled();
+    expect(res.refundOutcome).toBe("SUCCEEDED");
+  });
+
+  it("a credit-only prior reduction bumps the seq for the next >180d credit", async () => {
+    const old = new Date(Date.now() - 200 * 86_400_000);
+    const { prisma, raw } = makePrisma(makeBooking(), {
+      sourcePayment: { ...SOURCE_PAYMENT, processedAt: old, createdAt: old },
+      priorRefundRefs: [{ reference: "AMEND-CREDIT-b1-1" }],
+    });
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      allowNegativeDelta: true,
+    });
+    const creditRow = raw.payment.create.mock.calls
+      .map((c) => (c[0] as { data: Row }).data)
+      .find((d) => typeof d.reference === "string" && d.reference.startsWith("AMEND-CREDIT-"));
+    expect(creditRow!.reference).toBe("AMEND-CREDIT-b1-2");
+    expect(res.refundOutcome).toBe("MANUAL_CREDIT");
+  });
+
+  it("seq is the max suffix across mixed families, not a per-family count", async () => {
+    const { prisma, raw } = makePrisma(makeBooking(), {
+      sourcePayment: SOURCE_PAYMENT,
+      priorRefundRefs: [
+        { reference: "AMEND-REF-GC-b1-1" },
+        { reference: "AMEND-REF-b1-3" },
+        { reference: "AMEND-CREDIT-b1-2" },
+      ],
+    });
+    await applyCategoryAmendment(prisma, { ...BASE_APPLY, allowNegativeDelta: true });
+    const cardRow = raw.payment.create.mock.calls
+      .map((c) => (c[0] as { data: Row }).data)
+      .find((d) => d.reference === "AMEND-REF-b1-4");
+    expect(cardRow).toMatchObject({ type: "REFUND", amount: 100 });
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: "amend-refund-b1-4" }),
+    );
+  });
+
+  it("a post-commit refund crash alerts managers instead of throwing a 500", async () => {
+    const { prisma, raw } = makePrisma(makeBooking(), { sourcePayment: SOURCE_PAYMENT });
+    // Crash the ladder before it can even write a FAILED row.
+    (raw.payment.findMany as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("db connection lost"),
+    );
+    (raw.user.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([{ id: "mgr9" }]);
+
+    // The amendment already committed — apply must RESOLVE, not reject.
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      allowNegativeDelta: true,
+    });
+    expect(res.refundOutcome).toBe("FAILED");
+    expect(res.newCategoryId).toBe("cat-new"); // amendment result intact
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "mgr9",
+        subject: expect.stringContaining("Refund FAILED"),
+        title: "Category-change refund needs manual action",
+      }),
+    );
+  });
+});
+
+// ── balanceDue CAS guard ───────────────────────────────────────────────────
+// The amendment writes an ABSOLUTE preview-derived balanceDue, so the CAS
+// must also key on the previewed balance: a concurrent capture-sweep
+// decrement between preview and commit forces CONFLICT/re-preview instead of
+// being silently overwritten (collected debt resurrected).
+describe("applyCategoryAmendment — balanceDue CAS guard", () => {
+  it("keys the CAS on the previewed balanceDue whenever the write touches it", async () => {
+    const { prisma, tx } = makePrisma(makeBooking({ balanceDue: 100, amountPaid: 405 }));
+    await applyCategoryAmendment(prisma, BASE_APPLY);
+    const cas = casCall(tx);
+    expect(cas.where).toMatchObject({ balanceDue: 100 });
+    expect(cas.data).toMatchObject({ balanceDue: 200 }); // 100 previewed + 100 delta
+  });
+
+  it("a concurrent capture-sweep decrement between preview and commit CONFLICTs — no resurrection", async () => {
+    // Preview reads balanceDue 100; the sweep then collects 80 → DB now 20.
+    const { prisma, tx } = makePrisma(makeBooking({ balanceDue: 100, amountPaid: 405 }));
+    const dbBalanceDue = 20;
+    (tx.booking.updateMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async ({ where }: { where: { balanceDue?: number } }) => ({
+        count: where.balanceDue === dbBalanceDue ? 1 : 0,
+      }),
+    );
+    await expect(applyCategoryAmendment(prisma, BASE_APPLY)).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+    // Nothing settled under the stale preview: no charge row, no note.
+    expect(tx.payment.create).not.toHaveBeenCalled();
+    expect(tx.bookingNote.create).not.toHaveBeenCalled();
+    expect(refundChargeMock).not.toHaveBeenCalled();
+  });
+
+  it("a goodwill upgrade (no money write) does NOT guard balanceDue — no spurious conflicts", async () => {
+    const { prisma, tx } = makePrisma(makeBooking({ balanceDue: 100 }));
+    await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      mode: "GOODWILL_FREE_UPGRADE",
+      allowNegativeDelta: true,
+      goodwillReason: "SERVICE_RECOVERY",
+      goodwillNote: "Keeping their price.",
+    });
+    const cas = casCall(tx);
+    expect(cas.where).not.toHaveProperty("balanceDue");
+    expect(cas.data).not.toHaveProperty("balanceDue");
   });
 });
 

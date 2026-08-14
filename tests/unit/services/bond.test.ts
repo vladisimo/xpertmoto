@@ -58,14 +58,22 @@ function makeBooking(over: Row = {}, ledger: Row | null = makeLedger()) {
 }
 
 function makePrisma(booking: Row) {
-  return {
+  const client = {
     booking: { findUniqueOrThrow: vi.fn(async () => booking) },
     bondLedger: {
       update: vi.fn(async () => ({})),
       create: vi.fn(async () => ({})),
     },
-  } as never;
+    payment: { create: vi.fn(async () => ({})) },
+    $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(client)),
+  };
+  return client as never;
 }
+
+type MockedPrisma = {
+  bondLedger: { update: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
+  payment: { create: ReturnType<typeof vi.fn> };
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -145,5 +153,70 @@ describe("ensureFreshBondHold — amount-aware freshness (Area 4)", () => {
         .calls[0]![0] as { data: Row }
     ).data;
     expect(update).not.toHaveProperty("heldAmount");
+  });
+});
+
+// ── Zero-bond amendment (bondAmount → 0) ───────────────────────────────────
+// A category amendment can move the booking to a NO-bond category. There is
+// nothing to re-authorise "at the new amount": the still-HELD full-size hold
+// must be CANCELLED and the ledger released — not reported fresh.
+describe("ensureFreshBondHold — zero-bond amendment releases the hold", () => {
+  it("bondAmount 0 with a HELD hold: cancels the PI, releases the ledger, returns released_zero_bond", async () => {
+    const prisma = makePrisma(makeBooking({ bondAmount: 0 }));
+    const res = await ensureFreshBondHold(prisma, { bookingId: "b1", reason: "check-out" });
+    expect(res).toEqual({ ok: true, action: "released_zero_bond" });
+
+    // Release path, not re-auth: PI cancelled, no new hold created.
+    expect(cancelPaymentIntentMock).toHaveBeenCalledWith("pi_old");
+    expect(createBondHoldOffSessionMock).not.toHaveBeenCalled();
+
+    const m = prisma as unknown as MockedPrisma;
+    const update = (m.bondLedger.update.mock.calls[0]![0] as { data: Row }).data;
+    expect(update).toMatchObject({ status: "RELEASED", releasedAmount: 300 });
+    // Same audit trail as the release paths: a SUCCEEDED BOND_RELEASE row.
+    const payRow = (m.payment.create.mock.calls[0]![0] as { data: Row }).data;
+    expect(payRow).toMatchObject({
+      reference: "ZERO-BOND-REL-XPM-BOND-0001",
+      bookingId: "b1",
+      type: "BOND_RELEASE",
+      amount: 300,
+      status: "SUCCEEDED",
+    });
+  });
+
+  it("comparison is cents-tolerant: bondAmount 0.004 counts as zero", async () => {
+    const prisma = makePrisma(makeBooking({ bondAmount: 0.004 }));
+    const res = await ensureFreshBondHold(prisma, { bookingId: "b1", reason: "check-out" });
+    expect(res).toEqual({ ok: true, action: "released_zero_bond" });
+    expect(createBondHoldOffSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("a Stripe cancel failure (auth usually already expired) still releases the ledger", async () => {
+    cancelPaymentIntentMock.mockRejectedValue(new Error("payment_intent_unexpected_state"));
+    const prisma = makePrisma(makeBooking({ bondAmount: 0 }));
+    const res = await ensureFreshBondHold(prisma, { bookingId: "b1", reason: "rolling-reauth" });
+    expect(res).toEqual({ ok: true, action: "released_zero_bond" });
+    const m = prisma as unknown as MockedPrisma;
+    expect((m.bondLedger.update.mock.calls[0]![0] as { data: Row }).data).toMatchObject({
+      status: "RELEASED",
+    });
+  });
+
+  it("bondAmount 0 with NO ledger stays no_bond (unchanged)", async () => {
+    const prisma = makePrisma(makeBooking({ bondAmount: 0 }, null));
+    const res = await ensureFreshBondHold(prisma, { bookingId: "b1", reason: "check-out" });
+    expect(res).toEqual({ ok: true, action: "no_bond" });
+    expect(cancelPaymentIntentMock).not.toHaveBeenCalled();
+  });
+
+  it("regression: a positive bondAmount still takes the resize path, never the release path", async () => {
+    const prisma = makePrisma(makeBooking({ bondAmount: 500 }));
+    const res = await ensureFreshBondHold(prisma, { bookingId: "b1", reason: "check-out" });
+    expect(res).toEqual({ ok: true, action: "reauthorized" });
+    const m = prisma as unknown as MockedPrisma;
+    expect(m.payment.create).not.toHaveBeenCalled();
+    expect((m.bondLedger.update.mock.calls[0]![0] as { data: Row }).data).toMatchObject({
+      heldAmount: 500,
+    });
   });
 });

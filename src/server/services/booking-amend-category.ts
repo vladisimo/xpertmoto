@@ -534,13 +534,22 @@ export async function applyCategoryAmendment(
 
     // CAS keyed on the state the preview priced (status + category + total):
     // a double-click, second tab, or racing staff edit matches zero rows and
-    // conflicts instead of double-settling.
+    // conflicts instead of double-settling. When the amendment rewrites
+    // balanceDue, the guard ALSO keys on the previewed balanceDue: the write
+    // below is an absolute preview-derived value, so a concurrent capture
+    // sweep decrement landing between preview and commit would otherwise be
+    // silently overwritten (already-collected debt resurrected). Guarding it
+    // forces the CONFLICT/re-preview path instead — the previewed
+    // newBalanceDue AND creditAmount both derive from the balance, so a
+    // changed balance genuinely invalidates the whole preview (a relative
+    // increment could not fix the stale refund split on a DECREASE).
     const guard = await tx.booking.updateMany({
       where: {
         id: booking.id,
         status: booking.status,
         categoryId: booking.categoryId,
         totalAmount: booking.totalAmount,
+        ...(moneyData.balanceDue !== undefined ? { balanceDue: booking.balanceDue } : {}),
       },
       data: {
         categoryId: preview.newCategoryId,
@@ -617,13 +626,31 @@ export async function applyCategoryAmendment(
   });
 
   // DECREASE overpayment: refund for real via the booking-change ladder.
+  // The amendment tx above has ALREADY committed — the customer has the new
+  // category either way — so a crash in the refund machinery must never
+  // surface as an opaque 500 that reads as "amendment failed". Record the
+  // failure, alert managers, and let the amendment result return normally.
   let refundOutcome: ApplyCategoryAmendmentResult["refundOutcome"] = "NONE";
   if (preview.direction === "DECREASE" && preview.creditAmount > 0) {
-    refundOutcome = await refundAmendmentOverpayment(prisma, {
-      booking,
-      amount: preview.creditAmount,
-      actorUserId: args.actorId,
-    });
+    try {
+      refundOutcome = await refundAmendmentOverpayment(prisma, {
+        booking,
+        amount: preview.creditAmount,
+        actorUserId: args.actorId,
+      });
+    } catch (err) {
+      refundOutcome = "FAILED";
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { err: msg, bookingId: booking.id, creditAmount: preview.creditAmount },
+        "booking-amend-category: post-commit refund crashed — amendment kept, manual refund required",
+      );
+      await alertManagersAmendRefundFailure(prisma, booking, {
+        title: "Category-change refund needs manual action",
+        body: `The category change on booking ${booking.bookingReference} was applied, but issuing the A$${preview.creditAmount.toFixed(2)} overpayment refund crashed before it could be recorded (${msg.slice(0, 160)}). No automatic retry exists for this failure — refund the customer manually from the payment console.`,
+        data: { amountAud: preview.creditAmount },
+      });
+    }
   }
 
   // ATO §29-75 adjustment note for the delta (skipped for a price-neutral
@@ -809,10 +836,32 @@ async function refundAmendmentOverpayment(
   args: { booking: LoadedBooking; amount: number; actorUserId: string },
 ): Promise<"SUCCEEDED" | "PARTIAL" | "FAILED" | "MANUAL_CREDIT"> {
   const { booking } = args;
+  // Next refund sequence = highest trailing integer across ALL THREE
+  // reference families this ladder writes ('AMEND-REF-<id>-N',
+  // 'AMEND-REF-GC-<id>-N', 'AMEND-CREDIT-<id>-N') + 1. A plain count of one
+  // family under-numbers whenever an earlier reduction settled gift-only or
+  // manual-credit-only (those write no 'AMEND-REF-<id>-N' row at all), and
+  // the recomputed duplicate seq then collides on Payment.reference @unique
+  // AFTER the amendment tx has already committed. Parsing the max suffix
+  // straight from the DB is authoritative regardless of which families
+  // historical reductions happened to write (any pattern overlap merely
+  // scans the same row twice — the max is unaffected).
+  const priorRefundRefs = await prisma.payment.findMany({
+    where: {
+      bookingId: booking.id,
+      OR: [
+        { reference: { startsWith: `AMEND-REF-${booking.id}-` } },
+        { reference: { startsWith: `AMEND-REF-GC-${booking.id}-` } },
+        { reference: { startsWith: `AMEND-CREDIT-${booking.id}-` } },
+      ],
+    },
+    select: { reference: true },
+  });
   const seq =
-    (await prisma.payment.count({
-      where: { bookingId: booking.id, reference: { startsWith: `AMEND-REF-${booking.id}-` } },
-    })) + 1;
+    priorRefundRefs.reduce((max, p) => {
+      const m = /-(\d+)$/.exec(p.reference ?? "");
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0) + 1;
 
   const giftAgg = await prisma.payment.aggregate({
     where: { bookingId: booking.id, type: "GIFT_CARD_REDEMPTION", status: "SUCCEEDED" },
@@ -982,6 +1031,24 @@ async function refundAmendmentOverpayment(
       );
     }
   }
+  await alertManagersAmendRefundFailure(prisma, booking, {
+    title: "Category-change reduction refund failed",
+    body: `The A$${cardRefund.toFixed(2)} overpayment refund for booking ${booking.bookingReference} failed at Stripe (${failNote}). An automatic retry is queued; if it keeps failing, refund manually from the payment console.`,
+    data: { refundPaymentId: row.id, amountAud: cardRefund },
+  });
+  return giftRefund > 0 ? "PARTIAL" : "FAILED";
+}
+
+/**
+ * Manager fan-out for a refund that needs human attention. Best-effort — an
+ * alert failure is logged, never thrown (the caller is already on a
+ * post-commit recovery path).
+ */
+async function alertManagersAmendRefundFailure(
+  prisma: PrismaClient,
+  booking: Pick<LoadedBooking, "id" | "bookingReference">,
+  args: { title: string; body: string; data: Prisma.InputJsonObject },
+): Promise<void> {
   try {
     const managers = await prisma.user.findMany({
       where: { role: { in: ["MANAGER", "ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" },
@@ -994,10 +1061,10 @@ async function refundAmendmentOverpayment(
         type: "INCIDENT_REPORTED",
         channels: ["IN_APP", "EMAIL"],
         subject: `Refund FAILED — ${booking.bookingReference}`,
-        title: "Category-change reduction refund failed",
-        body: `The A$${cardRefund.toFixed(2)} overpayment refund for booking ${booking.bookingReference} failed at Stripe (${failNote}). An automatic retry is queued; if it keeps failing, refund manually from the payment console.`,
+        title: args.title,
+        body: args.body,
         bookingId: booking.id,
-        data: { refundPaymentId: row.id, amountAud: cardRefund },
+        data: args.data,
       });
     }
   } catch (err) {
@@ -1006,5 +1073,4 @@ async function refundAmendmentOverpayment(
       "category-change reduction: manager alert failed",
     );
   }
-  return giftRefund > 0 ? "PARTIAL" : "FAILED";
 }
