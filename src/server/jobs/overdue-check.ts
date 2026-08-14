@@ -106,6 +106,23 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
         },
         "overdue-check: skipping booking — vehicle in disposition status (loss flow owns it)",
       );
+      // STOLEN / WRITTEN_OFF have owning flows (theft ladder / loss
+      // termination). SOLD / END_OF_LIFE have none — a live hire on such a
+      // vehicle would otherwise silently fall out of the ladder with nothing
+      // chasing it, so page the depot managers to resolve it manually.
+      if (b.vehicle.status === "SOLD" || b.vehicle.status === "END_OF_LIFE") {
+        try {
+          await pageManagersForOrphanedDisposition(b);
+        } catch (err) {
+          logger.error(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              bookingId: b.id,
+            },
+            "overdue-check: orphaned-disposition manager page failed",
+          );
+        }
+      }
       continue;
     }
     const hoursLate = (now - b.returnDateTime.getTime()) / (1000 * 60 * 60);
@@ -364,6 +381,67 @@ async function stageThreeManagerEscalation(b: CandidateBooking): Promise<void> {
   );
 }
 
+/**
+ * A hire whose vehicle went SOLD / END_OF_LIFE mid-hire is excluded from the
+ * ladder (no fees, no stages) but has no owning flow — unlike STOLEN /
+ * WRITTEN_OFF, which the theft ladder / loss termination pick up. Page the
+ * depot managers to resolve it manually via terminate-for-loss. The
+ * per-recipient dedupKey (Redis-backed, shared across processes — the
+ * booking-swap manager-broadcast convention) keeps the 15-minute tick from
+ * re-paging on every run.
+ */
+async function pageManagersForOrphanedDisposition(b: CandidateBooking): Promise<void> {
+  const vehicleStatus = b.vehicle?.status ?? "UNKNOWN";
+  const managers = await prisma.user.findMany({
+    where: {
+      role: { in: ["MANAGER", "ADMIN"] },
+      status: "ACTIVE",
+      OR: [{ depotId: b.pickupDepotId }, { depotId: null }],
+    },
+    select: { id: true },
+  });
+  for (const m of managers) {
+    await sendNotification({
+      userId: m.id,
+      type: "BOOKING_OVERDUE_ESCALATION",
+      category: "OPERATIONAL",
+      channels: ["PUSH", "IN_APP"],
+      title: `Manual resolution needed — ${b.bookingReference}`,
+      body:
+        `Booking ${b.bookingReference} is past its return time but its vehicle is ${vehicleStatus}, ` +
+        `so the overdue ladder does not apply and no automated flow owns this hire. ` +
+        `Resolve it manually via Terminate for loss on the booking page.`,
+      bookingId: b.id,
+      data: {
+        url: `/staff/bookings/${b.id}`,
+        vehicleStatus,
+        reason: "disposition-orphan",
+      },
+      dedupKey: `overdue-disposition-orphan:${b.id}:${m.id}`,
+    });
+  }
+}
+
+/**
+ * Author identity for automated internal notes. IncidentNote.userId is a
+ * required FK and no dedicated system user exists, so — following the
+ * admin-pool fallback convention in support-routing.ts — the
+ * longest-standing ACTIVE SUPER_ADMIN (then ADMIN) stands in as the
+ * automation author. Never the booking's customer: an internal investigation
+ * note must not be authored as the suspect.
+ */
+async function resolveSystemAuthorId(): Promise<string | null> {
+  for (const role of ["SUPER_ADMIN", "ADMIN"] as const) {
+    const user = await prisma.user.findFirst({
+      where: { role, status: "ACTIVE" },
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
+    });
+    if (user) return user.id;
+  }
+  return null;
+}
+
 async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
   // Last known GPS fix (Area 3): snapshotted onto the incident (write-once)
   // and dropped into an internal note with a maps link so a recovery attempt
@@ -406,6 +484,21 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
     ? Math.max(0, Math.round((Date.now() - livePosition.timestamp.getTime()) / 60000))
     : null;
 
+  // Author for the internal GPS note — a staff/system identity, never the
+  // suspect customer. If no admin exists (should never happen in a seeded
+  // deployment) the note is skipped; the GPS data still lives on the
+  // incident's gpsSnapshot and in the manager page below.
+  let systemAuthorId: string | null = null;
+  if (gpsSnapshot && mapsLink) {
+    systemAuthorId = await resolveSystemAuthorId();
+    if (!systemAuthorId) {
+      logger.warn(
+        { bookingId: b.id, mapsLink },
+        "overdue-check: no ACTIVE admin to author the GPS incident note — note skipped (snapshot retained on incident)",
+      );
+    }
+  }
+
   await withUniqueRetry(
     () =>
       prisma.$transaction(async (tx) => {
@@ -428,11 +521,11 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
                 : {}),
             },
           });
-          if (gpsSnapshot && mapsLink) {
+          if (gpsSnapshot && mapsLink && systemAuthorId) {
             await tx.incidentNote.create({
               data: {
                 incidentId: incident.id,
-                userId: b.customer.id,
+                userId: systemAuthorId,
                 note:
                   `Automated: last GPS fix at incident creation — ${gpsSnapshot.lat}, ${gpsSnapshot.lng} ` +
                   `(${fixAgeMinutes} min old${

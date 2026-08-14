@@ -9,6 +9,7 @@ import { logger } from "@/lib/logger";
 import { aud, gstFromInclusive, toNumber } from "@/lib/money";
 import { cancelPaymentIntent, refundCharge } from "@/lib/stripe";
 import { getBranding } from "@/lib/branding";
+import { BALANCE_AFFECTING_CHARGE_TYPES } from "./balance-due";
 import { calcEarlyReturnRefund } from "./fees";
 import { tryIssueAdjustmentForBooking } from "./invoice-lifecycle";
 import {
@@ -293,9 +294,16 @@ async function computeQuote(
 
   // Offset the write-down against the unpaid balance first — only the cash
   // surplus goes back. "Unpaid base" excludes PENDING-backed charges: those
-  // raised rows settle (or void) through their own balance-due pairing.
+  // raised rows settle (or void) through their own balance-due pairing. Only
+  // balance-affecting raise types count here — a PENDING MANUAL_CREDIT /
+  // REFUND row is money owed TO the customer, was never added to balanceDue,
+  // and counting it would understate the offset and double the give-back.
   const pendingAgg = await prisma.payment.aggregate({
-    where: { bookingId: booking.id, status: "PENDING" },
+    where: {
+      bookingId: booking.id,
+      status: "PENDING",
+      type: { in: [...BALANCE_AFFECTING_CHARGE_TYPES] },
+    },
     _sum: { amount: true },
   });
   const pendingAfterCancel = Math.max(

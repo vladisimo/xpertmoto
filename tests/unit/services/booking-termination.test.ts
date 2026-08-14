@@ -101,6 +101,9 @@ type PrismaOpts = {
     createdAt: Date;
   }>;
   pendingSum?: number;
+  /** When given, the pending aggregate honours the where.type filter over
+   *  these rows instead of returning the flat pendingSum. */
+  pendingRows?: Array<{ type: string; amount: number }>;
   giftPaid?: number;
   sourcePayment?: Row | null;
   casCount?: number;
@@ -135,10 +138,20 @@ function makePrisma(booking: Row, opts: PrismaOpts = {}) {
     payment: {
       findMany: vi.fn(async () => lateRows),
       aggregate: vi.fn(
-        async ({ where }: { where: { type?: string } }) =>
-          where.type === "GIFT_CARD_REDEMPTION"
-            ? { _sum: { amount: -(opts.giftPaid ?? 0) } }
-            : { _sum: { amount: opts.pendingSum ?? 0 } },
+        async ({ where }: { where: { type?: string | { in?: string[] } } }) => {
+          if (where.type === "GIFT_CARD_REDEMPTION") {
+            return { _sum: { amount: -(opts.giftPaid ?? 0) } };
+          }
+          if (opts.pendingRows) {
+            const allowed =
+              typeof where.type === "object" ? where.type?.in : undefined;
+            const sum = opts.pendingRows
+              .filter((row) => !allowed || allowed.includes(row.type))
+              .reduce((acc, row) => acc + row.amount, 0);
+            return { _sum: { amount: sum } };
+          }
+          return { _sum: { amount: opts.pendingSum ?? 0 } };
+        },
       ),
       findFirst: vi.fn(async ({ where }: { where: { type?: string; reference?: string } }) => {
         if (where.type === "BOOKING_PAYMENT") return opts.sourcePayment ?? null;
@@ -217,6 +230,44 @@ describe("previewLossTermination — pro-rata math", () => {
     expect(q.balanceOffset).toBe(200);
     expect(q.cashRefund).toBe(160);
     expect(q.projectedBalanceDue).toBe(0);
+  });
+
+  it("PENDING credits owed TO the customer do not shrink the unpaid-balance offset", async () => {
+    // 200 unpaid hire balance; the only PENDING row is a MANUAL_CREDIT
+    // (money owed TO the customer — never added to balanceDue). It must not
+    // count as a pending-backed raise: unpaidBase stays 200, so the
+    // write-down offsets the full balance and only 160 comes back as cash.
+    // Before the type restriction this row shrank unpaidBase to 50 and
+    // inflated the cash refund to 310 — a double give-back.
+    const { prisma } = makePrisma(
+      makeBooking({ balanceDue: 200, amountPaid: 690 }),
+      { pendingRows: [{ type: "MANUAL_CREDIT", amount: 150 }] },
+    );
+    const q = await previewLossTermination(prisma, {
+      bookingId: "b1",
+      lossAt: LOSS_AT,
+      refundMode: "REFUND",
+    });
+    expect(q.balanceOffset).toBe(200);
+    expect(q.cashRefund).toBe(160);
+    expect(q.projectedBalanceDue).toBe(0);
+  });
+
+  it("a PENDING balance-affecting raise still reduces the unpaid base (type filter is targeted)", async () => {
+    // Same shape but the PENDING row is a LATE_FEE raise (pre-loss,
+    // non-day-reference so it is not auto-cancelled): it IS pending-backed,
+    // so unpaidBase = 200 − 150 = 50 and the surplus grows accordingly.
+    const { prisma } = makePrisma(
+      makeBooking({ balanceDue: 200, amountPaid: 690 }),
+      { pendingRows: [{ type: "LATE_FEE", amount: 150 }] },
+    );
+    const q = await previewLossTermination(prisma, {
+      bookingId: "b1",
+      lossAt: LOSS_AT,
+      refundMode: "REFUND",
+    });
+    expect(q.balanceOffset).toBe(50);
+    expect(q.cashRefund).toBe(310);
   });
 
   it("restores the gift-card-funded slice first in REFUND mode", async () => {
