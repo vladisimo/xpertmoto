@@ -26,8 +26,8 @@ import { createHash } from "crypto";
 import { Prisma, type LinktAccount, type PrismaClient } from "@prisma/client";
 
 import {
-  findBookingForVehicleAt,
   normalisePlate,
+  resolveBookingForVehicleAt,
   resolveVehicleByPlate,
 } from "./booking-matcher";
 
@@ -298,6 +298,10 @@ export type LinktMatch = {
   vehicleId: string;
   bookingId: string | null;
   customerId: string | null;
+  // Booking references of the overlapping candidates when attribution was
+  // ambiguous. The row is then recorded unlinked (bookingId null) and never
+  // auto-charged — staff must pick the renter.
+  ambiguousCandidates: string[] | null;
 };
 
 export async function matchTripRow(
@@ -305,17 +309,21 @@ export async function matchTripRow(
   row: LinktTripRow,
 ): Promise<LinktMatch | null> {
   // Shared with the NSW infringement-nomination flow — see booking-matcher.ts.
-  // (The matcher prefers actual check-out/return times and restricts to
-  // statuses where the vehicle was genuinely out with a renter.)
+  // (The matcher prefers actual check-out/return times, restricts to statuses
+  // where the vehicle was genuinely out with a renter, and is swap-aware.)
   const vehicle = await resolveVehicleByPlate(prisma, row.plate);
   if (!vehicle) return null;
 
-  const booking = await findBookingForVehicleAt(prisma, vehicle.id, row.eventAt);
+  const resolution = await resolveBookingForVehicleAt(prisma, vehicle.id, row.eventAt);
 
   return {
     vehicleId: vehicle.id,
-    bookingId: booking?.id ?? null,
-    customerId: booking?.customerId ?? null,
+    bookingId: resolution.kind === "match" ? resolution.booking.id : null,
+    customerId: resolution.kind === "match" ? resolution.booking.customerId : null,
+    ambiguousCandidates:
+      resolution.kind === "ambiguous"
+        ? resolution.candidates.map((c) => c.bookingReference)
+        : null,
   };
 }
 
@@ -423,6 +431,14 @@ export async function upsertInfringementFromRow(
       if (!match) return "unmatched";
       const tollAud = row.amountCents / 100;
       const adminFeeAud = await resolveAdminFeeAud(account);
+      // Ambiguous attribution (overlapping bookings held the vehicle at trip
+      // time) lands as an unlinked RECEIVED toll with the candidates noted —
+      // never a guessed charge. reconcileReceivedTolls skips it too until the
+      // ambiguity clears or staff link the renter manually.
+      const ambiguityNote =
+        match.ambiguousCandidates && match.ambiguousCandidates.length > 0
+          ? ` Attribution ambiguous — overlapping bookings held this vehicle at the trip time: ${match.ambiguousCandidates.join(", ")}. Staff must confirm the renter before charging.`
+          : "";
       const infringement = await prisma.infringement.create({
         data: {
           vehicleId: match.vehicleId,
@@ -435,7 +451,7 @@ export async function upsertInfringementFromRow(
           amount: new Prisma.Decimal(tollAud.toFixed(2)),
           adminFee: new Prisma.Decimal(adminFeeAud.toFixed(2)),
           status: match.bookingId ? "CUSTOMER_CHARGED" : "RECEIVED",
-          notes: `Toll: ${row.tollpoint || "—"}. Source: ${row.rawDetails}`,
+          notes: `Toll: ${row.tollpoint || "—"}. Source: ${row.rawDetails}${ambiguityNote}`,
         },
       });
 
@@ -532,8 +548,11 @@ export async function reconcileReceivedTolls(
 
   let charged = 0;
   for (const inf of received) {
-    const booking = await findBookingForVehicleAt(prisma, inf.vehicleId, inf.offenceDate);
-    if (!booking) continue;
+    // Ambiguous (overlapping candidate bookings) stays RECEIVED for staff
+    // review — re-attribution must never guess at who to charge.
+    const resolution = await resolveBookingForVehicleAt(prisma, inf.vehicleId, inf.offenceDate);
+    if (resolution.kind !== "match") continue;
+    const booking = resolution.booking;
 
     await prisma.infringement.update({
       where: { id: inf.id },

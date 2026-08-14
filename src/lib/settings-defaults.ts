@@ -57,6 +57,7 @@ export const SETTING_DEFAULTS = {
 
   // Checkout
   "booking.allowGuestCheckout": false,
+  "booking.checkoutOverridesRequireManager": true,
   "booking.pendingPaymentTimeoutHours": 24,
   "booking.lateReturnGraceHours": BOOKING_RULES.lateReturnGraceHours,
   "booking.fuelChargePerLitre": 2.5,
@@ -159,6 +160,7 @@ export const SETTING_GROUP_FOR: Record<SettingKey, string> = {
   "booking.requireLicenceVerification": "booking",
 
   "booking.allowGuestCheckout": "checkout",
+  "booking.checkoutOverridesRequireManager": "checkout",
   "booking.pendingPaymentTimeoutHours": "checkout",
   "booking.lateReturnGraceHours": "checkout",
   "booking.fuelChargePerLitre": "checkout",
@@ -236,6 +238,8 @@ export const SETTING_DESCRIPTIONS: Partial<Record<SettingKey, string>> = {
   "booking.requireLicenceVerification": "Block check-out until staff have verified the customer licence photos.",
 
   "booking.allowGuestCheckout": "Let customers complete a booking without registering an account.",
+  "booking.checkoutOverridesRequireManager":
+    "Require a manager (or above) to override a failed pickup payment or bond hold at check-out. When disabled, any staff member can override with a written reason (still audited).",
   "booking.pendingPaymentTimeoutHours": "Auto-cancel unpaid PENDING_PAYMENT bookings after this many hours.",
   "booking.lateReturnGraceHours": "Grace window after return time before late fees apply.",
   "booking.fuelChargePerLitre": "AUD charged per missing litre at return (GST-inclusive).",

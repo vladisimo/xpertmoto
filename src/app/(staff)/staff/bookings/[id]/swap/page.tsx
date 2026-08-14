@@ -205,6 +205,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
     {
       bookingId: id,
       newCategoryId: selectedCandidate?.categoryId ?? "",
+      // Vehicle-level rates (baseRateOverride / model rate / vehicle tiers)
+      // only price in when the server knows which unit is coming in.
+      incomingVehicleId: selectedCandidate?.id,
       reason: reason || "LATERAL",
     },
     { enabled: Boolean(selectedCandidate && reason) },

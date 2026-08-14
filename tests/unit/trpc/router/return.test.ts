@@ -86,7 +86,11 @@ describe("return.upsertDamageCharge — issue linkage", () => {
         })),
       },
       inspectionIssue: {
-        findUnique: vi.fn(async () => ({ inspectionId: "insp1", inspectionPhoto: { url: "https://cdn/x.jpg" } })),
+        findUnique: vi.fn(async () => ({
+          inspectionId: "insp1",
+          inspectionPhoto: { url: "https://cdn/x.jpg" },
+          inspection: { bookingId: "b1", purpose: "CHECK_IN", status: "COMPLETED" },
+        })),
       },
       damageCharge: { create },
     };
@@ -120,7 +124,11 @@ describe("return.upsertDamageCharge — issue linkage", () => {
         })),
       },
       inspectionIssue: {
-        findUnique: vi.fn(async () => ({ inspectionId: "OTHER", inspectionPhoto: null })),
+        findUnique: vi.fn(async () => ({
+          inspectionId: "OTHER",
+          inspectionPhoto: null,
+          inspection: { bookingId: "b1", purpose: "CHECK_IN", status: "COMPLETED" },
+        })),
       },
       damageCharge: { create },
     };
@@ -129,6 +137,80 @@ describe("return.upsertDamageCharge — issue linkage", () => {
       c.upsertDamageCharge({
         assessmentId: "ra1",
         inspectionIssueId: "issX",
+        description: "x",
+        severity: "MINOR",
+        resolution: "STANDARD",
+        amount: 10,
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("accepts an issue from a COMPLETED SWAP_OUT inspection on the same booking (PR7)", async () => {
+    const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: "dc2", ...data }));
+    const prisma = {
+      returnAssessment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "ra1",
+          status: "DRAFT",
+          inspectionId: "insp-return",
+          bookingId: "b1",
+          booking: { vehicleId: "v1" },
+          inspection: { id: "insp-return" },
+        })),
+      },
+      inspectionIssue: {
+        findUnique: vi.fn(async () => ({
+          inspectionId: "insp-swapout",
+          inspectionPhoto: null,
+          inspection: { bookingId: "b1", purpose: "SWAP_OUT", status: "COMPLETED" },
+        })),
+      },
+      damageCharge: { create },
+    };
+    const c = returnRouter.createCaller(staffCtx(prisma) as never);
+    await c.upsertDamageCharge({
+      assessmentId: "ra1",
+      inspectionIssueId: "iss-swap",
+      description: "Scrape recorded at swap-out",
+      severity: "MODERATE",
+      resolution: "STANDARD",
+      amount: 80,
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]?.[0].data).toMatchObject({
+      inspectionIssueId: "iss-swap",
+      amount: 80,
+    });
+  });
+
+  it("still rejects a SWAP_OUT issue that belongs to a different booking", async () => {
+    const create = vi.fn();
+    const prisma = {
+      returnAssessment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "ra1",
+          status: "DRAFT",
+          inspectionId: "insp-return",
+          bookingId: "b1",
+          booking: { vehicleId: "v1" },
+          inspection: { id: "insp-return" },
+        })),
+      },
+      inspectionIssue: {
+        findUnique: vi.fn(async () => ({
+          inspectionId: "insp-foreign",
+          inspectionPhoto: null,
+          inspection: { bookingId: "b-OTHER", purpose: "SWAP_OUT", status: "COMPLETED" },
+        })),
+      },
+      damageCharge: { create },
+    };
+    const c = returnRouter.createCaller(staffCtx(prisma) as never);
+    await expect(
+      c.upsertDamageCharge({
+        assessmentId: "ra1",
+        inspectionIssueId: "iss-foreign",
         description: "x",
         severity: "MINOR",
         resolution: "STANDARD",

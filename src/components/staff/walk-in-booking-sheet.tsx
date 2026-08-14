@@ -121,12 +121,6 @@ export function WalkInBookingSheet({
     });
     return check.ok ? null : check;
   }, [selectedDepot, validRange, pickupDateTime, returnDateTime]);
-  const days = useMemo(() => {
-    if (!validRange) return 0;
-    const ms = returnDateTime.getTime() - pickupDateTime.getTime();
-    return Math.max(1, Math.ceil(ms / (1000 * 60 * 60 * 24)));
-  }, [pickupDateTime, returnDateTime, validRange]);
-
   const availabilityEnabled = Boolean(depotId) && open && validRange;
   const { data: availableVehicles, isFetching: loadingVehicles } = trpc.booking.listAvailableVehicles.useQuery(
     {
@@ -158,10 +152,26 @@ export function WalkInBookingSheet({
   }
 
   const selectedVehicle = availableVehicles?.find((v) => v.id === vehicleId);
-  const selectedCategory = selectedVehicle?.category ?? categories?.find((c) => c.id === categoryFilter);
-  const total = selectedCategory ? Number(selectedCategory.baseDailyRate) * days : 0;
-  const gst = total / 11;
-  const bond = selectedCategory ? Number(selectedCategory.bondAmount) : 0;
+  // Authoritative price: the same server cascade the createWalkIn mutation
+  // re-runs (tiers, seasons, vehicle overrides). No client-side rate × days.
+  const quoteEnabled = Boolean(selectedVehicle && depotId && validRange && !hoursIssue);
+  const {
+    data: priceQuote,
+    isFetching: quoting,
+    error: quoteError,
+  } = trpc.booking.quote.useQuery(
+    {
+      categoryId: selectedVehicle?.categoryId ?? "",
+      vehicleId: selectedVehicle?.id,
+      pickupDepotId: depotId,
+      returnDepotId: depotId,
+      pickupDateTime,
+      returnDateTime,
+    },
+    { enabled: quoteEnabled },
+  );
+  const total = priceQuote?.totalAmount ?? 0;
+  const bond = priceQuote?.bondAmount ?? 0;
 
   function pickExistingCustomer(id: string, label: string) {
     setExistingCustomerId(id);
@@ -186,7 +196,8 @@ export function WalkInBookingSheet({
     mode === "existing"
       ? Boolean(existingCustomerId)
       : Boolean(customer.firstName && customer.lastName && customer.email);
-  const ready = customerReady && depotId && vehicleId && validRange && !hoursIssue;
+  const ready =
+    customerReady && depotId && vehicleId && validRange && !hoursIssue && Boolean(priceQuote);
 
   // Post-create card + bond step: when the walk-in carries a bond, the
   // customer saves a card on the staff device (SetupIntent) and the hold is
@@ -216,10 +227,8 @@ export function WalkInBookingSheet({
         returnDepotId: depotId,
         pickupDateTime,
         returnDateTime,
-        subtotal: total,
-        totalAmount: total,
-        gstAmount: gst,
-        bondAmount: bond,
+        // Server re-prices; this echo just rejects a stale sheet (CONFLICT).
+        expectedTotalAmount: priceQuote?.totalAmount,
         method,
       });
       if (booking.bondRequired) {
@@ -554,12 +563,20 @@ export function WalkInBookingSheet({
             <CardContent className="text-sm space-y-1">
               <div className="flex justify-between">
                 <span>Total (GST incl.)</span>
-                <strong>{formatCurrency(total)}</strong>
+                <strong>{quoting ? "…" : formatCurrency(total)}</strong>
               </div>
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>Bond to hold</span>
-                <span>{formatCurrency(bond)}</span>
+                <span>{quoting ? "…" : formatCurrency(bond)}</span>
               </div>
+              {!quoteEnabled && (
+                <p className="text-xs text-muted-foreground">
+                  Select a vehicle to price the hire.
+                </p>
+              )}
+              {quoteError && (
+                <p className="text-xs text-destructive">{quoteError.message}</p>
+              )}
             </CardContent>
           </Card>
 
