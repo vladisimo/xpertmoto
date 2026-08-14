@@ -61,13 +61,22 @@ const schema = z.object({
 });
 type Values = z.infer<typeof schema>;
 
+function toLocalInputValue(d: Date): string {
+  // `<input type="datetime-local">` expects a naive LOCAL "YYYY-MM-DDTHH:mm".
+  // `toISOString()` is UTC — in Brisbane that defaults the occurrence time 10
+  // hours into the past, which can make the swap-aware booking matcher
+  // auto-link the PREVIOUS renter as the liable customer.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function defaults(): Values {
   return {
     vehicleId: "",
     bookingId: "",
     type: "ACCIDENT",
     severity: "MINOR",
-    dateTime: new Date().toISOString().slice(0, 16),
+    dateTime: toLocalInputValue(new Date()),
     location: "",
     description: "",
     estimatedDamageCost: 0,
