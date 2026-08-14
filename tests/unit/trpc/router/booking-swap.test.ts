@@ -68,6 +68,13 @@ function makeCtx(
     /** loadVehicleCtx rows for quoteSwapDelta's vehicle-level pricing, keyed
      *  by vehicle id. Absent/undefined id → null (no override). */
     vehicleRates?: Record<string, Record<string, unknown> | null>;
+    /** startLossReplacementDraft: the booking's current (outgoing) vehicle. */
+    outgoingVehicle?: { id: string; internalCode: string; status: string };
+    /** startLossReplacementDraft: open TOTAL_LOSS incident lookup result. */
+    openTotalLossIncident?: { id: string } | null;
+    /** startLossReplacementDraft: incident.findUnique result for the
+     *  optional incidentId validation. */
+    incidentById?: Record<string, unknown> | null;
   } = {},
 ) {
   const booking = opts.booking ?? {
@@ -91,6 +98,16 @@ function makeCtx(
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         opts.vehicleRates?.[where.id] ?? null,
       ),
+      // startLossReplacementDraft's lost-vehicle gate.
+      findUniqueOrThrow: vi.fn(async () =>
+        opts.outgoingVehicle ?? { id: "v-old", internalCode: "SCT-1", status: "AVAILABLE" },
+      ),
+    },
+    incident: {
+      // startLossReplacementDraft's open TOTAL_LOSS lookup.
+      findFirst: vi.fn(async () => opts.openTotalLossIncident ?? null),
+      // startLossReplacementDraft's incidentId validation.
+      findUnique: vi.fn(async () => opts.incidentById ?? null),
     },
     // isVehicleFree scheduled-work-order block — none → vehicle is free.
     maintenanceWorkOrder: {
@@ -247,6 +264,130 @@ describe("bookingSwap.startSwapDraft", () => {
         origin: "CUSTOMER_WALK_IN",
         reasonNotes: "second attempt",
       }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+describe("bookingSwap.startLossReplacementDraft (Area 2)", () => {
+  const stolenVehicle = { id: "v-old", internalCode: "SCT-1", status: "STOLEN" };
+
+  it("FORBIDDEN for STAFF — loss replacement is manager-gated", async () => {
+    const ctx = makeCtx({ role: "STAFF", outgoingVehicle: stolenVehicle });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "bike stolen overnight" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("rejects when the current vehicle is not lost (AVAILABLE, no open TOTAL_LOSS incident)", async () => {
+    const ctx = makeCtx({ role: "MANAGER" }); // default outgoing vehicle: AVAILABLE
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "swap it" }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("not recorded as lost"),
+    });
+    expect(ctx.prisma.bookingSwap.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts a STOLEN vehicle and opens a LOSS_REPLACEMENT draft (origin defaults to STAFF_OBSERVED)", async () => {
+    const ctx = makeCtx({ role: "MANAGER", outgoingVehicle: stolenVehicle });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "stolen from cust address" }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.bookingSwap.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reason: "LOSS_REPLACEMENT",
+          origin: "STAFF_OBSERVED",
+          outgoingVehicleId: "v-old",
+          status: "DRAFT",
+        }),
+      }),
+    );
+    // Disposition status alone proves the loss — no incident lookup needed.
+    expect(ctx.prisma.incident.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("accepts a not-yet-transitioned vehicle with an open TOTAL_LOSS incident on file", async () => {
+    const ctx = makeCtx({ role: "MANAGER", openTotalLossIncident: { id: "inc-9" } });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "written off in crash" }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.incident.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ vehicleId: "v-old", severity: "TOTAL_LOSS" }),
+      }),
+    );
+  });
+
+  it("links a valid incidentId onto the draft", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      incidentById: { id: "inc-9", vehicleId: "v-old", deletedAt: null, bookingSwap: null },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({
+        bookingId: "b1",
+        reasonNotes: "stolen — see incident",
+        incidentId: "inc-9",
+      }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.bookingSwap.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ incidentId: "inc-9" }),
+      }),
+    );
+  });
+
+  it("rejects an incidentId that belongs to another vehicle", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      incidentById: { id: "inc-9", vehicleId: "v-other", deletedAt: null, bookingSwap: null },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({
+        bookingId: "b1",
+        reasonNotes: "stolen",
+        incidentId: "inc-9",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("rejects non-swappable booking statuses", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      booking: {
+        id: "b1",
+        status: "COMPLETED",
+        vehicleId: "v-old",
+        categoryId: "cat-A",
+        customerId: "cust1",
+      },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "too late" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("CONFLICT when a draft is already open on the booking", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      existingDraft: { id: "old-draft", swappedById: "other-staff" },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "second attempt" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
@@ -577,12 +718,20 @@ const A_DAY = 86_400_000;
 function makeConfirmCtx(
   opts: {
     role?: "STAFF" | "MANAGER";
-    reason?: "UPGRADE" | "DOWNGRADE" | "LATERAL" | "MECHANICAL_FAULT" | "ACCIDENT_DAMAGE";
+    reason?:
+      | "UPGRADE"
+      | "DOWNGRADE"
+      | "LATERAL"
+      | "MECHANICAL_FAULT"
+      | "ACCIDENT_DAMAGE"
+      | "LOSS_REPLACEMENT";
     bookingCategoryId?: string;
     incomingCategoryId?: string;
     balanceDue?: number;
     pendingSum?: number | null;
     payments?: Array<Record<string, unknown>>;
+    /** LOSS_REPLACEMENT: loss incident linked at draft time. */
+    draftIncidentId?: string | null;
   } = {},
 ) {
   // cat-A $50/day, cat-B $80/day over 5 remaining days (below the 7-day
@@ -621,6 +770,7 @@ function makeConfirmCtx(
     origin: "CUSTOMER_WALK_IN",
     reasonNotes: "customer request",
     originDetails: null,
+    incidentId: opts.draftIncidentId ?? null,
   };
   const incomingVehicle = {
     id: "v-new",
@@ -1170,6 +1320,132 @@ describe("bookingSwap.confirmSwap operational correctness", () => {
       incomingInspection: inspectionInput(300),
     });
     expect(prisma.inspectionIssue.createMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmSwap LOSS_REPLACEMENT (Area 2): outgoing leg waived — no POST_HIRE
+// inspection, no odometer hand-off, no status change on the lost vehicle, no
+// turnaround work order; incoming side and booking re-pointing unchanged.
+// ---------------------------------------------------------------------------
+
+describe("bookingSwap.confirmSwap LOSS_REPLACEMENT", () => {
+  beforeEach(() => {
+    refundChargeMock.mockReset();
+    sendNotificationMock.mockClear();
+    tryIssueAdjustmentForBookingMock.mockClear();
+  });
+
+  it("waives the outgoing leg, leaves the lost vehicle untouched, and commits at zero delta with the incoming side intact", async () => {
+    const { ctx, prisma, booking } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      draftIncidentId: "inc-9",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+    expect(res.direction).toBe("NONE");
+    expect(res.deltaAmount).toBe(0);
+
+    // Only the incoming PRE_HIRE / SWAP_IN inspection is created.
+    expect(prisma.inspection.create).toHaveBeenCalledTimes(1);
+    expect(
+      (prisma.inspection.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data,
+    ).toMatchObject({ type: "PRE_HIRE", purpose: "SWAP_IN", vehicleId: "v-new" });
+
+    // The lost vehicle is never touched — no status flip, no odometer
+    // hand-off; it keeps STOLEN/WRITTEN_OFF.
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string }; data: { status?: string } }]
+    >;
+    const outgoingTouches = vehicleUpdates.filter((c) => c[0].where.id === "v-old");
+    expect(outgoingTouches).toEqual([]);
+    // Incoming still flips to RENTED.
+    const rented = vehicleUpdates.find((c) => c[0].data.status === "RENTED");
+    expect(rented![0].where).toEqual({ id: "v-new" });
+
+    // No turnaround buffer, no fault work order, no new incident.
+    expect(prisma.maintenanceWorkOrder.create).not.toHaveBeenCalled();
+    expect(prisma.incident.create).not.toHaveBeenCalled();
+
+    // Zero delta by reason: no Payment row, no ledger movement, no
+    // adjustment note.
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+    const ledger = prisma.booking.update.mock.calls.find((c) => {
+      const data = (c[0] as { data: Record<string, unknown> }).data;
+      return data.balanceDue !== undefined || data.totalAmount !== undefined;
+    });
+    expect(ledger).toBeUndefined();
+    expect(tryIssueAdjustmentForBookingMock).not.toHaveBeenCalled();
+
+    // Booking re-pointed at the incoming vehicle + its category (PR2 semantics).
+    const reassign = prisma.booking.update.mock.calls.find(
+      (c) => typeof (c[0] as { data: Record<string, unknown> }).data.vehicleId === "string",
+    );
+    expect((reassign![0] as { data: Record<string, unknown> }).data).toMatchObject({
+      vehicleId: "v-new",
+      categoryId: "cat-B",
+    });
+    expect(booking.categoryId).toBe("cat-B");
+
+    // Commit row: outgoing inspection null, draft's loss incident preserved.
+    const commit = prisma.bookingSwap.update.mock.calls.find(
+      (c) => (c[0] as { data: Record<string, unknown> }).data.status === "COMMITTED",
+    );
+    expect((commit![0] as { data: Record<string, unknown> }).data).toMatchObject({
+      outgoingInspectionId: null,
+      incomingInspectionId: "insp-PRE_HIRE",
+      incidentId: "inc-9",
+      priceAdjustmentDirection: "NONE",
+      priceAdjustmentAmount: 0,
+    });
+
+    // No fault/accident manager broadcast — the loss incident pre-exists.
+    const faultPing = sendNotificationMock.mock.calls.find((c) =>
+      String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-fault:"),
+    );
+    expect(faultPing).toBeUndefined();
+    // Customer notification still goes out.
+    const customerPing = sendNotificationMock.mock.calls.find((c) =>
+      String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-confirmed:"),
+    );
+    expect(customerPing).toBeDefined();
+  });
+
+  it("rejects an outgoing inspection payload on a LOSS_REPLACEMENT draft", async () => {
+    const { ctx } = makeConfirmCtx({ reason: "LOSS_REPLACEMENT" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("waives the outgoing inspection"),
+    });
+  });
+
+  it("regression: normal reasons still require the outgoing inspection", async () => {
+    const { ctx, prisma } = makeConfirmCtx(); // UPGRADE
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("outgoingInspection is required"),
+    });
+    expect(prisma.inspection.create).not.toHaveBeenCalled();
+    expect(prisma.bookingSwap.update).not.toHaveBeenCalled();
   });
 });
 

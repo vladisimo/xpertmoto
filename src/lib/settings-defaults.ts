@@ -72,6 +72,10 @@ export const SETTING_DEFAULTS = {
 
   // Payment & tax
   "tax.gstRate": GST_RATE,
+  // Damage-liability excess (AUD) applied when a booking carries no
+  // insurance attach and no InsuranceOption is flagged isDefault. The
+  // per-hire excess cap (src/server/services/excess.ts) falls back to this.
+  "insurance.defaultExcessAmount": 3000,
   "payment.bondHoldDays": 14,
   "payment.bondReleaseDays": 14,
   "payment.bondReauthLeadDays": 2,
@@ -173,6 +177,7 @@ export const SETTING_GROUP_FOR: Record<SettingKey, string> = {
   "cancellation.noShowFee": "cancellation",
 
   "tax.gstRate": "payment",
+  "insurance.defaultExcessAmount": "payment",
   "payment.bondHoldDays": "payment",
   "payment.bondReleaseDays": "payment",
   "payment.bondReauthLeadDays": "payment",
@@ -252,6 +257,8 @@ export const SETTING_DESCRIPTIONS: Partial<Record<SettingKey, string>> = {
   "cancellation.noShowFee": "AUD penalty charged when a customer fails to arrive.",
 
   "tax.gstRate": "GST rate applied to all quoted prices (Australian default: 0.10).",
+  "insurance.defaultExcessAmount":
+    "Fallback damage-liability excess (AUD) for hires with no insurance attached and no default insurance option configured. Caps how much damage cost can be passed to the customer per hire.",
   "payment.bondHoldDays": "How many days the Stripe bond authorisation stays valid.",
   "payment.bondReleaseDays": "Days after return before an un-captured bond is auto-released.",
   "payment.bondReauthLeadDays": "Re-authorise a bond hold when fewer than this many days remain before the card-network auth expires.",

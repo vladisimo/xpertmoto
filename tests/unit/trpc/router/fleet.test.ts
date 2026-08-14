@@ -47,6 +47,27 @@ vi.mock("@/lib/analytics", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../src/lib/analytics")>();
   return { ...actual, trackServer: vi.fn(async () => undefined) };
 });
+// Area 1 — pin the per-hire excess figures (the real applyExcessCap math
+// still runs inside the router) and spy the audit writer so the
+// EXCESS_CAP_* trail can be asserted.
+const getBookingExcessMock = vi.fn();
+const getDamageLiabilityUsedMock = vi.fn();
+vi.mock("@/server/services/excess", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../src/server/services/excess")>();
+  return {
+    ...actual,
+    getBookingExcess: (...a: unknown[]) => getBookingExcessMock(...a),
+    getDamageLiabilityUsed: (...a: unknown[]) => getDamageLiabilityUsedMock(...a),
+  };
+});
+const writeAuditAsyncMock = vi.fn();
+vi.mock("@/server/services/audit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../../src/server/services/audit")>();
+  return {
+    ...actual,
+    writeAuditAsync: (...a: unknown[]) => writeAuditAsyncMock(...a),
+  };
+});
 
 type Caller = ReturnType<typeof fleetRouter.createCaller>;
 
@@ -859,6 +880,7 @@ describe("fleet.chargeCustomerForIncident", () => {
     customerLiable?: boolean;
     bondLedger?: Record<string, unknown> | null;
     existingPayment?: { id: string } | null;
+    excessVoided?: boolean;
   } = {}) {
     const bondLedger =
       over.bondLedger === undefined
@@ -881,8 +903,13 @@ describe("fleet.chargeCustomerForIncident", () => {
       customerChargeAmount: null,
       actualDamageCost: null,
       resolvedAt: null,
+      excessVoided: over.excessVoided ?? false,
       booking,
     };
+    // Generous default headroom so the pre-Area-1 specs behave unchanged;
+    // cap-specific specs override these per test.
+    getBookingExcessMock.mockResolvedValue({ excess: 100000, source: "SETTING", tierName: null });
+    getDamageLiabilityUsedMock.mockResolvedValue(0);
     const paymentCreate = vi
       .fn()
       .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
@@ -1008,5 +1035,187 @@ describe("fleet.chargeCustomerForIncident", () => {
     await expect(
       caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 100 }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  // ---- Area 1: per-hire excess cap ----
+
+  it("clamps the charge to the remaining excess headroom and audits EXCESS_CAP_APPLIED", async () => {
+    const { ctx, paymentCreate } = makeIncidentCtx();
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(800);
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 800 });
+
+    // Only A$200 of headroom remains — the bond (A$500 held) covers all of it.
+    expect(res.fromBond).toBe(200);
+    expect(res.fromCard).toBe(0);
+    const created = paymentCreate.mock.calls.map(
+      (c) => (c[0] as { data: Record<string, unknown> }).data,
+    );
+    expect(created.find((d) => d.reference === "INC-2026-0042")).toMatchObject({ amount: 200 });
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "EXCESS_CAP_APPLIED",
+        newData: expect.objectContaining({ preCapAmount: 800, charged: 200, cappedBy: 600 }),
+      }),
+    );
+  });
+
+  it("BAD_REQUESTs a cap-exhausted charge with no void/override — nothing hits Stripe", async () => {
+    const { ctx, paymentCreate } = makeIncidentCtx();
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 300 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("manager override charges past the cap and audits EXCESS_CAP_OVERRIDDEN with the reason", async () => {
+    const { ctx } = makeIncidentCtx();
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.chargeCustomerForIncident({
+      incidentId: "incident1",
+      amount: 300,
+      overrideExcessCap: { reason: "Negligence — riding two-up against agreement" },
+    });
+
+    expect(res.fromBond).toBe(300);
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "EXCESS_CAP_OVERRIDDEN",
+        newData: expect.objectContaining({
+          reason: "Negligence — riding two-up against agreement",
+          uncappedAmount: 300,
+          charged: 300,
+        }),
+      }),
+    );
+  });
+
+  it("skips the cap entirely when the incident's excess was voided", async () => {
+    const { ctx } = makeIncidentCtx({ excessVoided: true });
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.chargeCustomerForIncident({ incidentId: "incident1", amount: 300 });
+
+    expect(res.fromBond).toBe(300);
+    expect(writeAuditAsyncMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "EXCESS_CAP_APPLIED" }),
+    );
+  });
+});
+
+describe("fleet.setIncidentExcessVoided", () => {
+  function makeVoidCtx(over: { role?: "STAFF" | "MANAGER"; excessVoided?: boolean } = {}) {
+    const incidentUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "incident1",
+      ...data,
+    }));
+    const noteCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "note1",
+      ...data,
+    }));
+    const prisma = {
+      incident: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "incident1",
+          incidentNumber: "2026-0042",
+          excessVoided: over.excessVoided ?? false,
+          bookingId: "bk1",
+        })),
+        update: incidentUpdate,
+      },
+      incidentNote: { create: noteCreate },
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+    };
+    const role = over.role ?? "MANAGER";
+    const ctx = {
+      prisma,
+      user: { id: "mgr1", role },
+      session: { user: { id: "mgr1", role } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+    } as unknown as Parameters<Caller["setIncidentExcessVoided"]>[0];
+    return { ctx, incidentUpdate, noteCreate };
+  }
+
+  it("voids the excess with a reason, writes the incident note and the audit row", async () => {
+    const { ctx, incidentUpdate, noteCreate } = makeVoidCtx();
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await caller.setIncidentExcessVoided({
+      incidentId: "incident1",
+      voided: true,
+      reason: "Prohibited use — off-road riding per agreement §6",
+    });
+
+    expect(incidentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          excessVoided: true,
+          excessVoidReason: "Prohibited use — off-road riding per agreement §6",
+          excessVoidedById: "mgr1",
+        }),
+      }),
+    );
+    expect(noteCreate).toHaveBeenCalledTimes(1);
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "INCIDENT_EXCESS_VOIDED" }),
+    );
+  });
+
+  it("reinstating clears the void fields", async () => {
+    const { ctx, incidentUpdate } = makeVoidCtx({ excessVoided: true });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await caller.setIncidentExcessVoided({ incidentId: "incident1", voided: false });
+
+    expect(incidentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          excessVoided: false,
+          excessVoidReason: null,
+          excessVoidedById: null,
+          excessVoidedAt: null,
+        }),
+      }),
+    );
+    expect(writeAuditAsyncMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "INCIDENT_EXCESS_REINSTATED" }),
+    );
+  });
+
+  it("rejects a STAFF caller (managerProcedure)", async () => {
+    const { ctx } = makeVoidCtx({ role: "STAFF" });
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.setIncidentExcessVoided({ incidentId: "incident1", voided: true, reason: "x y z" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("rejects voiding without a written reason (Zod refine)", async () => {
+    const { ctx, incidentUpdate } = makeVoidCtx();
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    await expect(
+      caller.setIncidentExcessVoided({ incidentId: "incident1", voided: true }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(incidentUpdate).not.toHaveBeenCalled();
   });
 });

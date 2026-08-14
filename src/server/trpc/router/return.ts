@@ -14,6 +14,11 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
 import { logger } from "@/lib/logger";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
 import { getBranding } from "@/lib/branding";
@@ -419,7 +424,9 @@ export const returnRouter = createTRPCRouter({
           },
           inspection: { include: { photos: true, issues: { include: { inspectionPhoto: true, damageTariff: true } } } },
           staff: true,
-          damageCharges: { include: { damageTariff: true } },
+          // Creation order matters: the excess cap consumes headroom line by
+          // line, so the clamp must be deterministic (and match the UI).
+          damageCharges: { include: { damageTariff: true }, orderBy: { createdAt: "asc" } },
         },
       });
       if (assessment.status !== "DRAFT") {
@@ -486,12 +493,52 @@ export const returnRouter = createTRPCRouter({
         Math.round((fees.lateFee - Number(priorLateRaised._sum.amount ?? 0)) * 100) / 100,
       );
 
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+
+      // ---- Excess cap (Area 1). The customer's insurance excess is a
+      // PER-HIRE AGGREGATE ceiling on damage recovery: incident charges,
+      // standard damage lines and quote close-outs all draw on the same cap.
+      // Late / fuel / cleaning fees sit OUTSIDE it. Clamp STANDARD lines in
+      // creation order (later lines reduce to the remaining headroom, then
+      // zero), then clamp QUOTE_PENDING acknowledgements to what's left.
+      const bookingExcess = await getBookingExcess(ctx.prisma, assessment.bookingId);
+      const liabilityUsedBefore = await getDamageLiabilityUsed(ctx.prisma, assessment.bookingId);
+      const initialCapRemaining = Math.max(0, r2(bookingExcess.excess - liabilityUsedBefore));
+      let liabilityUsed = liabilityUsedBefore;
+      const chargedAmountById = new Map<string, number>();
+      const cappedStandardLines: Array<{ id: string; description: string; preCap: number; charged: number }> = [];
+      for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
+        const preCap = Number(c.amount);
+        const { chargeable, cappedBy } = applyExcessCap({
+          proposed: preCap,
+          used: liabilityUsed,
+          excess: bookingExcess.excess,
+        });
+        chargedAmountById.set(c.id, chargeable);
+        liabilityUsed = r2(liabilityUsed + chargeable);
+        if (cappedBy > 0) {
+          cappedStandardLines.push({ id: c.id, description: c.description, preCap, charged: chargeable });
+        }
+      }
+      let quoteHeadroom = Math.max(0, r2(bookingExcess.excess - liabilityUsed));
+      const quoteCapById = new Map<string, number>();
+      const cappedQuoteLines: Array<{ id: string; description: string; preCap: number; cap: number }> = [];
+      for (const c of assessment.damageCharges.filter((x) => x.resolution === "QUOTE_PENDING")) {
+        const preCap = Number(c.quoteCapAmount ?? 0);
+        const clamped = r2(Math.min(preCap, quoteHeadroom));
+        quoteCapById.set(c.id, clamped);
+        quoteHeadroom = r2(quoteHeadroom - clamped);
+        if (clamped < preCap) {
+          cappedQuoteLines.push({ id: c.id, description: c.description, preCap, cap: clamped });
+        }
+      }
+
       const standardTotal = assessment.damageCharges
         .filter((c) => c.resolution === "STANDARD")
-        .reduce((acc, c) => acc + Number(c.amount), 0);
+        .reduce((acc, c) => acc + (chargedAmountById.get(c.id) ?? Number(c.amount)), 0);
       const pendingCapTotal = assessment.damageCharges
         .filter((c) => c.resolution === "QUOTE_PENDING")
-        .reduce((acc, c) => acc + Number(c.quoteCapAmount ?? 0), 0);
+        .reduce((acc, c) => acc + (quoteCapById.get(c.id) ?? Number(c.quoteCapAmount ?? 0)), 0);
       const cleaningFee = Math.round((input.cleaningFee ?? 0) * 100) / 100;
       const totalDueNow =
         Math.round(
@@ -524,7 +571,6 @@ export const returnRouter = createTRPCRouter({
       // is already authorised, so unlike a fresh card charge it can't
       // decline). Read the LEDGER, not booking.bondAmount — part-captured or
       // released holds must not be re-counted.
-      const r2 = (x: number) => Math.round(x * 100) / 100;
       const ledger = await ctx.prisma.bondLedger.findUnique({
         where: { bookingId: assessment.bookingId },
       });
@@ -636,8 +682,15 @@ export const returnRouter = createTRPCRouter({
           description: c.description,
           severity: c.severity,
           resolution: c.resolution,
-          amount: Number(c.amount),
-          quoteCapAmount: c.quoteCapAmount ? Number(c.quoteCapAmount) : null,
+          // The signed PDF states what is ACTUALLY charged / acknowledged —
+          // post-excess-cap figures, not the raw tariff amounts.
+          amount: chargedAmountById.get(c.id) ?? Number(c.amount),
+          quoteCapAmount:
+            c.resolution === "QUOTE_PENDING"
+              ? (quoteCapById.get(c.id) ?? (c.quoteCapAmount ? Number(c.quoteCapAmount) : null))
+              : c.quoteCapAmount
+                ? Number(c.quoteCapAmount)
+                : null,
           tariffName: c.damageTariff?.name ?? null,
           photoUrl: (c.inspectionIssueId ? issuePhotoById.get(c.inspectionIssueId) : null) ?? c.photoUrls[0] ?? null,
         })),
@@ -775,7 +828,10 @@ export const returnRouter = createTRPCRouter({
         };
 
         for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
-          const amountNumber = Number(c.amount);
+          // Post-excess-cap figure — the DamageCharge row records what was
+          // actually charged (getDamageLiabilityUsed sums these), while the
+          // EXCESS_CAP_APPLIED audit keeps the pre-cap trail.
+          const amountNumber = chargedAmountById.get(c.id) ?? Number(c.amount);
           if (amountNumber > 0) {
             const { bondShare, residual } = takeFromBond(
               amountNumber,
@@ -801,6 +857,7 @@ export const returnRouter = createTRPCRouter({
               await tx.damageCharge.update({
                 where: { id: c.id },
                 data: {
+                  amount: amountNumber,
                   status: "CONFIRMED",
                   capturedPaymentId: payment.id,
                   bondDeductionCents: bondShare > 0 ? Math.round(bondShare * 100) : null,
@@ -813,6 +870,7 @@ export const returnRouter = createTRPCRouter({
               await tx.damageCharge.update({
                 where: { id: c.id },
                 data: {
+                  amount: amountNumber,
                   status: "CAPTURED",
                   capturedPaymentId: bondCapturePaymentId,
                   bondDeductionCents: Math.round(bondShare * 100),
@@ -825,12 +883,43 @@ export const returnRouter = createTRPCRouter({
             await tx.damageCharge.update({
               where: { id: c.id },
               data: {
+                amount: amountNumber,
                 status: "CONFIRMED",
                 resolvedAt: new Date(),
                 resolvedById: ctx.user.id,
               },
             });
           }
+        }
+        // Excess-capped QUOTE_PENDING acknowledgements: persist the clamped
+        // cap so close-out (which bills min(final, quoteCapAmount, headroom))
+        // can never exceed what the excess allows.
+        for (const q of cappedQuoteLines) {
+          await tx.damageCharge.update({
+            where: { id: q.id },
+            data: { quoteCapAmount: q.cap },
+          });
+        }
+        if (cappedStandardLines.length > 0 || cappedQuoteLines.length > 0) {
+          const parts = [
+            ...cappedStandardLines.map(
+              (l) => `${l.description.slice(0, 60)}: A$${l.preCap.toFixed(2)} → A$${l.charged.toFixed(2)}`,
+            ),
+            ...cappedQuoteLines.map(
+              (l) => `${l.description.slice(0, 60)} (quote cap): A$${l.preCap.toFixed(2)} → A$${l.cap.toFixed(2)}`,
+            ),
+          ];
+          await tx.bookingNote.create({
+            data: {
+              bookingId: assessment.bookingId,
+              userId: ctx.user.id,
+              note:
+                `Insurance excess cap applied at return (excess A$${bookingExcess.excess.toFixed(2)}${
+                  bookingExcess.tierName ? ` — ${bookingExcess.tierName}` : ""
+                }, A$${liabilityUsedBefore.toFixed(2)} already used): ${parts.join("; ")}`,
+              isInternal: true,
+            },
+          });
         }
         await tx.damageCharge.updateMany({
           where: { returnAssessmentId: assessment.id, resolution: { in: ["WAIVED", "WARRANTY"] } },
@@ -970,6 +1059,24 @@ export const returnRouter = createTRPCRouter({
         });
       });
 
+      if (cappedStandardLines.length > 0 || cappedQuoteLines.length > 0) {
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "ReturnAssessment",
+          entityId: assessment.id,
+          newData: {
+            bookingId: assessment.bookingId,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            tierName: bookingExcess.tierName,
+            usedBefore: liabilityUsedBefore,
+            capRemainingBefore: initialCapRemaining,
+            cappedStandardLines,
+            cappedQuoteLines,
+          },
+        });
+      }
       await writeAudit(ctx.prisma, {
         userId: ctx.user.id,
         action: "RETURN_ASSESSMENT_SIGNED",
@@ -1004,7 +1111,12 @@ export const returnRouter = createTRPCRouter({
   byBooking: staffProcedure.input(z.object({ bookingId: z.string() })).query(({ ctx, input }) =>
     ctx.prisma.returnAssessment.findUnique({
       where: { bookingId: input.bookingId },
-      include: { damageCharges: { include: { damageTariff: true } }, staff: { select: { firstName: true, lastName: true } } },
+      include: {
+        // Creation order — the excess cap consumes headroom line by line at
+        // finalise, so the assess page must project the clamp the same way.
+        damageCharges: { include: { damageTariff: true }, orderBy: { createdAt: "asc" } },
+        staff: { select: { firstName: true, lastName: true } },
+      },
     }),
   ),
 
@@ -1251,10 +1363,23 @@ export const returnRouter = createTRPCRouter({
         });
       }
       const cap = Number(charge.quoteCapAmount ?? 0);
-      // The signed acknowledgement is the customer's liability ceiling.
-      const billAmount = Math.round(Math.min(input.finalAmount, cap > 0 ? cap : input.finalAmount) * 100) / 100;
       const bookingId = charge.returnAssessment.bookingId;
       const bookingReference = charge.returnAssessment.booking?.bookingReference ?? charge.id;
+      // Two ceilings apply: the signed acknowledgement (quoteCapAmount) and
+      // the hire's remaining insurance-excess headroom (per-hire aggregate —
+      // standard lines and incident charges already drew on it).
+      const ackCapped = Math.round(Math.min(input.finalAmount, cap > 0 ? cap : input.finalAmount) * 100) / 100;
+      const bookingExcess = await getBookingExcess(ctx.prisma, bookingId);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, bookingId);
+      const {
+        chargeable: billAmount,
+        cappedBy: excessCappedBy,
+        capRemaining,
+      } = applyExcessCap({
+        proposed: ackCapped,
+        used: liabilityUsed,
+        excess: bookingExcess.excess,
+      });
 
       const { payment, damageCharge } = await ctx.prisma.$transaction(async (tx) => {
         let payment: { id: string; reference: string } | null = null;
@@ -1303,6 +1428,10 @@ export const returnRouter = createTRPCRouter({
           billedAmount: billAmount,
           finalQuoteAmount: input.finalAmount,
           paymentId: payment?.id ?? null,
+          excess: bookingExcess.excess,
+          excessUsedBefore: liabilityUsed,
+          excessCapRemaining: capRemaining,
+          excessCappedBy,
         },
       });
       writeBookingAuditAsync(ctx.prisma, bookingId, {

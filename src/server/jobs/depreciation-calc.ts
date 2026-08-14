@@ -5,9 +5,18 @@ import { getQueue, registerWorker } from "./queue";
 const QUEUE = "depreciation-calc" as const;
 
 /**
+ * Vehicle statuses that mark a disposition (sold, retired, stolen, written
+ * off). Book value freezes at the moment of disposition — the last computed
+ * `currentBookValue` is the figure insurance claims and loss accounting
+ * work from, so the monthly recalc must never keep eroding it.
+ */
+const DISPOSITION_STATUSES = ["SOLD", "END_OF_LIFE", "STOLEN", "WRITTEN_OFF"] as const;
+
+/**
  * Monthly, at 01:00 on the 1st. Recalculate current book value for every
  * vehicle that has a purchase price + method configured. Vehicles without
- * a depreciation configuration are skipped.
+ * a depreciation configuration are skipped, as are disposed / soft-deleted
+ * vehicles (their book value is frozen at disposition).
  */
 export async function runDepreciation(): Promise<number> {
   const vehicles = await prisma.vehicle.findMany({
@@ -16,6 +25,8 @@ export async function runDepreciation(): Promise<number> {
       purchaseDate: { not: null },
       depreciationMethod: { not: null },
       depreciationRate: { not: null },
+      status: { notIn: [...DISPOSITION_STATUSES] },
+      deletedAt: null,
     },
     select: {
       id: true,

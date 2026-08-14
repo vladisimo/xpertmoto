@@ -16,6 +16,7 @@ import { BookingTabActivity } from "@/components/staff/booking-tab-activity";
 import { UnallocatedVehicleBanner } from "@/components/staff/unallocated-vehicle-banner";
 import { PaymentConsole } from "@/components/staff/payment-console";
 import { SwapVehicleButton } from "@/components/staff/swap-vehicle-button";
+import { TerminateForLossDialog } from "@/components/staff/terminate-for-loss-dialog";
 import { BookingSwapHistory } from "@/components/staff/booking-swap-history";
 import { BookingHeaderActions } from "@/components/staff/booking-header-actions";
 import { InvoiceResendButton } from "@/components/staff/invoice-resend-button";
@@ -202,6 +203,17 @@ export default async function StaffBookingDetail({
           status={b.status}
           hasVehicle={!!b.vehicleId}
           hasPendingSwap={b.swaps.length > 0}
+        />
+        <TerminateForLossDialog
+          bookingId={b.id}
+          status={b.status}
+          canTerminate={canFetchAuthoritative}
+          incidents={b.incidents.map((i) => ({
+            id: i.id,
+            incidentNumber: i.incidentNumber,
+            type: i.type,
+            customerLiable: i.customerLiable,
+          }))}
         />
       </div>
 

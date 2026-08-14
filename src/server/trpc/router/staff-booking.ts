@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
-import { createTRPCRouter, staffProcedure } from "../trpc";
+import { createTRPCRouter, managerProcedure, staffProcedure } from "../trpc";
 import {
   assertBookingDepotAccess,
   assertDepotAccess,
@@ -55,6 +55,14 @@ import {
 import { markPartnerTransactionsPayable } from "@/server/services/partner";
 import { qualifyReferral } from "@/server/services/referral";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
+import {
+  previewLossTermination,
+  terminateBookingForLoss,
+} from "@/server/services/booking-termination";
 
 // In-memory rate limiters for the staff resend actions. Module-scope Map —
 // survives across requests in a single Node process. For multi-instance
@@ -232,6 +240,35 @@ export const staffBookingRouter = createTRPCRouter({
       if (!b) throw new TRPCError({ code: "NOT_FOUND" });
       assertDepotAccess(ctx.user, b.depotId);
       return b;
+    }),
+
+  /**
+   * Area 1 — the hire's insurance-excess position: the per-hire aggregate
+   * damage-liability cap, how much of it has been consumed (return damage
+   * lines, quote close-outs, incident charges — refunds net out), and any
+   * incidents whose excess a manager has voided. Powers the cap banners on
+   * the check-in assess page and the incident detail page.
+   */
+  excessSummary: staffProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const [bookingExcess, used, voidedIncidents] = await Promise.all([
+        getBookingExcess(ctx.prisma, input.bookingId),
+        getDamageLiabilityUsed(ctx.prisma, input.bookingId),
+        ctx.prisma.incident.findMany({
+          where: { bookingId: input.bookingId, excessVoided: true, deletedAt: null },
+          select: { id: true, incidentNumber: true, excessVoidReason: true },
+        }),
+      ]);
+      return {
+        excess: bookingExcess.excess,
+        used,
+        remaining: Math.max(0, Math.round((bookingExcess.excess - used) * 100) / 100),
+        tierName: bookingExcess.tierName,
+        source: bookingExcess.source,
+        voidedIncidents,
+      };
     }),
 
   /**
@@ -1199,6 +1236,93 @@ export const staffBookingRouter = createTRPCRouter({
         scheduledReturn: booking.returnDateTime.toISOString(),
         actualReturn: actualReturn.toISOString(),
       };
+    }),
+
+  // Mid-hire loss termination (Area 2). Preview is staff-visible (quote
+  // only — never mutates); the terminate mutation is manager-gated. The UI
+  // pre-selects refundMode by cause (REFUND for company-side loss, FORFEIT
+  // for STOLEN) but the manager's explicit choice is what's honoured.
+  previewLossTermination: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        lossAt: z.coerce.date().optional(),
+        refundMode: z.enum(["REFUND", "CREDIT", "FORFEIT"]),
+        waiveAccruedLateFees: z.boolean().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return previewLossTermination(ctx.prisma, input);
+    }),
+
+  terminateForLoss: managerProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        cause: z.enum(["WRITTEN_OFF", "STOLEN", "DESTROYED", "OTHER"]),
+        lossAt: z.coerce.date().optional(),
+        refundMode: z.enum(["REFUND", "CREDIT", "FORFEIT"]),
+        waiveAccruedLateFees: z.boolean().optional(),
+        incidentId: z.string().optional(),
+        bondDisposition: z.enum(["RELEASED", "HELD_FOR_CLAIM", "CAPTURED_VIA_INCIDENT"]),
+        notes: z.string().max(2000).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      // The service returns a narrow serialisable summary (not the raw
+      // $transaction result) — the known tRPC $transaction return-type
+      // gotcha never gets a chance to bite.
+      const result = await terminateBookingForLoss(ctx.prisma, {
+        bookingId: input.bookingId,
+        cause: input.cause,
+        lossAt: input.lossAt,
+        refundMode: input.refundMode,
+        waiveAccruedLateFees: input.waiveAccruedLateFees,
+        incidentId: input.incidentId ?? null,
+        bondDisposition: input.bondDisposition,
+        notes: input.notes ?? null,
+        actorId: ctx.user.id,
+      });
+      await writeAudit(ctx.prisma, {
+        userId: ctx.user.id,
+        action: "BOOKING_TERMINATED_FOR_LOSS",
+        entity: "Booking",
+        entityId: input.bookingId,
+        newData: {
+          cause: input.cause,
+          lossAt: (input.lossAt ?? new Date()).toISOString(),
+          refundMode: input.refundMode,
+          waiveAccruedLateFees: input.waiveAccruedLateFees ?? false,
+          incidentId: input.incidentId ?? null,
+          bondDisposition: input.bondDisposition,
+          notes: input.notes ?? null,
+          terminationId: result.terminationId,
+          unusedDays: result.unusedDays,
+          refundAmount: result.refundAmount,
+          writedownAmount: result.writedownAmount,
+          waivedLateFeeAmount: result.waivedLateFeeAmount,
+          cancelledLateFees: result.cancelledLateFees,
+          bondReleasedAmount: result.bondReleasedAmount,
+          creditGiftCardId: result.creditGiftCardId,
+          cardRefundOutcome: result.cardRefundOutcome,
+        },
+      });
+      writeCustomerAuditAsync(ctx.prisma, result.customerId, {
+        userId: ctx.user.id,
+        action: "BOOKING_TERMINATED_FOR_LOSS",
+        reqId: ctx.reqId,
+        newData: {
+          bookingId: input.bookingId,
+          reference: result.bookingReference,
+          cause: input.cause,
+          refundMode: input.refundMode,
+          refundAmount: result.refundAmount,
+        },
+      });
+      return result;
     }),
 
   // Live quote for the staff extend-booking flow. Runs the same

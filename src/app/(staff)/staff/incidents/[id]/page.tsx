@@ -24,6 +24,27 @@ export default function IncidentDetailPage(props: { params: Promise<{ id: string
   });
   const [resolution, setResolution] = useState("");
   const [actualCost, setActualCost] = useState("");
+  // Excess-cap banner + manager-only void toggle (Area 1). The summary is
+  // per-booking, so it only renders when the incident is linked to one.
+  const me = trpc.session.whoAmI.useQuery(undefined, { staleTime: 60_000 });
+  const isManager = ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(me.data?.role ?? "");
+  const { data: excess } = trpc.staffBooking.excessSummary.useQuery(
+    { bookingId: inc?.booking?.id ?? "" },
+    { enabled: !!inc?.booking?.id },
+  );
+  const [voidReason, setVoidReason] = useState("");
+  const [voidErr, setVoidErr] = useState<string | null>(null);
+  const setExcessVoided = trpc.fleet.setIncidentExcessVoided.useMutation({
+    onSuccess: () => {
+      setVoidReason("");
+      setVoidErr(null);
+      void util.fleet.incidentDetail.invalidate({ id });
+      if (inc?.booking?.id) {
+        void util.staffBooking.excessSummary.invalidate({ bookingId: inc.booking.id });
+      }
+    },
+    onError: (e) => setVoidErr(e.message),
+  });
 
   if (isLoading) return <LoadingBlock padded="lg" />;
   if (!inc) return <div className="p-8 text-muted-foreground">Not found</div>;
@@ -88,6 +109,84 @@ export default function IncidentDetailPage(props: { params: Promise<{ id: string
           </CardContent>
         </Card>
       </div>
+
+      {inc.booking && excess && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">
+              Insurance excess{excess.tierName ? ` — ${excess.tierName}` : ""}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <div className="grid gap-1 sm:max-w-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Excess cap (per hire)</span>
+                <span>{formatCurrency(excess.excess)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Already recovered this hire</span>
+                <span>{formatCurrency(excess.used)}</span>
+              </div>
+              <div className="flex justify-between border-t pt-1 font-semibold">
+                <span className="text-muted-foreground">Remaining headroom</span>
+                <span>{formatCurrency(excess.remaining)}</span>
+              </div>
+            </div>
+            {inc.excessVoided ? (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3">
+                <div className="font-medium">Excess cap voided for this incident</div>
+                <p className="caption mt-1">{inc.excessVoidReason}</p>
+                {inc.excessVoidedAt && (
+                  <p className="caption mt-1">Voided {formatDateTime(inc.excessVoidedAt)}</p>
+                )}
+              </div>
+            ) : (
+              <p className="caption">
+                Charges raised from this incident are capped at the remaining headroom unless a manager voids
+                the excess (e.g. negligence or prohibited use under the rental agreement).
+              </p>
+            )}
+            {isManager && (
+              <div className="space-y-2 border-t pt-3">
+                {!inc.excessVoided && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="excess-void-reason">Void reason (required)</Label>
+                    <Input
+                      id="excess-void-reason"
+                      value={voidReason}
+                      onChange={(e) => setVoidReason(e.target.value)}
+                      placeholder="e.g. Prohibited use — off-road riding per agreement §6"
+                    />
+                  </div>
+                )}
+                {voidErr && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                    {voidErr}
+                  </div>
+                )}
+                <Button
+                  size="sm"
+                  variant={inc.excessVoided ? "secondary" : "destructive"}
+                  disabled={setExcessVoided.isPending || (!inc.excessVoided && voidReason.trim().length < 3)}
+                  onClick={() =>
+                    setExcessVoided.mutate({
+                      incidentId: inc.id,
+                      voided: !inc.excessVoided,
+                      reason: voidReason.trim() || undefined,
+                    })
+                  }
+                >
+                  {setExcessVoided.isPending
+                    ? "Saving…"
+                    : inc.excessVoided
+                      ? "Reinstate excess cap"
+                      : "Void excess cap"}
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader><CardTitle className="h3">Update status</CardTitle></CardHeader>

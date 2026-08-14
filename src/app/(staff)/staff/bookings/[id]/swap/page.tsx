@@ -220,7 +220,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
     const d = draftQuery.data;
     if (d) {
       setSwapId(d.id);
-      setReason(d.reason);
+      // LOSS_REPLACEMENT drafts are driven by their own flow, not this
+      // wizard's reason picker — leave the picker untouched for them.
+      if (d.reason !== "LOSS_REPLACEMENT") setReason(d.reason);
       setOrigin(d.origin);
       setReasonNotes(d.reasonNotes);
       setOriginDetails(d.originDetails ?? "");
