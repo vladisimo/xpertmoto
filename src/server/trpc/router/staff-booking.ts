@@ -56,6 +56,7 @@ import { markPartnerTransactionsPayable } from "@/server/services/partner";
 import { qualifyReferral } from "@/server/services/referral";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
 import {
+  applyExcessCap,
   getBookingExcess,
   getDamageLiabilityUsed,
 } from "@/server/services/excess";
@@ -2696,7 +2697,43 @@ export const staffBookingRouter = createTRPCRouter({
         ? 0
         : Math.round(missingL * (input.fuelChargePerLitre ?? fuelPerLitre) * 100) / 100;
 
-      const damageChargeAmount = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
+      // Excess cap (per-hire aggregate) — mirror of return.finalise: the
+      // customer's insurance excess is the ceiling on TOTAL damage recovery
+      // for the hire (return-assessment lines, quote close-outs and incident
+      // charges all draw on it). This legacy settle path used to raise the
+      // raw figure uncapped. Late / fuel / cleaning fees sit OUTSIDE the cap.
+      const preCapDamage = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
+      let damageChargeAmount = preCapDamage;
+      let damageExcessCapAudit: {
+        excess: number;
+        excessSource: string;
+        tierName: string | null;
+        usedBefore: number;
+        preCapAmount: number;
+        charged: number;
+        cappedBy: number;
+      } | null = null;
+      if (preCapDamage > 0) {
+        const hireExcess = await getBookingExcess(ctx.prisma, b.id);
+        const excessUsed = await getDamageLiabilityUsed(ctx.prisma, b.id);
+        const capped = applyExcessCap({
+          proposed: preCapDamage,
+          used: excessUsed,
+          excess: hireExcess.excess,
+        });
+        damageChargeAmount = capped.chargeable;
+        if (capped.cappedBy > 0) {
+          damageExcessCapAudit = {
+            excess: hireExcess.excess,
+            excessSource: hireExcess.source,
+            tierName: hireExcess.tierName,
+            usedBefore: excessUsed,
+            preCapAmount: preCapDamage,
+            charged: capped.chargeable,
+            cappedBy: capped.cappedBy,
+          };
+        }
+      }
 
       // Split damage funding between the bond hold and the card on file. A
       // Stripe manual-capture hold is single-capture: capture up to the held
@@ -2954,6 +2991,21 @@ export const staffBookingRouter = createTRPCRouter({
         await invalidateRevenueCaches(b.depotId);
       }
 
+      // Cap audit trail — same EXCESS_CAP_APPLIED action return.finalise
+      // writes, so capped recoveries are auditable regardless of which
+      // settle path raised them.
+      if (damageExcessCapAudit) {
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "Booking",
+          entityId: b.id,
+          newData: {
+            bookingId: b.id,
+            ...damageExcessCapAudit,
+          },
+        });
+      }
       await writeAudit(ctx.prisma, {
         userId: ctx.user.id,
         action: "BOOKING_CHECKED_IN",

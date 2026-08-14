@@ -141,13 +141,27 @@ export async function closeOutQuotePendingCharges(
             fuelChargeAmount: 0,
           });
         } else {
-          // Repair cost came back zero (warranty / goodwill) — resolve the
-          // charge without billing.
+          // Zero bill — either the repair cost came back at $0 (warranty /
+          // goodwill) or the hire's excess cap clamped the bill to nothing.
+          // Land the charge in the same terminal WAIVED shape return.ts uses
+          // for unbilled lines: the remaining-quotes filter below (resolution
+          // QUOTE_PENDING + status PROVISIONAL/CONFIRMED + capturedPaymentId
+          // null) must stop matching this row, or a RETURNED booking parked
+          // on its last quote would never flip COMPLETED and
+          // recordBookingCompletion would never run (loyalty/spend drift).
+          const waiveReason =
+            excessCappedBy > 0
+              ? `Waived at quote close-out — insurance excess cap exhausted (excess A$${bookingExcess.excess.toFixed(2)}, already recovered A$${liabilityUsed.toFixed(2)}).`
+              : "Waived at quote close-out — repair completed at no cost (warranty / goodwill).";
           await tx.damageCharge.update({
             where: { id: charge.id },
             data: {
-              status: "CONFIRMED",
+              status: "WAIVED",
+              resolution: "WAIVED",
               amount: 0,
+              staffNote: charge.staffNote
+                ? `${charge.staffNote}\n${waiveReason}`
+                : waiveReason,
               resolvedAt: new Date(),
               resolvedById: args.staffUserId,
             },

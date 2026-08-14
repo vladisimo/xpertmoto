@@ -80,6 +80,24 @@ export async function chargeCustomerForIncident(
   const bookingId = incident.booking.id;
   const customerId = incident.booking.customerId;
 
+  // Idempotency: if a DAMAGE_CHARGE payment already references this
+  // incident, abort — the charge has already been applied. A bond-funded
+  // run lands `INC-<num>`; a card-only run (bond not HELD) lands ONLY
+  // `INC-<num>-CARD`, so both spellings must trip the pre-check or a retry
+  // sails past it and dies on the Payment.reference @unique (P2002).
+  // Checked BEFORE the excess cap: the prior charge itself consumes the cap
+  // (getDamageLiabilityUsed counts it), so a retry on an already-charged
+  // incident must report the truth (CONFLICT) rather than a misleading
+  // "cap exhausted — override to proceed".
+  const chargeReference = `INC-${incident.incidentNumber}`;
+  const existing = await prisma.payment.findFirst({
+    where: { reference: { in: [chargeReference, `${chargeReference}-CARD`] } },
+    select: { id: true },
+  });
+  if (existing) {
+    throw new TRPCError({ code: "CONFLICT", message: "Customer has already been charged for this incident." });
+  }
+
   // Excess cap (per-hire aggregate): the customer's insurance excess is
   // the ceiling on TOTAL damage recovery for the hire — return-assessment
   // lines, quote close-outs and incident charges all draw on it. Clamped
@@ -101,17 +119,6 @@ export async function chargeCustomerForIncident(
       code: "BAD_REQUEST",
       message: `Insurance excess cap exhausted — excess A$${bookingExcess.excess.toFixed(2)}, already recovered A$${liabilityUsed.toFixed(2)}. Nothing chargeable. Void the excess on the incident (manager) or override with a reason to proceed.`,
     });
-  }
-
-  // Idempotency: if a DAMAGE_CHARGE payment already references this
-  // incident, abort — the charge has already been applied.
-  const chargeReference = `INC-${incident.incidentNumber}`;
-  const existing = await prisma.payment.findFirst({
-    where: { reference: chargeReference },
-    select: { id: true },
-  });
-  if (existing) {
-    throw new TRPCError({ code: "CONFLICT", message: "Customer has already been charged for this incident." });
   }
 
   const bond = incident.booking!.bondLedger;

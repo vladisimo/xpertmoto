@@ -1612,7 +1612,14 @@ describe("fleet.confirmTheft", () => {
         update: vehicleUpdate,
       },
       staffTaskActivity: { findMany: vi.fn(async () => []) },
-      payment: { findFirst: vi.fn(async () => null), create: paymentCreate },
+      payment: {
+        findFirst: vi.fn<
+          (args: {
+            where: { reference?: string | { in?: string[] } };
+          }) => Promise<{ id: string } | null>
+        >(async () => null),
+        create: paymentCreate,
+      },
       damageCharge: {
         create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
           id: "dc1",
@@ -1778,6 +1785,66 @@ describe("fleet.confirmTheft", () => {
     expect(paymentCreate).not.toHaveBeenCalled();
     expect(res.bondDisposition).toBe("HELD_FOR_CLAIM");
     // The hire still terminates.
+    expect(terminateBookingForLossMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ bondDisposition: "HELD_FOR_CLAIM" }),
+    );
+  });
+
+  it("re-run after a prior partial run captured the bond: charge short-circuits, disposition derives CAPTURED_VIA_INCIDENT from persisted state", async () => {
+    const { ctx, prisma, paymentCreate } = makeTheftCtx();
+    // Persisted state from the prior run: the incident-charge idempotency
+    // pre-check (reference `in [INC-…, INC-…-CARD]`) trips and CONFLICTs;
+    // the router's disposition lookup (exact `INC-<num>` + SUCCEEDED) finds
+    // the bond-funded slice the prior run landed.
+    prisma.payment.findFirst.mockImplementation(
+      async ({ where }: { where: { reference?: string | { in?: string[] } } }) =>
+        where?.reference ? { id: "pay-prior-bond" } : null,
+    );
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.confirmTheft({
+      incidentId: "incident1",
+      policeReportNumber: "QP-2026-1234",
+    });
+
+    // The charge step short-circuited — nothing re-charged.
+    expect(res.charge).toBeNull();
+    expect(res.chargeSkippedReason).toBe("already-charged");
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
+    // …but the termination still records the truth: the bond WAS captured
+    // via the incident on the earlier run, not held for a claim.
+    expect(res.bondDisposition).toBe("CAPTURED_VIA_INCIDENT");
+    expect(terminateBookingForLossMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ bondDisposition: "CAPTURED_VIA_INCIDENT" }),
+    );
+  });
+
+  it("re-run after a prior CARD-ONLY charge (bond never captured): disposition stays HELD_FOR_CLAIM", async () => {
+    const { ctx, prisma } = makeTheftCtx();
+    prisma.payment.findFirst.mockImplementation(
+      async ({ where }: { where: { reference?: string | { in?: string[] } } }) => {
+        // The idempotency pre-check's `in` filter matches the prior
+        // INC-<num>-CARD row…
+        if (typeof where?.reference === "object" && where.reference?.in) {
+          return { id: "pay-prior-card" };
+        }
+        // …but no SUCCEEDED bond-slice `INC-<num>` payment was ever
+        // persisted, so the bond was not captured via the incident.
+        return null;
+      },
+    );
+    const caller = fleetRouter.createCaller(ctx as never);
+
+    const res = await caller.confirmTheft({
+      incidentId: "incident1",
+      policeReportNumber: "QP-2026-1234",
+    });
+
+    expect(res.chargeSkippedReason).toBe("already-charged");
+    expect(res.bondDisposition).toBe("HELD_FOR_CLAIM");
     expect(terminateBookingForLossMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ bondDisposition: "HELD_FOR_CLAIM" }),

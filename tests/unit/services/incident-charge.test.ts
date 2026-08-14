@@ -105,13 +105,14 @@ function makeFixture(over: {
     .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: `dc-${data.capturedPaymentId}`, ...data }),
     );
+  const paymentFindFirst = vi.fn().mockResolvedValue(over.existingPayment ?? null);
   const prisma = {
     incident: {
       findUniqueOrThrow: vi.fn().mockResolvedValue(incident),
       update: incidentUpdate,
     },
     payment: {
-      findFirst: vi.fn().mockResolvedValue(over.existingPayment ?? null),
+      findFirst: paymentFindFirst,
       create: paymentCreate,
     },
     bondLedger: { update: vi.fn().mockResolvedValue({}) },
@@ -129,6 +130,7 @@ function makeFixture(over: {
   return {
     prisma: prisma as never,
     paymentCreate,
+    paymentFindFirst,
     bookingUpdate,
     incidentUpdate,
     damageChargeCreate,
@@ -245,12 +247,63 @@ describe("chargeCustomerForIncident (service)", () => {
   });
 
   it("CONFLICTs on a second call once the charge reference exists (idempotency)", async () => {
-    const { prisma, paymentCreate } = makeFixture({ existingPayment: { id: "pay-prior" } });
+    const { prisma, paymentCreate, paymentFindFirst } = makeFixture({
+      existingPayment: { id: "pay-prior" },
+    });
 
     await expect(
       chargeCustomerForIncident(prisma, { incidentId: "incident1", amount: 800, actorId: "mgr1" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
+    // The pre-check must cover BOTH slice spellings — a card-only run lands
+    // only `INC-<num>-CARD`, and missing it would P2002 on the retry.
+    expect(paymentFindFirst).toHaveBeenCalledWith({
+      where: { reference: { in: ["INC-2026-0042", "INC-2026-0042-CARD"] } },
+      select: { id: true },
+    });
+  });
+
+  it("CONFLICTs cleanly on a retry after a card-only charge (only INC-<num>-CARD exists) — no P2002", async () => {
+    // Bond already consumed → the first run was card-only and created ONLY
+    // the `INC-2026-0042-CARD` payment.
+    const { prisma, paymentCreate, paymentFindFirst } = makeFixture({
+      bondLedger: {
+        heldAmount: 500,
+        capturedAmount: 500,
+        status: "FULLY_CAPTURED",
+        stripePaymentIntentId: "pi_bond_1",
+        deductions: [],
+      },
+    });
+    paymentFindFirst.mockImplementation(
+      async ({ where }: { where: { reference?: { in?: string[] } } }) =>
+        where.reference?.in?.includes("INC-2026-0042-CARD")
+          ? { id: "pay-prior-card" }
+          : null,
+    );
+
+    await expect(
+      chargeCustomerForIncident(prisma, { incidentId: "incident1", amount: 250, actorId: "mgr1" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  it("reports CONFLICT (not cap-exhausted) when the prior charge already consumed the excess cap", async () => {
+    // The prior charge itself counts into getDamageLiabilityUsed, so a retry
+    // used to die on the misleading "cap exhausted — override to proceed"
+    // BAD_REQUEST. The idempotency pre-check now runs FIRST.
+    const { prisma, paymentCreate } = makeFixture({ existingPayment: { id: "pay-prior" } });
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+
+    await expect(
+      chargeCustomerForIncident(prisma, { incidentId: "incident1", amount: 300, actorId: "mgr1" }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("already been charged"),
+    });
     expect(paymentCreate).not.toHaveBeenCalled();
   });
 

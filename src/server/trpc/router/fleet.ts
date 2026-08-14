@@ -3120,9 +3120,32 @@ export const fleetRouter = createTRPCRouter({
       }
 
       // ── Step 3: terminate the hire (Area 2 service; Stripe inside it).
-      const bondDisposition =
-        input.bondDisposition ??
-        (charge && charge.fromBond > 0 ? "CAPTURED_VIA_INCIDENT" : "HELD_FOR_CLAIM");
+      // Bond disposition derives from PERSISTED state, not just this run's
+      // in-memory charge result: on a re-run after a prior partial run
+      // already captured the bond via the incident charge, the charge step
+      // above short-circuits as already-charged (CONFLICT) and `charge`
+      // stays null — but the bond really was captured via the incident. The
+      // bond-funded slice always lands a SUCCEEDED `INC-<num>` DAMAGE_CHARGE
+      // Payment in the same tx as the ledger capture, so that row is the
+      // authoritative signal.
+      let bondDisposition: NonNullable<typeof input.bondDisposition>;
+      if (input.bondDisposition) {
+        bondDisposition = input.bondDisposition;
+      } else if (charge && charge.fromBond > 0) {
+        bondDisposition = "CAPTURED_VIA_INCIDENT";
+      } else {
+        const priorBondCapture = await ctx.prisma.payment.findFirst({
+          where: {
+            bookingId: booking.id,
+            reference: `INC-${incident.incidentNumber}`,
+            type: "DAMAGE_CHARGE",
+            status: "SUCCEEDED",
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        bondDisposition = priorBondCapture ? "CAPTURED_VIA_INCIDENT" : "HELD_FOR_CLAIM";
+      }
       let termination: Awaited<ReturnType<typeof terminateBookingForLoss>> | null = null;
       let terminationSkippedReason: string | null = null;
       if (input.terminate) {
