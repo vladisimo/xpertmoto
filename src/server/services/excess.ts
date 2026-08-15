@@ -85,14 +85,29 @@ export async function getBookingExcess(
  *     (since the damage surface unified) by an incident linked to the
  *     booking — in CONFIRMED | CAPTURED. `amount` is the customer's
  *     liability for the line whether it was bond-funded or card-charged.
- *   + DAMAGE_CHARGE Payment rows referenced `INC-%` in PENDING | SUCCEEDED
- *     — the fallback for HISTORICAL incident charges raised before the
- *     unification, which have no DamageCharge row. Payments already linked
- *     from a DamageCharge.capturedPaymentId are deduped out (post-
- *     unification incident slices carry both a charge row and an INC-%
- *     payment; the charge row's amount was already counted).
+ *   + Damage-recovery Payment rows in PENDING | SUCCEEDED that have NO
+ *     DamageCharge row of their own — the fallback for flows that record
+ *     the recovery only as a Payment. Anything already linked from a
+ *     DamageCharge.capturedPaymentId is deduped out (those charges' amounts
+ *     were counted above). Families:
+ *       - DAMAGE_CHARGE `INC-%` — historical incident charges raised before
+ *         the unification (post-unification slices carry a charge row and
+ *         are deduped via the link).
+ *       - DAMAGE_CHARGE `DMG-%` — quick check-in's ad-hoc `DMG-<timestamp>`
+ *         card charges have no charge row (counted); finalise / close-out
+ *         `DMG-<chargeId>` rows ARE linked (deduped).
+ *       - DAMAGE_CHARGE `BOND-CAP-OVF-%` — settlement-console bond-capture
+ *         overflow billed to the card.
+ *       - BOND_CAPTURE `BOND-CAP-%` — manual settlement-console captures and
+ *         quick check-in's damage bond slice (`BOND-CAP-<timestamp>`), which
+ *         are damage recoveries with no charge row. EXCLUDES
+ *         `BOND-CAP-RET-%` (finalise's combined capture also funds
+ *         late/fuel/cleaning, and its damage share already lives on the
+ *         assessment's DamageCharge rows) and `BOND-CAP-NOSHOW-%` (a
+ *         no-show fee, not damage).
  *   − REFUND rows (PENDING | SUCCEEDED) whose parent is any DAMAGE_CHARGE
- *     payment on the booking — a refunded recovery frees the cap back up.
+ *     or BOND_CAPTURE payment on the booking — a refunded recovery frees
+ *     the cap back up.
  */
 export async function getDamageLiabilityUsed(
   prisma: PrismaLike,
@@ -110,17 +125,28 @@ export async function getDamageLiabilityUsed(
     charges.map((c) => c.capturedPaymentId).filter((id): id is string => !!id),
   );
 
-  const incidentPayments = await prisma.payment.findMany({
+  const recoveryPayments = await prisma.payment.findMany({
     where: {
       bookingId,
-      type: "DAMAGE_CHARGE",
       status: { in: ["PENDING", "SUCCEEDED"] },
-      reference: { startsWith: "INC-" },
       deletedAt: null,
+      OR: [
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "INC-" } },
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "DMG-" } },
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "BOND-CAP-OVF-" } },
+        {
+          type: "BOND_CAPTURE",
+          reference: { startsWith: "BOND-CAP-" },
+          NOT: [
+            { reference: { startsWith: "BOND-CAP-RET-" } },
+            { reference: { startsWith: "BOND-CAP-NOSHOW-" } },
+          ],
+        },
+      ],
     },
     select: { id: true, amount: true },
   });
-  const incidentTotal = incidentPayments
+  const recoveredTotal = recoveryPayments
     .filter((p) => !linkedPaymentIds.has(p.id))
     .reduce((acc, p) => acc + Number(p.amount), 0);
 
@@ -129,14 +155,14 @@ export async function getDamageLiabilityUsed(
       bookingId,
       type: "REFUND",
       status: { in: ["PENDING", "SUCCEEDED"] },
-      parentPayment: { type: "DAMAGE_CHARGE" },
+      parentPayment: { type: { in: ["DAMAGE_CHARGE", "BOND_CAPTURE"] } },
       deletedAt: null,
     },
     select: { amount: true },
   });
   const refundTotal = refunds.reduce((acc, p) => acc + Number(p.amount), 0);
 
-  return Math.max(0, r2(chargesTotal + incidentTotal - refundTotal));
+  return Math.max(0, r2(chargesTotal + recoveredTotal - refundTotal));
 }
 
 export type ExcessCapResult = {

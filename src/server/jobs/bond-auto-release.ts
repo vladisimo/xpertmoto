@@ -37,17 +37,36 @@ export async function runBondAutoRelease(): Promise<number> {
     where: {
       status: "HELD",
       updatedAt: { lt: cutoff },
-      booking: { status: { in: ["COMPLETED", "RETURNED"] } },
+      booking: {
+        status: { in: ["COMPLETED", "RETURNED"] },
+        // A loss termination that parked the bond for the insurance claim
+        // (bondDisposition HELD_FOR_CLAIM) is deliberate state, not a stuck
+        // release: the bond moves only when staff capture it through the
+        // incident flow or a manager explicitly releases it. Not a
+        // candidate, and no manager alert — nothing is wrong.
+        OR: [
+          { termination: null },
+          { termination: { bondDisposition: { not: "HELD_FOR_CLAIM" } } },
+        ],
+      },
     },
     include: {
       booking: {
-        include: { customer: true, pickupDepot: { select: { slug: true } } },
+        include: {
+          customer: true,
+          pickupDepot: { select: { slug: true } },
+          termination: { select: { bondDisposition: true } },
+        },
       },
     },
   });
 
   let released = 0;
   for (const bond of candidates) {
+    // Belt-and-braces mirror of the HELD_FOR_CLAIM candidate filter above —
+    // a claim-held bond must never be written off even if it slips into the
+    // candidate set. Silent skip: this is intended state, not an anomaly.
+    if (bond.booking.termination?.bondDisposition === "HELD_FOR_CLAIM") continue;
     // Release gate: unpaid balance or an unresolved damage charge means the
     // bond may still need capturing — a human call, not a nightly write-off.
     const openDamage = await prisma.damageCharge.count({

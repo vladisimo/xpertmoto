@@ -143,3 +143,61 @@ describe("bond-auto-release — open customer-liable incident guard (Area 3)", (
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round-2 item 1 — a loss termination that parked the bond HELD_FOR_CLAIM is
+// deliberate state: never auto-release it, and never alert (nothing is
+// wrong). Release resumes only via the incident capture flow or an explicit
+// manager release.
+// ---------------------------------------------------------------------------
+describe("bond-auto-release — HELD_FOR_CLAIM termination guard", () => {
+  it("excludes claim-held bonds in the candidate query itself", async () => {
+    await runBondAutoRelease();
+    expect(mockedCandidates).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          booking: expect.objectContaining({
+            OR: [
+              { termination: null },
+              { termination: { bondDisposition: { not: "HELD_FOR_CLAIM" } } },
+            ],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("skips a claim-held bond silently — no release, no Stripe cancel, no manager alert", async () => {
+    const bond = makeBond();
+    (bond.booking as Record<string, unknown>).termination = {
+      bondDisposition: "HELD_FOR_CLAIM",
+    };
+    mockedCandidates.mockResolvedValue([bond]);
+
+    const released = await runBondAutoRelease();
+
+    expect(released).toBe(0);
+    expect(cancelPaymentIntentMock).not.toHaveBeenCalled();
+    expect(txMock.bondLedger.update).not.toHaveBeenCalled();
+    expect(txMock.payment.create).not.toHaveBeenCalled();
+    // Deliberate state → NOT the release-blocked alert path.
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(mockedAuditCreate).not.toHaveBeenCalled();
+  });
+
+  it("releases normally when the termination disposition is RELEASED", async () => {
+    const bond = makeBond();
+    (bond.booking as Record<string, unknown>).termination = {
+      bondDisposition: "RELEASED",
+    };
+    mockedCandidates.mockResolvedValue([bond]);
+
+    const released = await runBondAutoRelease();
+
+    expect(released).toBe(1);
+    expect(cancelPaymentIntentMock).toHaveBeenCalledWith("pi_bond_1");
+    expect(txMock.bondLedger.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "RELEASED" }) }),
+    );
+  });
+});
