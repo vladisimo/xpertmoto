@@ -73,7 +73,11 @@ function tierScopeWhere(scope: PricingTierScope, scopeId: string) {
       return { vehicleId: scopeId };
   }
 }
-import { reassignFutureBookings } from "@/server/services/fleet-reassign";
+import {
+  reassignFutureBookings,
+  notifyReassignmentOutcome,
+} from "@/server/services/fleet-reassign";
+import { logger } from "@/lib/logger";
 
 /**
  * Register/update the depot's properties on its PostHog group so events
@@ -1040,7 +1044,12 @@ export const adminRouter = createTRPCRouter({
         }
       }
 
-      return ctx.prisma.$transaction(async (tx) => {
+      const txResult = await ctx.prisma.$transaction(async (tx) => {
+        const reassignments: Array<{
+          vehicleId: string;
+          reasonLabel: string;
+          summary: Awaited<ReturnType<typeof reassignFutureBookings>>;
+        }> = [];
         for (const action of input.vehicleActions) {
           if (action.action === "REASSIGN") {
             await tx.vehicleCategory.findUniqueOrThrow({ where: { id: action.targetCategoryId } });
@@ -1074,12 +1083,17 @@ export const adminRouter = createTRPCRouter({
               },
             },
           });
-          await reassignFutureBookings(
+          const summary = await reassignFutureBookings(
             tx,
             action.vehicleId,
             ctx.user.id,
             `Vehicle ${previous.internalCode} → ${action.targetStatus} (category archived)`,
           );
+          reassignments.push({
+            vehicleId: action.vehicleId,
+            reasonLabel: action.targetStatus,
+            summary,
+          });
         }
 
         const archived = await tx.vehicleCategory.update({
@@ -1087,8 +1101,35 @@ export const adminRouter = createTRPCRouter({
           data: { isActive: false },
         });
         await invalidateTag(CACHE_TAGS.CATEGORIES);
-        return { category: archived, actioned: input.vehicleActions.length };
+        return {
+          category: archived,
+          actioned: input.vehicleActions.length,
+          reassignments,
+        };
       });
+
+      // Post-commit fan-out per disposed vehicle — same contract as
+      // fleet.updateVehicleStatus / fleet.decommission: customer emails for
+      // auto-reassigned bookings, depot-manager digest for the needsManual
+      // bucket, availability-cache invalidation. Best-effort — the archive
+      // is already committed, so a failed email never rolls it back.
+      for (const r of txResult.reassignments) {
+        try {
+          await notifyReassignmentOutcome({
+            vehicleId: r.vehicleId,
+            actorUserId: ctx.user.id,
+            summary: r.summary,
+            reasonLabel: r.reasonLabel,
+          });
+        } catch (err) {
+          logger.warn(
+            { vehicleId: r.vehicleId, err: err instanceof Error ? err.message : String(err) },
+            "archiveCategory: reassignment fan-out failed",
+          );
+        }
+      }
+
+      return { category: txResult.category, actioned: txResult.actioned };
     }),
 
   restoreCategory: adminProcedure

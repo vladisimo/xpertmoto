@@ -80,7 +80,7 @@ export async function chargeCustomerForIncident(
   const bookingId = incident.booking.id;
   const customerId = incident.booking.customerId;
 
-  // Idempotency: if a DAMAGE_CHARGE payment already references this
+  // Idempotency: if a live DAMAGE_CHARGE payment already references this
   // incident, abort — the charge has already been applied. A bond-funded
   // run lands `INC-<num>`; a card-only run (bond not HELD) lands ONLY
   // `INC-<num>-CARD`, so both spellings must trip the pre-check or a retry
@@ -89,14 +89,48 @@ export async function chargeCustomerForIncident(
   // (getDamageLiabilityUsed counts it), so a retry on an already-charged
   // incident must report the truth (CONFLICT) rather than a misleading
   // "cap exhausted — override to proceed".
+  //
+  // FAILED rows do NOT block: a hard-declined card slice (capture sweep /
+  // retry queue marks it FAILED) would otherwise permanently jam the unique
+  // reference and make the incident forever unchargeable. Instead the
+  // FAILED row is RESURRECTED inside the charging transaction below —
+  // flipped back to a live status with the new slice's amount — so the
+  // reference stays unique and idempotency is preserved. (PaymentStatus has
+  // no CANCELLED; FAILED is the only resurrectable terminal state. Anything
+  // else — PENDING, SUCCEEDED, REFUNDED, DISPUTED, WRITTEN_OFF — represents
+  // a live or deliberately-settled charge and still CONFLICTs.)
   const chargeReference = `INC-${incident.incidentNumber}`;
-  const existing = await prisma.payment.findFirst({
-    where: { reference: { in: [chargeReference, `${chargeReference}-CARD`] } },
-    select: { id: true },
+  const cardReference = `${chargeReference}-CARD`;
+  const priorSlices = await prisma.payment.findMany({
+    where: { reference: { in: [chargeReference, cardReference] } },
+    select: { id: true, reference: true, status: true, amount: true, notes: true },
   });
-  if (existing) {
+  if (priorSlices.some((r) => r.status !== "FAILED")) {
     throw new TRPCError({ code: "CONFLICT", message: "Customer has already been charged for this incident." });
   }
+  const failedBondSlice = priorSlices.find((r) => r.reference === chargeReference) ?? null;
+  const failedCardSlice = priorSlices.find((r) => r.reference === cardReference) ?? null;
+
+  // DamageCharge rows linked to the failed attempt: getDamageLiabilityUsed
+  // counts CONFIRMED/CAPTURED charge rows regardless of the linked
+  // payment's status, so the failed slice still consumes excess-cap
+  // headroom AND would double-count if we created a fresh row alongside it.
+  // The retry supersedes the failed attempt, so (a) its liability is freed
+  // back to the cap for this computation, and (b) the row is UPDATED to the
+  // new slice in the transaction instead of duplicated.
+  const failedSliceIds = [failedBondSlice, failedCardSlice]
+    .filter((r): r is NonNullable<typeof r> => !!r)
+    .map((r) => r.id);
+  const supersededCharges = failedSliceIds.length
+    ? await prisma.damageCharge.findMany({
+        where: {
+          capturedPaymentId: { in: failedSliceIds },
+          status: { in: ["CONFIRMED", "CAPTURED"] },
+        },
+        select: { id: true, amount: true, capturedPaymentId: true },
+      })
+    : [];
+  const supersededLiability = supersededCharges.reduce((acc, c) => acc + Number(c.amount), 0);
 
   // Excess cap (per-hire aggregate): the customer's insurance excess is
   // the ceiling on TOTAL damage recovery for the hire — return-assessment
@@ -105,7 +139,11 @@ export async function chargeCustomerForIncident(
   // voided (§6 grounds via setIncidentExcessVoided) or the manager
   // explicitly overrides for this one charge (audited below).
   const bookingExcess = await getBookingExcess(prisma, bookingId);
-  const liabilityUsed = await getDamageLiabilityUsed(prisma, bookingId);
+  const liabilityUsed = Math.max(
+    0,
+    Math.round(((await getDamageLiabilityUsed(prisma, bookingId)) - supersededLiability) * 100) /
+      100,
+  );
   const capResult = applyExcessCap({
     proposed: requestedAmount,
     used: liabilityUsed,
@@ -157,11 +195,40 @@ export async function chargeCustomerForIncident(
   const chargeDescription =
     `Incident ${incident.incidentNumber} — ${incident.description}`.slice(0, 500);
 
+  // Resurrection note: appended (never overwriting) so the failed attempt's
+  // history survives. The "[RECONCILED:balance-due]" marker is deliberate —
+  // scripts/reconcile-incident-charges.ts pass 2 backfills the balanceDue
+  // raise onto PENDING INC-%-CARD rows created before the go-forward fix and
+  // skips rows carrying that marker; a resurrected row gets its raise
+  // accounted right here, so the marker stops the backfill double-applying.
+  const retryNote = (prior: string | null | undefined, extra: string) =>
+    `${prior ? `${prior}\n` : ""}[RETRY: previous attempt FAILED — resurrected ${extra}] [RECONCILED:balance-due]`;
+
   const result = await prisma.$transaction(async (tx) => {
     const payments: { id: string; amount: number; source: "BOND" | "CARD" }[] = [];
 
     if (fromBond > 0 && bond) {
-      const bondPayment = await tx.payment.create({
+      // Bond slice lands SUCCEEDED (money already captured at Stripe above).
+      // A FAILED row on this reference (historical pre-unification card
+      // charge) is resurrected in place so the unique reference is reused.
+      const bondPayment = failedBondSlice
+        ? await tx.payment.update({
+            where: { id: failedBondSlice.id },
+            data: {
+              amount: fromBond,
+              gstAmount: gstFromInclusive(fromBond),
+              status: "SUCCEEDED",
+              stripePaymentIntentId: bond.stripePaymentIntentId,
+              stripeChargeId: bondChargeId,
+              notes: retryNote(
+                failedBondSlice.notes,
+                `as bond capture for incident ${incident.incidentNumber}`,
+              ),
+              processedById: input.actorId,
+              processedAt: new Date(),
+            },
+          })
+        : await tx.payment.create({
         data: {
           reference: chargeReference,
           bookingId,
@@ -200,28 +267,60 @@ export async function chargeCustomerForIncident(
       });
       payments.push({ id: bondPayment.id, amount: fromBond, source: "BOND" });
       // Bond slice charge row: money already captured, so the charge lands
-      // terminal (CAPTURED) with the bond deduction recorded.
-      await tx.damageCharge.create({
-        data: {
-          incidentId: incident.id,
-          description: chargeDescription,
-          severity: incident.severity,
-          resolution: "STANDARD",
-          amount: fromBond,
-          status: "CAPTURED",
-          capturedPaymentId: bondPayment.id,
-          bondDeductionCents: Math.round(fromBond * 100),
-          createdById: input.actorId,
-          resolvedById: input.actorId,
-          resolvedAt: new Date(),
-        },
-      });
+      // terminal (CAPTURED) with the bond deduction recorded. When the
+      // failed attempt already left a DamageCharge linked to the resurrected
+      // payment, update it in place (creating a second row would double
+      // getDamageLiabilityUsed).
+      const supersededBondCharge = failedBondSlice
+        ? supersededCharges.find((c) => c.capturedPaymentId === failedBondSlice.id)
+        : undefined;
+      const bondChargePatch = {
+        incidentId: incident.id,
+        description: chargeDescription,
+        severity: incident.severity,
+        resolution: "STANDARD" as const,
+        amount: fromBond,
+        status: "CAPTURED" as const,
+        capturedPaymentId: bondPayment.id,
+        bondDeductionCents: Math.round(fromBond * 100),
+        resolvedById: input.actorId,
+        resolvedAt: new Date(),
+      };
+      if (supersededBondCharge) {
+        // Keep the original creator on the superseded row — only the money
+        // fields and resolution state change on a retry.
+        await tx.damageCharge.update({
+          where: { id: supersededBondCharge.id },
+          data: bondChargePatch,
+        });
+      } else {
+        await tx.damageCharge.create({
+          data: { ...bondChargePatch, createdById: input.actorId },
+        });
+      }
     }
 
     if (fromCard > 0) {
-      const cardPayment = await tx.payment.create({
+      const cardPayment = failedCardSlice
+        ? // Resurrect the hard-declined slice: back to PENDING with the new
+          // amount so the off-session sweep re-attempts it — the unique
+          // INC-<num>-CARD reference is reused, not duplicated.
+          await tx.payment.update({
+            where: { id: failedCardSlice.id },
+            data: {
+              amount: fromCard,
+              gstAmount: gstFromInclusive(fromCard),
+              status: "PENDING",
+              notes: retryNote(
+                failedCardSlice.notes,
+                `as card charge for incident ${incident.incidentNumber}`,
+              ),
+              processedById: input.actorId,
+            },
+          })
+        : await tx.payment.create({
         data: {
-          reference: `${chargeReference}-CARD`,
+          reference: cardReference,
           bookingId,
           customerId,
           type: "DAMAGE_CHARGE",
@@ -237,27 +336,77 @@ export async function chargeCustomerForIncident(
       });
       payments.push({ id: cardPayment.id, amount: fromCard, source: "CARD" });
       // Card slice charge row: CONFIRMED (raised, capture pending) linked to
-      // the PENDING card Payment the off-session sweep collects.
-      await tx.damageCharge.create({
-        data: {
-          incidentId: incident.id,
-          description: chargeDescription,
-          severity: incident.severity,
-          resolution: "STANDARD",
-          amount: fromCard,
-          status: "CONFIRMED",
-          capturedPaymentId: cardPayment.id,
-          createdById: input.actorId,
-        },
-      });
+      // the PENDING card Payment the off-session sweep collects. On a retry
+      // the failed attempt's existing row is updated in place — a second row
+      // would double getDamageLiabilityUsed.
+      const supersededCardCharge = failedCardSlice
+        ? supersededCharges.find((c) => c.capturedPaymentId === failedCardSlice.id)
+        : undefined;
+      if (supersededCardCharge) {
+        await tx.damageCharge.update({
+          where: { id: supersededCardCharge.id },
+          data: {
+            incidentId: incident.id,
+            description: chargeDescription,
+            severity: incident.severity,
+            resolution: "STANDARD",
+            amount: fromCard,
+            status: "CONFIRMED",
+            capturedPaymentId: cardPayment.id,
+          },
+        });
+      } else {
+        await tx.damageCharge.create({
+          data: {
+            incidentId: incident.id,
+            description: chargeDescription,
+            severity: incident.severity,
+            resolution: "STANDARD",
+            amount: fromCard,
+            status: "CONFIRMED",
+            capturedPaymentId: cardPayment.id,
+            createdById: input.actorId,
+          },
+        });
+      }
       // Raise→add half of the balance-due contract (balance-due.ts):
       // DAMAGE_CHARGE is balance-affecting, so its capture decrements
       // balanceDue — without this increment the capture would eat into
       // UNRELATED debt on the booking and silently stop it being dunned.
-      await tx.booking.update({
-        where: { id: bookingId },
-        data: { balanceDue: { increment: fromCard } },
-      });
+      //
+      // Resurrection accounting: neither FAILED path decrements balanceDue —
+      // capture-pending-payments.ts flips PENDING→FAILED on a hard decline
+      // with no applyCaptureToBalanceDue call, and capture-retry.ts does the
+      // same when retries exhaust — so the failed slice's original raise is
+      // STILL sitting on Booking.balanceDue. The net owed for the
+      // resurrected row must equal its new amount, so only the DELTA
+      // (new − failed) is applied here, clamped at zero like the capture
+      // half of the contract. (Pre-balance-due-fix FAILED history that never
+      // received a raise is out of this go-forward contract's scope —
+      // scripts/reconcile-incident-charges.ts owns historical repair.)
+      if (failedCardSlice) {
+        const delta =
+          Math.round((fromCard - Number(failedCardSlice.amount)) * 100) / 100;
+        if (delta !== 0) {
+          const current = await tx.booking.findUnique({
+            where: { id: bookingId },
+            select: { balanceDue: true },
+          });
+          const nextBalance = Math.max(
+            0,
+            Math.round((Number(current?.balanceDue ?? 0) + delta) * 100) / 100,
+          );
+          await tx.booking.update({
+            where: { id: bookingId },
+            data: { balanceDue: nextBalance },
+          });
+        }
+      } else {
+        await tx.booking.update({
+          where: { id: bookingId },
+          data: { balanceDue: { increment: fromCard } },
+        });
+      }
     }
 
     const updatedIncident = await tx.incident.update({

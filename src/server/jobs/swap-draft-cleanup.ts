@@ -38,7 +38,13 @@ export async function runSwapDraftCleanup(): Promise<{
   const cutoff = new Date(Date.now() - STALE_HOURS * 60 * 60 * 1000);
   const stale = await prisma.bookingSwap.findMany({
     where: { status: "DRAFT", createdAt: { lt: cutoff } },
-    select: { id: true, bookingId: true, swappedById: true, createdAt: true },
+    select: {
+      id: true,
+      bookingId: true,
+      swappedById: true,
+      createdAt: true,
+      reasonNotes: true,
+    },
   });
 
   for (const row of stale) {
@@ -46,7 +52,16 @@ export async function runSwapDraftCleanup(): Promise<{
       where: { id: row.id },
       data: {
         status: "VOIDED",
-        reasonNotes: `[AUTO-VOIDED by nightly cleanup: draft abandoned for >${STALE_HOURS}h]`,
+        // Release the 1:1 BookingSwap.incidentId slot, mirroring the manual
+        // `voidSwapDraft` path: `startLossReplacementDraft` reads the
+        // relation without a status filter, so a voided draft that kept its
+        // incident link would block every retry on the same loss incident.
+        incidentId: null,
+        // APPEND the auto-void marker — the manager's original reasonNotes
+        // are the audit trail for why the swap was started and must survive.
+        reasonNotes:
+          (row.reasonNotes ? `${row.reasonNotes}\n\n` : "") +
+          `[AUTO-VOIDED by nightly cleanup: draft abandoned for >${STALE_HOURS}h]`,
       },
     });
   }

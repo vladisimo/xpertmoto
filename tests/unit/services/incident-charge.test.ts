@@ -54,7 +54,13 @@ function makeFixture(over: {
   booking?: Record<string, unknown> | null;
   customerLiable?: boolean;
   bondLedger?: Record<string, unknown> | null;
-  existingPayment?: { id: string } | null;
+  /** Prior Payment rows on the INC-<num>/INC-<num>-CARD references (the new
+   *  pre-check reads them via payment.findMany). */
+  priorSlices?: Array<Record<string, unknown>>;
+  /** DamageCharge rows linked to FAILED prior slices. */
+  supersededCharges?: Array<Record<string, unknown>>;
+  /** Booking.balanceDue read inside the resurrection delta path. */
+  bookingBalanceDue?: number;
   excessVoided?: boolean;
   incidentStatus?: string;
 } = {}) {
@@ -94,30 +100,41 @@ function makeFixture(over: {
     .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: `pay-${data.reference}`, ...data }),
     );
+  const paymentUpdate = vi
+    .fn()
+    .mockImplementation(({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
+      Promise.resolve({ id: where.id, ...data }),
+    );
   const incidentUpdate = vi
     .fn()
     .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: "incident1", ...data }),
     );
   const bookingUpdate = vi.fn().mockResolvedValue({});
+  const bookingFindUnique = vi
+    .fn()
+    .mockResolvedValue({ balanceDue: over.bookingBalanceDue ?? 0 });
   const damageChargeCreate = vi
     .fn()
     .mockImplementation(({ data }: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: `dc-${data.capturedPaymentId}`, ...data }),
     );
-  const paymentFindFirst = vi.fn().mockResolvedValue(over.existingPayment ?? null);
+  const damageChargeUpdate = vi.fn().mockResolvedValue({});
+  const paymentFindMany = vi.fn().mockResolvedValue(over.priorSlices ?? []);
+  const damageChargeFindMany = vi.fn().mockResolvedValue(over.supersededCharges ?? []);
   const prisma = {
     incident: {
       findUniqueOrThrow: vi.fn().mockResolvedValue(incident),
       update: incidentUpdate,
     },
     payment: {
-      findFirst: paymentFindFirst,
+      findMany: paymentFindMany,
       create: paymentCreate,
+      update: paymentUpdate,
     },
     bondLedger: { update: vi.fn().mockResolvedValue({}) },
-    booking: { update: bookingUpdate },
-    damageCharge: { create: damageChargeCreate },
+    booking: { update: bookingUpdate, findUnique: bookingFindUnique },
+    damageCharge: { create: damageChargeCreate, update: damageChargeUpdate, findMany: damageChargeFindMany },
     $transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
   };
   capturePaymentIntentMock.mockResolvedValue({
@@ -130,10 +147,14 @@ function makeFixture(over: {
   return {
     prisma: prisma as never,
     paymentCreate,
-    paymentFindFirst,
+    paymentUpdate,
+    paymentFindMany,
     bookingUpdate,
+    bookingFindUnique,
     incidentUpdate,
     damageChargeCreate,
+    damageChargeUpdate,
+    damageChargeFindMany,
   };
 }
 
@@ -246,9 +267,11 @@ describe("chargeCustomerForIncident (service)", () => {
     ).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
-  it("CONFLICTs on a second call once the charge reference exists (idempotency)", async () => {
-    const { prisma, paymentCreate, paymentFindFirst } = makeFixture({
-      existingPayment: { id: "pay-prior" },
+  it("CONFLICTs on a second call once a live charge reference exists (idempotency)", async () => {
+    const { prisma, paymentCreate, paymentFindMany } = makeFixture({
+      priorSlices: [
+        { id: "pay-prior", reference: "INC-2026-0042", status: "SUCCEEDED", amount: 500, notes: null },
+      ],
     });
 
     await expect(
@@ -258,16 +281,17 @@ describe("chargeCustomerForIncident (service)", () => {
     expect(paymentCreate).not.toHaveBeenCalled();
     // The pre-check must cover BOTH slice spellings — a card-only run lands
     // only `INC-<num>-CARD`, and missing it would P2002 on the retry.
-    expect(paymentFindFirst).toHaveBeenCalledWith({
-      where: { reference: { in: ["INC-2026-0042", "INC-2026-0042-CARD"] } },
-      select: { id: true },
-    });
+    expect(paymentFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { reference: { in: ["INC-2026-0042", "INC-2026-0042-CARD"] } },
+      }),
+    );
   });
 
-  it("CONFLICTs cleanly on a retry after a card-only charge (only INC-<num>-CARD exists) — no P2002", async () => {
+  it("CONFLICTs cleanly on a retry after a card-only charge (only PENDING INC-<num>-CARD exists) — no P2002", async () => {
     // Bond already consumed → the first run was card-only and created ONLY
-    // the `INC-2026-0042-CARD` payment.
-    const { prisma, paymentCreate, paymentFindFirst } = makeFixture({
+    // the `INC-2026-0042-CARD` payment, still awaiting the capture sweep.
+    const { prisma, paymentCreate } = makeFixture({
       bondLedger: {
         heldAmount: 500,
         capturedAmount: 500,
@@ -275,13 +299,10 @@ describe("chargeCustomerForIncident (service)", () => {
         stripePaymentIntentId: "pi_bond_1",
         deductions: [],
       },
+      priorSlices: [
+        { id: "pay-prior-card", reference: "INC-2026-0042-CARD", status: "PENDING", amount: 250, notes: null },
+      ],
     });
-    paymentFindFirst.mockImplementation(
-      async ({ where }: { where: { reference?: { in?: string[] } } }) =>
-        where.reference?.in?.includes("INC-2026-0042-CARD")
-          ? { id: "pay-prior-card" }
-          : null,
-    );
 
     await expect(
       chargeCustomerForIncident(prisma, { incidentId: "incident1", amount: 250, actorId: "mgr1" }),
@@ -294,7 +315,11 @@ describe("chargeCustomerForIncident (service)", () => {
     // The prior charge itself counts into getDamageLiabilityUsed, so a retry
     // used to die on the misleading "cap exhausted — override to proceed"
     // BAD_REQUEST. The idempotency pre-check now runs FIRST.
-    const { prisma, paymentCreate } = makeFixture({ existingPayment: { id: "pay-prior" } });
+    const { prisma, paymentCreate } = makeFixture({
+      priorSlices: [
+        { id: "pay-prior", reference: "INC-2026-0042", status: "SUCCEEDED", amount: 300, notes: null },
+      ],
+    });
     getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
     getDamageLiabilityUsedMock.mockResolvedValue(1000);
 
@@ -305,6 +330,119 @@ describe("chargeCustomerForIncident (service)", () => {
       message: expect.stringContaining("already been charged"),
     });
     expect(paymentCreate).not.toHaveBeenCalled();
+  });
+
+  // ---- Round 2: FAILED-slice resurrection (hard-decline retry path) ----
+
+  const failedCardFixtureArgs = {
+    bondLedger: {
+      heldAmount: 500,
+      capturedAmount: 500,
+      status: "FULLY_CAPTURED",
+      stripePaymentIntentId: "pi_bond_1",
+      deductions: [],
+    },
+    priorSlices: [
+      {
+        id: "pay-failed-card",
+        reference: "INC-2026-0042-CARD",
+        status: "FAILED",
+        amount: 300,
+        notes: "capture-pending: failed — card_declined",
+      },
+    ],
+    supersededCharges: [
+      { id: "dc-old", amount: 300, capturedPaymentId: "pay-failed-card" },
+    ],
+    bookingBalanceDue: 300,
+  };
+
+  it("resurrects a hard-declined card slice: single PENDING row reused, notes appended, no duplicate", async () => {
+    const { prisma, paymentCreate, paymentUpdate, damageChargeCreate, damageChargeUpdate } =
+      makeFixture(failedCardFixtureArgs);
+
+    const res = await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 250,
+      actorId: "mgr1",
+    });
+
+    expect(res.fromBond).toBe(0);
+    expect(res.fromCard).toBe(250);
+    // The FAILED row is flipped back to PENDING with the new slice — no
+    // second Payment row, so the unique INC-<num>-CARD reference survives.
+    expect(paymentCreate).not.toHaveBeenCalled();
+    expect(paymentUpdate).toHaveBeenCalledTimes(1);
+    const upd = paymentUpdate.mock.calls[0]?.[0] as {
+      where: { id: string };
+      data: Record<string, unknown>;
+    };
+    expect(upd.where).toEqual({ id: "pay-failed-card" });
+    expect(upd.data).toMatchObject({ status: "PENDING", amount: 250 });
+    expect(Number(upd.data.gstAmount)).toBeCloseTo(22.73, 2);
+    // Failure history preserved, retry marker + reconcile marker appended
+    // (the marker keeps reconcile-incident-charges.ts pass 2 off this row).
+    expect(String(upd.data.notes)).toMatch(
+      /^capture-pending: failed — card_declined\n\[RETRY: previous attempt FAILED/,
+    );
+    expect(String(upd.data.notes)).toContain("[RECONCILED:balance-due]");
+    // The failed attempt's DamageCharge row is updated, not duplicated —
+    // a second row would double getDamageLiabilityUsed.
+    expect(damageChargeCreate).not.toHaveBeenCalled();
+    expect(damageChargeUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "dc-old" },
+        data: expect.objectContaining({ amount: 250, status: "CONFIRMED" }),
+      }),
+    );
+  });
+
+  it("resurrection applies only the balanceDue DELTA — the failed raise was never decremented on decline", async () => {
+    // capture-pending-payments.ts / capture-retry.ts mark hard declines
+    // FAILED without touching balanceDue, so the failed A$300 raise is still
+    // on the booking. Re-raising A$250 must land net A$250, i.e. −A$50.
+    const { prisma, bookingUpdate } = makeFixture(failedCardFixtureArgs);
+
+    await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 250,
+      actorId: "mgr1",
+    });
+
+    expect(bookingUpdate).toHaveBeenCalledTimes(1);
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "bk1" },
+      data: { balanceDue: 250 },
+    });
+  });
+
+  it("resurrection at the same amount leaves balanceDue untouched (delta zero)", async () => {
+    const { prisma, bookingUpdate } = makeFixture(failedCardFixtureArgs);
+
+    await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 300,
+      actorId: "mgr1",
+    });
+
+    expect(bookingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("frees the failed slice's excess-cap consumption so the retry is not falsely cap-exhausted", async () => {
+    // The failed attempt's CONFIRMED DamageCharge row still counts into
+    // getDamageLiabilityUsed; without subtracting it the retry of the SAME
+    // amount would die on "cap exhausted".
+    const { prisma } = makeFixture(failedCardFixtureArgs);
+    getBookingExcessMock.mockResolvedValue({ excess: 300, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(300); // entirely the failed slice
+
+    const res = await chargeCustomerForIncident(prisma, {
+      incidentId: "incident1",
+      amount: 300,
+      actorId: "mgr1",
+    });
+
+    expect(res.fromCard).toBe(300);
   });
 
   // ---- Area 1: per-hire excess cap ----

@@ -196,17 +196,47 @@ async function main() {
           `+ ${money(amount)}`,
       );
       if (!args.apply) continue;
-      // Increment + marker in one tx so a re-run can't double-apply.
-      await p.$transaction([
-        p.booking.update({
-          where: { id: row.bookingId },
-          data: { balanceDue: { increment: amount } },
-        }),
-        p.payment.update({
+      // Increment + marker in one interactive tx, with an in-tx re-check
+      // that the row is STILL PENDING. Between the candidate scan above and
+      // this write, the live capture sweep (capture-pending-payments /
+      // capture-retry / Stripe webhook) may capture the row — flipping it
+      // SUCCEEDED and decrementing balanceDue — and re-applying the raise
+      // after that would over-increment the booking. The guarded updateMany
+      // (id + status PENDING + marker absent) runs FIRST: it takes the row
+      // lock, re-verifies the state, and consumes the marker, so a
+      // concurrent flip serialises against it; only when it wins does the
+      // increment apply.
+      const applied = await p.$transaction(async (tx) => {
+        const fresh = await tx.payment.findFirst({
           where: { id: row.id },
-          data: { notes: `${row.notes ? `${row.notes} ` : ""}${RECONCILED_MARKER}` },
-        }),
-      ]);
+          select: { status: true, notes: true },
+        });
+        if (!fresh || fresh.status !== "PENDING" || fresh.notes?.includes(RECONCILED_MARKER)) {
+          return false;
+        }
+        const guard = await tx.payment.updateMany({
+          where: {
+            id: row.id,
+            status: "PENDING",
+            NOT: { notes: { contains: RECONCILED_MARKER } },
+          },
+          data: { notes: `${fresh.notes ? `${fresh.notes} ` : ""}${RECONCILED_MARKER}` },
+        });
+        if (guard.count === 0) return false;
+        await tx.booking.update({
+          where: { id: row.bookingId! },
+          data: { balanceDue: { increment: amount } },
+        });
+        return true;
+      });
+      if (!applied) {
+        raisesSkipped++;
+        console.log(
+          `SKIP  ${ref}  ${row.reference}  ${money(amount)} — row was captured/changed by the ` +
+            `live sweep between scan and write; raise NOT applied (would over-increment)`,
+        );
+        continue;
+      }
       raisesApplied++;
     }
   }

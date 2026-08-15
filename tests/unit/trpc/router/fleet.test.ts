@@ -964,14 +964,31 @@ describe("fleet.chargeCustomerForIncident", () => {
       },
       payment: {
         findFirst: vi.fn().mockResolvedValue(over.existingPayment ?? null),
+        // Idempotency pre-check reads all prior INC-% slices via findMany
+        // (FAILED rows are resurrectable and don't block).
+        findMany: vi.fn().mockResolvedValue(
+          over.existingPayment
+            ? [
+                {
+                  id: over.existingPayment.id,
+                  reference: "INC-2026-0042",
+                  status: "SUCCEEDED",
+                  amount: 500,
+                  notes: null,
+                },
+              ]
+            : [],
+        ),
         create: paymentCreate,
       },
       bondLedger: { update: vi.fn().mockResolvedValue({}) },
-      booking: { update: bookingUpdate },
+      booking: { update: bookingUpdate, findUnique: vi.fn().mockResolvedValue({ balanceDue: 0 }) },
       damageCharge: {
         create: vi.fn().mockImplementation(({ data }: { data: Record<string, unknown> }) =>
           Promise.resolve({ id: "dc1", ...data }),
         ),
+        findMany: vi.fn().mockResolvedValue([]),
+        update: vi.fn().mockResolvedValue({}),
       },
       $transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma)),
     };
@@ -1618,6 +1635,10 @@ describe("fleet.confirmTheft", () => {
             where: { reference?: string | { in?: string[] } };
           }) => Promise<{ id: string } | null>
         >(async () => null),
+        // Service-side idempotency pre-check reads prior INC-% slices here.
+        findMany: vi.fn<
+          (args: unknown) => Promise<Array<Record<string, unknown>>>
+        >(async () => []),
         create: paymentCreate,
       },
       damageCharge: {
@@ -1625,6 +1646,8 @@ describe("fleet.confirmTheft", () => {
           id: "dc1",
           ...data,
         })),
+        findMany: vi.fn(async () => []),
+        update: vi.fn(async () => ({})),
       },
       bondLedger: { update: vi.fn(async () => ({})) },
       booking: {
@@ -1794,9 +1817,13 @@ describe("fleet.confirmTheft", () => {
   it("re-run after a prior partial run captured the bond: charge short-circuits, disposition derives CAPTURED_VIA_INCIDENT from persisted state", async () => {
     const { ctx, prisma, paymentCreate } = makeTheftCtx();
     // Persisted state from the prior run: the incident-charge idempotency
-    // pre-check (reference `in [INC-…, INC-…-CARD]`) trips and CONFLICTs;
-    // the router's disposition lookup (exact `INC-<num>` + SUCCEEDED) finds
-    // the bond-funded slice the prior run landed.
+    // pre-check (findMany over [INC-…, INC-…-CARD], non-FAILED rows block)
+    // trips and CONFLICTs; the router's disposition lookup (findFirst, exact
+    // `INC-<num>` + SUCCEEDED) finds the bond-funded slice the prior run
+    // landed.
+    prisma.payment.findMany.mockResolvedValue([
+      { id: "pay-prior-bond", reference: "INC-2026-0042", status: "SUCCEEDED", amount: 500, notes: null },
+    ]);
     prisma.payment.findFirst.mockImplementation(
       async ({ where }: { where: { reference?: string | { in?: string[] } } }) =>
         where?.reference ? { id: "pay-prior-bond" } : null,
@@ -1824,18 +1851,14 @@ describe("fleet.confirmTheft", () => {
 
   it("re-run after a prior CARD-ONLY charge (bond never captured): disposition stays HELD_FOR_CLAIM", async () => {
     const { ctx, prisma } = makeTheftCtx();
-    prisma.payment.findFirst.mockImplementation(
-      async ({ where }: { where: { reference?: string | { in?: string[] } } }) => {
-        // The idempotency pre-check's `in` filter matches the prior
-        // INC-<num>-CARD row…
-        if (typeof where?.reference === "object" && where.reference?.in) {
-          return { id: "pay-prior-card" };
-        }
-        // …but no SUCCEEDED bond-slice `INC-<num>` payment was ever
-        // persisted, so the bond was not captured via the incident.
-        return null;
-      },
-    );
+    // The idempotency pre-check (findMany) sees the prior PENDING
+    // INC-<num>-CARD row — a live (non-FAILED) slice, so the charge
+    // CONFLICTs and short-circuits…
+    prisma.payment.findMany.mockResolvedValue([
+      { id: "pay-prior-card", reference: "INC-2026-0042-CARD", status: "PENDING", amount: 300, notes: null },
+    ]);
+    // …but no SUCCEEDED bond-slice `INC-<num>` payment was ever persisted
+    // (findFirst stays null), so the bond was not captured via the incident.
     const caller = fleetRouter.createCaller(ctx as never);
 
     const res = await caller.confirmTheft({
