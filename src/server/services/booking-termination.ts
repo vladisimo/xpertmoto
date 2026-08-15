@@ -50,9 +50,17 @@ import { writePaymentEvent } from "./payment-events";
  *    `term-refund-<bookingId>`; failure → FAILED row + queued retry + manager
  *    alert; >180d-old source charge → PENDING MANUAL_CREDIT row). CREDIT mode
  *    issues a fresh ACTIVE gift card for the surplus instead.
- *  - Stripe calls run OUTSIDE the terminal $transaction; the status flip is a
- *    CAS (`updateMany` gated on the terminatable statuses) so a concurrent
- *    check-in conflicts instead of double-settling.
+ *  - Stripe calls run OUTSIDE the terminal $transaction, and the card refund
+ *    specifically runs AFTER it commits: the tx records a PENDING TERM-REF
+ *    intent row, then the post-commit Stripe call settles it SUCCEEDED
+ *    (amountPaid decrement, clamped) or FAILED (retry + alert). The status
+ *    flip is a CAS (`updateMany` gated on the terminatable statuses) so a
+ *    concurrent check-in conflicts BEFORE any refund money moves — a lost
+ *    CAS can no longer orphan an already-executed Stripe refund.
+ *  - Each money-moving refund row gets its own linked DECREASE adjustment
+ *    note (AdjustmentNote.paymentId is 1:1) so the invoice-generate sweep
+ *    never re-issues a duplicate note for the same row; the balance-offset
+ *    slice of the write-down goes on a final unlinked note.
  *  - `recordBookingCompletion` runs in the terminal tx with the POST
  *    write-down totals (settlement before completion so revenue is never
  *    overstated), then `invalidateRevenueCaches` after commit.
@@ -253,9 +261,16 @@ async function computeQuote(
   const perDayAddonsTotal = booking.addons
     .filter((a) => a.addon.isPerDay)
     .reduce((acc, a) => acc + Number(a.unitPrice) * a.quantity, 0);
-  const perDayInsuranceRate = booking.insurance[0]
-    ? Number(booking.insurance[0].dailyRate)
-    : 0;
+  // SUM across all BookingInsurance rows — `addInsuranceMidRental` attaches
+  // additional rows (PRE_PICKUP_UPSELL / MID_RENTAL / …) alongside the
+  // wizard's, and every attached policy is priced per remaining day, so the
+  // unused post-loss days carry every row's dailyRate. Reading a single
+  // unordered row understated the per-day insurance slice (and the refund)
+  // nondeterministically on multi-policy hires.
+  const perDayInsuranceRate = booking.insurance.reduce(
+    (acc, row) => acc + Number(row.dailyRate),
+    0,
+  );
 
   const proRata = calcEarlyReturnRefund({
     scheduledReturn: booking.returnDateTime,
@@ -480,15 +495,25 @@ export async function terminateBookingForLoss(
     }
   }
 
-  // Card refund slice (REFUND mode).
+  // Card refund slice (REFUND mode): PLANNED here, EXECUTED post-commit.
+  // The Stripe refund must never run before the terminal CAS commits — if
+  // the status flip lost to a concurrent check-in, the tx (and its TERM-REF
+  // row) would roll back while the already-executed Stripe refund stood:
+  // orphaned money with no ledger row, no amountPaid decrement, no alert and
+  // an unreachable retry. Instead the terminal tx records the refund as a
+  // PENDING intent row and the Stripe call settles that row after commit —
+  // the same post-commit ordering the category-amendment ladder uses.
   type CardOutcome = "NONE" | "SUCCEEDED" | "FAILED" | "MANUAL_CREDIT";
+  type CardPlan = "NONE" | "CARD_REFUND" | "MANUAL_CREDIT" | "NO_SOURCE";
+  let cardPlan: CardPlan = "NONE";
   let cardOutcome: CardOutcome = "NONE";
-  let stripeRefundId: string | null = null;
   let cardFailNote = "";
   let refundSource: {
     id: string;
     stripePaymentIntentId: string | null;
     stripeChargeId: string | null;
+    processedAt: Date | null;
+    createdAt: Date;
   } | null = null;
   const refundIdempotencyKey = `term-refund-${booking.id}`;
   if (args.refundMode === "REFUND" && quote.cardRefundAmount > 0.005) {
@@ -509,43 +534,19 @@ export async function terminateBookingForLoss(
       },
     });
     if (!refundSource) {
+      cardPlan = "NO_SOURCE";
       cardOutcome = "FAILED";
       cardFailNote = "no Stripe charge on file; manual refund required";
     } else {
-      const src = refundSource as typeof refundSource & {
-        processedAt: Date | null;
-        createdAt: Date;
-      };
-      const chargeAt = src.processedAt ?? src.createdAt;
+      const chargeAt = refundSource.processedAt ?? refundSource.createdAt;
       const daysSince = (Date.now() - chargeAt.getTime()) / 86_400_000;
       if (daysSince > 180) {
         // Too old for a card refund — record intent as a PENDING
         // MANUAL_CREDIT for finance to settle by bank transfer.
+        cardPlan = "MANUAL_CREDIT";
         cardOutcome = "MANUAL_CREDIT";
       } else {
-        try {
-          const res = await refundCharge({
-            paymentIntentId: refundSource.stripePaymentIntentId,
-            chargeId: refundSource.stripeChargeId,
-            amountCents: Math.round(quote.cardRefundAmount * 100),
-            reason: "requested_by_customer",
-            metadata: { bookingId: booking.id, kind: "loss-termination" },
-            idempotencyKey: refundIdempotencyKey,
-          });
-          stripeRefundId = res.id;
-          cardOutcome =
-            res.status === "succeeded" || res.status === "pending"
-              ? "SUCCEEDED"
-              : "FAILED";
-        } catch (err) {
-          cardOutcome = "FAILED";
-          cardFailNote =
-            err instanceof Error ? err.message.slice(0, 160) : "Stripe refund failed";
-          logger.error(
-            { err: cardFailNote, bookingId: booking.id, amount: quote.cardRefundAmount },
-            "booking-termination: card refund failed at Stripe",
-          );
-        }
+        cardPlan = "CARD_REFUND";
       }
     }
   }
@@ -585,6 +586,12 @@ export async function terminateBookingForLoss(
     args.refundMode === "FORFEIT" ? 0 : quote.cashRefund;
 
   // ── Terminal transaction ─────────────────────────────────────────────────
+  // Refund-row ids captured from the tx so the post-commit Stripe settlement
+  // and the per-row adjustment-note linkage can address them directly.
+  let giftRestoreRowId: string | null = null;
+  let cardRefundRowId: string | null = null;
+  let manualCreditRowId: string | null = null;
+  let creditGcRowId: string | null = null;
   let result: TerminateBookingForLossResult;
   try {
     result = await prisma.$transaction(async (tx) => {
@@ -705,7 +712,7 @@ export async function terminateBookingForLoss(
           amount: quote.giftRestoreAmount,
           reason: `Refund — booking ${booking.bookingReference} terminated (vehicle lost in service)`,
         });
-        await tx.payment.create({
+        const giftRow = await tx.payment.create({
           data: {
             reference: `TERM-REF-GC-${booking.id}`,
             bookingId: booking.id,
@@ -723,11 +730,12 @@ export async function terminateBookingForLoss(
                 : `Loss-termination refund restored to gift card (A$${restored.toFixed(2)} of A$${quote.giftRestoreAmount.toFixed(2)} — remainder needs manual follow-up)`,
           },
         });
+        giftRestoreRowId = giftRow.id;
         amountPaidDecrement = r2(amountPaidDecrement + quote.giftRestoreAmount);
       }
       if (args.refundMode === "REFUND" && quote.cardRefundAmount > 0.005) {
-        if (cardOutcome === "MANUAL_CREDIT") {
-          await tx.payment.create({
+        if (cardPlan === "MANUAL_CREDIT") {
+          const creditRow = await tx.payment.create({
             data: {
               reference: `TERM-CREDIT-${booking.id}`,
               bookingId: booking.id,
@@ -742,8 +750,13 @@ export async function terminateBookingForLoss(
                 "Loss-termination refund >180d after source charge: needs manual reconcile via credit note / bank transfer.",
             },
           });
+          manualCreditRowId = creditRow.id;
         } else {
-          await tx.payment.create({
+          // CARD_REFUND: PENDING intent — the Stripe call runs post-commit
+          // against this row and settles it SUCCEEDED or FAILED. NO_SOURCE:
+          // FAILED straight away (there is no Stripe call to make); the
+          // manager alert below owns the follow-up.
+          const cardRow = await tx.payment.create({
             data: {
               reference: `TERM-REF-${booking.id}`,
               bookingId: booking.id,
@@ -752,23 +765,22 @@ export async function terminateBookingForLoss(
               method: "STRIPE",
               amount: quote.cardRefundAmount,
               gstAmount: gstFromInclusive(quote.cardRefundAmount),
-              status: cardOutcome === "SUCCEEDED" ? "SUCCEEDED" : "FAILED",
-              stripeChargeId: stripeRefundId,
-              processedAt: cardOutcome === "SUCCEEDED" ? new Date() : null,
+              status: cardPlan === "CARD_REFUND" ? "PENDING" : "FAILED",
+              stripeChargeId: null,
+              processedAt: null,
               processedById: args.actorId,
               notes:
-                cardOutcome === "SUCCEEDED"
-                  ? "Loss-termination refund of unused hire days"
+                cardPlan === "CARD_REFUND"
+                  ? "Loss-termination refund of unused hire days — Stripe refund executing"
                   : `Loss-termination refund FAILED — ${cardFailNote}`,
             },
           });
-          if (cardOutcome === "SUCCEEDED") {
-            amountPaidDecrement = r2(amountPaidDecrement + quote.cardRefundAmount);
-          }
+          cardRefundRowId = cardRow.id;
+          // amountPaid is decremented post-commit, only once Stripe confirms.
         }
       }
       if (args.refundMode === "CREDIT" && quote.cashRefund > 0.005) {
-        await tx.payment.create({
+        const creditGcRow = await tx.payment.create({
           data: {
             reference: `TERM-CREDIT-GC-${booking.id}`,
             bookingId: booking.id,
@@ -783,6 +795,7 @@ export async function terminateBookingForLoss(
             notes: `Loss-termination credit issued as gift card ${creditCardCodes.join(", ")}`,
           },
         });
+        creditGcRowId = creditGcRow.id;
         amountPaidDecrement = r2(amountPaidDecrement + quote.cashRefund);
       }
       if (amountPaidDecrement > 0) {
@@ -903,52 +916,178 @@ export async function terminateBookingForLoss(
     throw err;
   }
 
+  // ── Post-commit: execute the Stripe refund against the committed intent ──
+  // The termination is committed either way from here; a Stripe failure only
+  // settles the intent row FAILED and walks the retry + alert ladder below.
+  if (cardPlan === "CARD_REFUND" && refundSource && cardRefundRowId) {
+    let stripeRefundId: string | null = null;
+    try {
+      const res = await refundCharge({
+        paymentIntentId: refundSource.stripePaymentIntentId,
+        chargeId: refundSource.stripeChargeId,
+        amountCents: Math.round(quote.cardRefundAmount * 100),
+        reason: "requested_by_customer",
+        metadata: { bookingId: booking.id, kind: "loss-termination" },
+        idempotencyKey: refundIdempotencyKey,
+      });
+      stripeRefundId = res.id;
+      cardOutcome =
+        res.status === "succeeded" || res.status === "pending"
+          ? "SUCCEEDED"
+          : "FAILED";
+      if (cardOutcome === "FAILED") {
+        cardFailNote = `Stripe refund status ${res.status}`;
+      }
+    } catch (err) {
+      cardOutcome = "FAILED";
+      cardFailNote =
+        err instanceof Error ? err.message.slice(0, 160) : "Stripe refund failed";
+      logger.error(
+        { err: cardFailNote, bookingId: booking.id, amount: quote.cardRefundAmount },
+        "booking-termination: card refund failed at Stripe",
+      );
+    }
+    try {
+      if (cardOutcome === "SUCCEEDED") {
+        await prisma.payment.update({
+          where: { id: cardRefundRowId },
+          data: {
+            status: "SUCCEEDED",
+            stripeChargeId: stripeRefundId,
+            processedAt: new Date(),
+            notes: "Loss-termination refund of unused hire days",
+          },
+        });
+        // amountPaid decrement, clamped at zero — the refund left the books.
+        await prisma.booking.update({
+          where: { id: booking.id },
+          data: { amountPaid: { decrement: quote.cardRefundAmount } },
+        });
+        await prisma.booking.updateMany({
+          where: { id: booking.id, amountPaid: { lt: 0 } },
+          data: { amountPaid: 0 },
+        });
+      } else {
+        await prisma.payment.update({
+          where: { id: cardRefundRowId },
+          data: {
+            status: "FAILED",
+            stripeChargeId: stripeRefundId,
+            notes: `Loss-termination refund FAILED — ${cardFailNote}`,
+          },
+        });
+      }
+    } catch (err) {
+      logger.error(
+        {
+          err: err instanceof Error ? err.message : String(err),
+          bookingId: booking.id,
+          paymentId: cardRefundRowId,
+          cardOutcome,
+        },
+        "booking-termination: could not settle refund intent row after Stripe call",
+      );
+    }
+    result = { ...result, cardRefundOutcome: cardOutcome };
+  }
+
   await invalidateRevenueCaches(booking.depotId);
 
-  // ATO §29-75 adjustment note for the write-down (non-blocking).
+  // ATO §29-75 adjustment notes for the write-down (non-blocking). One note
+  // per money-moving refund row — AdjustmentNote.paymentId is 1:1 (@unique),
+  // so each TERM-REF / TERM-REF-GC / TERM-CREDIT / TERM-CREDIT-GC row
+  // carries its own linked note and the invoice-generate retroactive sweep
+  // (which backfills a DECREASE for any SUCCEEDED REFUND / MANUAL_CREDIT row
+  // with `adjustmentNote: null`) can never double the write-down. The slice
+  // of the write-down with no payment row behind it (the unpaid-balance
+  // offset / unrefundable surplus) goes on a final unlinked note; the note
+  // totals sum exactly to the write-down and their GST to the write-down GST.
   if (quote.writedownAmount > 0.01) {
-    await tryIssueAdjustmentForBooking({
-      bookingId: booking.id,
-      type: "DECREASE",
-      reason: "TERMINATION",
-      description: `Hire terminated — vehicle lost in service (${args.cause})`,
-      lineItems: [
-        {
-          description: `Unused hire days — vehicle lost in service (${quote.unusedDays} days)`,
-          detail: `Loss recorded ${lossAt.toLocaleString("en-AU", {
-            dateStyle: "medium",
-            timeStyle: "short",
-            timeZone: "Australia/Brisbane",
-          })}`,
-          quantity: 1,
-          unitPrice: quote.writedownAmount,
-          totalPrice: quote.writedownAmount,
-          gstAmount: quote.writedownGst,
-          gstIncluded: true,
-        },
-      ],
-      issuedById: args.actorId,
-    });
+    const lossDetail = `Loss recorded ${lossAt.toLocaleString("en-AU", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: "Australia/Brisbane",
+    })}`;
+    const slices: Array<{ amount: number; paymentId: string | null; detail: string }> = [];
+    if (giftRestoreRowId && quote.giftRestoreAmount > 0.005) {
+      slices.push({
+        amount: quote.giftRestoreAmount,
+        paymentId: giftRestoreRowId,
+        detail: `${lossDetail} — restored to gift card`,
+      });
+    }
+    if (cardRefundRowId && quote.cardRefundAmount > 0.005) {
+      slices.push({
+        amount: quote.cardRefundAmount,
+        paymentId: cardRefundRowId,
+        detail: `${lossDetail} — refunded to original payment method`,
+      });
+    }
+    if (manualCreditRowId && quote.cardRefundAmount > 0.005) {
+      slices.push({
+        amount: quote.cardRefundAmount,
+        paymentId: manualCreditRowId,
+        detail: `${lossDetail} — manual credit (source charge >180d)`,
+      });
+    }
+    if (creditGcRowId && quote.cashRefund > 0.005) {
+      slices.push({
+        amount: quote.cashRefund,
+        paymentId: creditGcRowId,
+        detail: `${lossDetail} — issued as gift card credit`,
+      });
+    }
+    const linkedTotal = r2(slices.reduce((acc, s) => acc + s.amount, 0));
+    const residual = r2(quote.writedownAmount - linkedTotal);
+    if (residual > 0.005) {
+      slices.push({
+        amount: residual,
+        paymentId: null,
+        detail: `${lossDetail} — applied to outstanding balance`,
+      });
+    }
+    let gstLeft = quote.writedownGst;
+    for (let i = 0; i < slices.length; i++) {
+      const slice = slices[i]!;
+      const gst =
+        i === slices.length - 1
+          ? Math.max(0, gstLeft)
+          : Math.min(gstLeft, toNumber(gstFromInclusive(slice.amount)));
+      gstLeft = r2(gstLeft - gst);
+      await tryIssueAdjustmentForBooking({
+        bookingId: booking.id,
+        type: "DECREASE",
+        reason: "TERMINATION",
+        description: `Hire terminated — vehicle lost in service (${args.cause})`,
+        lineItems: [
+          {
+            description: `Unused hire days — vehicle lost in service (${quote.unusedDays} days)`,
+            detail: slice.detail,
+            quantity: 1,
+            unitPrice: slice.amount,
+            totalPrice: slice.amount,
+            gstAmount: gst,
+            gstIncluded: true,
+          },
+        ],
+        paymentId: slice.paymentId,
+        issuedById: args.actorId,
+      });
+    }
   }
 
   // Failed card refund → queued retry + manager alert (never silently kept).
-  if (cardOutcome === "FAILED" && refundSource) {
+  if (cardOutcome === "FAILED" && refundSource && cardRefundRowId) {
     try {
-      const failedRow = await prisma.payment.findFirst({
-        where: { bookingId: booking.id, reference: `TERM-REF-${booking.id}` },
-        select: { id: true },
+      const { enqueueRefundRetry } = await import("@/server/jobs/refund-retry");
+      await enqueueRefundRetry({
+        paymentId: cardRefundRowId,
+        paymentIntentId: refundSource.stripePaymentIntentId,
+        chargeId: refundSource.stripeChargeId,
+        amountCents: Math.round(quote.cardRefundAmount * 100),
+        idempotencyKey: refundIdempotencyKey,
+        attempt: 1,
       });
-      if (failedRow) {
-        const { enqueueRefundRetry } = await import("@/server/jobs/refund-retry");
-        await enqueueRefundRetry({
-          paymentId: failedRow.id,
-          paymentIntentId: refundSource.stripePaymentIntentId,
-          chargeId: refundSource.stripeChargeId,
-          amountCents: Math.round(quote.cardRefundAmount * 100),
-          idempotencyKey: refundIdempotencyKey,
-          attempt: 1,
-        });
-      }
     } catch (err) {
       logger.warn(
         { err: err instanceof Error ? err.message : String(err), bookingId: booking.id },

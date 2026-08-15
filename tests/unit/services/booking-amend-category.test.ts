@@ -129,6 +129,8 @@ type PrismaOpts = {
   priorAmendCharges?: number;
   signedAgreements?: number;
   giftPaid?: number;
+  /** Σ PENDING balance-affecting raise rows (backs part of balanceDue). */
+  pendingBackedSum?: number;
   sourcePayment?: Row | null;
   newCategory?: Row | null;
   /** Pre-existing AMEND-REF- / AMEND-REF-GC- / AMEND-CREDIT- rows for the
@@ -175,7 +177,15 @@ function makePrisma(booking: Row, opts: PrismaOpts = {}) {
     payment: {
       count: vi.fn(async () => 0),
       findMany: vi.fn(async () => opts.priorRefundRefs ?? []), // AMEND-* refund seq scan
-      aggregate: vi.fn(async () => ({ _sum: { amount: -(opts.giftPaid ?? 0) } })),
+      aggregate: vi.fn(
+        async ({ where }: { where: { type?: string | { in?: string[] } } }) => {
+          if (where.type === "GIFT_CARD_REDEMPTION") {
+            return { _sum: { amount: -(opts.giftPaid ?? 0) } };
+          }
+          // PENDING balance-affecting raise scan (DECREASE offset guard).
+          return { _sum: { amount: opts.pendingBackedSum ?? 0 } };
+        },
+      ),
       findFirst: vi.fn(
         async ({ where }: { where: { type?: string; reference?: string } }) => {
           if (where.type === "BOOKING_PAYMENT") return opts.sourcePayment ?? null;
@@ -430,6 +440,112 @@ describe("applyCategoryAmendment — CHARGE_DELTA downgrade", () => {
       .find((d) => d.reference === "AMEND-CREDIT-b1-1");
     expect(creditRow).toMatchObject({ type: "MANUAL_CREDIT", status: "PENDING", amount: 100 });
     expect(res.refundOutcome).toBe("MANUAL_CREDIT");
+    // The DECREASE note links the MANUAL_CREDIT row so the sweep skips it
+    // once finance settles the credit.
+    expect(tryIssueAdjustmentMock).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "DECREASE", paymentId: "pay-AMEND-CREDIT-b1-1" }),
+    );
+  });
+});
+
+// ── DECREASE vs PENDING-backed balance ─────────────────────────────────────
+// balanceDue includes PENDING-backed raises awaiting the capture sweep.
+// Offsetting a reduction against that backed slice hands the customer's
+// reduction to the sweep's later capture — the reduction beyond genuinely
+// UNBACKED balance must refund as cash/credit instead (termination parity).
+describe("applyCategoryAmendment — DECREASE with PENDING-backed balance", () => {
+  it("refunds the reduction when the whole balance is backed by a PENDING raise", async () => {
+    // Fully paid 505 + a prior PENDING $100 raise (balanceDue 100, backed).
+    // Downgrade −80: nothing is absorbable, so $80 refunds and balanceDue
+    // still backs the raise in full.
+    quotePricingMock.mockResolvedValue(makeQuote({ baseSubtotal: 420, totalAmount: 470 }));
+    // newQuoted 470 + 55 insurance = 525 → delta = 525 − 605 = −80.
+    const { prisma, tx } = makePrisma(
+      makeBooking({ totalAmount: 605, amountPaid: 505, balanceDue: 100 }),
+      { pendingBackedSum: 100, sourcePayment: SOURCE_PAYMENT },
+    );
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      allowNegativeDelta: true,
+    });
+    expect(res).toMatchObject({ delta: -80, direction: "DECREASE", creditAmount: 80 });
+    const cas = casCall(tx);
+    expect(cas.where).toMatchObject({ balanceDue: 100 });
+    expect(cas.data).toMatchObject({ balanceDue: 100 }); // raise stays backed
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 8000 }),
+    );
+    expect(res.refundOutcome).toBe("SUCCEEDED");
+  });
+
+  it("still absorbs the reduction into genuinely-unbacked balance first", async () => {
+    quotePricingMock.mockResolvedValue(makeQuote({ baseSubtotal: 420, totalAmount: 470 }));
+    const { prisma, tx } = makePrisma(
+      makeBooking({ totalAmount: 605, amountPaid: 505, balanceDue: 100 }),
+      { pendingBackedSum: 0, sourcePayment: SOURCE_PAYMENT },
+    );
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      allowNegativeDelta: true,
+    });
+    expect(res).toMatchObject({ delta: -80, creditAmount: 0 });
+    expect(casCall(tx).data).toMatchObject({ balanceDue: 20 }); // 100 − 80 absorbed
+    expect(refundChargeMock).not.toHaveBeenCalled();
+  });
+
+  it("splits the DECREASE notes: refunded slice linked, absorbed slice unlinked", async () => {
+    // Unbacked balance 20 absorbs 20 of a −100 reduction; 80 refunds to
+    // card. Notes: 80 linked to the AMEND-REF row + 20 residual unlinked —
+    // totals sum to 100 and GST to gstFromInclusive(100) = 9.09.
+    quotePricingMock.mockResolvedValue(makeQuote({ baseSubtotal: 300, totalAmount: 350 }));
+    const { prisma } = makePrisma(
+      makeBooking({ amountPaid: 485, balanceDue: 20 }),
+      { pendingBackedSum: 0, sourcePayment: SOURCE_PAYMENT },
+    );
+    await applyCategoryAmendment(prisma, { ...BASE_APPLY, allowNegativeDelta: true });
+    const notes = tryIssueAdjustmentMock.mock.calls.map(
+      (c) =>
+        c[0] as {
+          paymentId: string | null;
+          lineItems: Array<{ totalPrice: number; gstAmount: number }>;
+        },
+    );
+    expect(notes).toHaveLength(2);
+    const linked = notes.find((n) => n.paymentId === "pay-AMEND-REF-b1-1")!;
+    const residual = notes.find((n) => n.paymentId === null)!;
+    expect(linked.lineItems[0]!.totalPrice).toBe(80);
+    expect(residual.lineItems[0]!.totalPrice).toBe(20);
+    const gst = notes.reduce((a, n) => a + n.lineItems[0]!.gstAmount, 0);
+    expect(Math.round(gst * 100) / 100).toBe(9.09);
+  });
+
+  it("every refund-family row is note-linked — the invoice-generate sweep finds no orphans", async () => {
+    // Gift 40 + card 60 → two refund rows, each carrying its own linked
+    // note (AdjustmentNote.paymentId is 1:1) so the sweep's
+    // `adjustmentNote: null` backfill query matches neither.
+    quotePricingMock.mockResolvedValue(makeQuote({ baseSubtotal: 300, totalAmount: 350 }));
+    const { prisma, tx, raw } = makePrisma(makeBooking(), {
+      giftPaid: 40,
+      sourcePayment: SOURCE_PAYMENT,
+    });
+    await applyCategoryAmendment(prisma, { ...BASE_APPLY, allowNegativeDelta: true });
+    const created = [...tx.payment.create.mock.calls, ...raw.payment.create.mock.calls]
+      .map((c) => (c[0] as { data: Row }).data)
+      .filter((d) => d.type === "REFUND" || d.type === "MANUAL_CREDIT");
+    const linkedIds = new Set(
+      tryIssueAdjustmentMock.mock.calls
+        .map((c) => (c[0] as { paymentId: string | null }).paymentId)
+        .filter((id): id is string => id !== null),
+    );
+    expect(created).toHaveLength(2); // AMEND-REF-GC-b1-1 + AMEND-REF-b1-1
+    const orphans = created.filter(
+      (d) => d.status === "SUCCEEDED" && !linkedIds.has(`pay-${d.reference}`),
+    );
+    expect(orphans).toEqual([]);
+    const amounts = tryIssueAdjustmentMock.mock.calls
+      .map((c) => (c[0] as { lineItems: Array<{ totalPrice: number }> }).lineItems[0]!.totalPrice)
+      .sort((a, b) => a - b);
+    expect(amounts).toEqual([40, 60]); // no residual note — fully refunded
   });
 });
 
@@ -656,6 +772,45 @@ describe("applyCategoryAmendment — MANAGER_PRICE_OVERRIDE", () => {
       overrideReason: "price-matched a quoted rate",
       quotedDelta: 100,
     });
+  });
+
+  it("rejects an override whose refund exceeds the money actually collected", async () => {
+    // amountPaid 505 — a fat-fingered −600 would send an impossible $600
+    // over-refund into the retry queue. Blocked BEFORE the amendment
+    // commits: no transaction, no refund attempt.
+    const { prisma, raw } = makePrisma(makeBooking(), { sourcePayment: SOURCE_PAYMENT });
+    await expect(
+      applyCategoryAmendment(prisma, {
+        ...BASE_APPLY,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        allowNegativeDelta: true,
+        managerDelta: -600,
+        overrideReason: "typo",
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("collected"),
+    });
+    expect(raw.$transaction).not.toHaveBeenCalled();
+    expect(refundChargeMock).not.toHaveBeenCalled();
+    expect(enqueueRefundRetryMock).not.toHaveBeenCalled();
+  });
+
+  it("allows an override refund up to exactly the collected amount", async () => {
+    // Boundary: −505 on a fully-paid $505 booking refunds everything
+    // collected — permitted.
+    const { prisma } = makePrisma(makeBooking(), { sourcePayment: SOURCE_PAYMENT });
+    const res = await applyCategoryAmendment(prisma, {
+      ...BASE_APPLY,
+      mode: "MANAGER_PRICE_OVERRIDE",
+      allowNegativeDelta: true,
+      managerDelta: -505,
+      overrideReason: "full goodwill refund",
+    });
+    expect(res).toMatchObject({ delta: -505, creditAmount: 505 });
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 50500 }),
+    );
   });
 
   it("rejects an override without a reason", async () => {

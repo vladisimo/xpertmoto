@@ -8,6 +8,7 @@ import {
 import { acquireAllocationLock, countAvailable } from "./availability";
 import { checkEligibility } from "./eligibility";
 import { aud, gstFromInclusive, roundCents, toNumber } from "@/lib/money";
+import { BALANCE_AFFECTING_CHARGE_TYPES } from "./balance-due";
 import { writeAudit, writeCustomerAuditAsync } from "./audit";
 import { sendNotification } from "./notification-sender";
 import { tryIssueAdjustmentForBooking } from "./invoice-lifecycle";
@@ -281,9 +282,39 @@ async function computePreview(
     args.mode === "GOODWILL_FREE_UPGRADE"
       ? oldTotal
       : Math.max(0, toNumber(roundCents(aud(oldTotal).plus(delta))));
-  const newBalanceRaw = toNumber(roundCents(aud(Number(booking.balanceDue)).plus(delta)));
-  const newBalanceDue = Math.max(0, newBalanceRaw);
-  const creditAmount = newBalanceRaw < 0 ? r2(-newBalanceRaw) : 0;
+  // DECREASE: the reduction may only be absorbed by balance that is NOT
+  // backed by PENDING raise rows. `balanceDue` includes PENDING-backed
+  // raises (a prior AMEND/EXTENSION charge awaiting the capture sweep), and
+  // offsetting the reduction against that backed slice hands the customer's
+  // reduction straight to the sweep's later capture — the raise still
+  // collects in full while the reduction vanishes. Mirror the termination
+  // flow: subtract Σ PENDING balance-affecting raises from the offsettable
+  // balance and return everything beyond the genuinely-unbacked balance as
+  // cash/credit through the refund ladder.
+  const oldBalanceDue = Number(booking.balanceDue);
+  let newBalanceDue: number;
+  let creditAmount = 0;
+  if (delta < -0.005) {
+    const pendingAgg = await prisma.payment.aggregate({
+      where: {
+        bookingId: booking.id,
+        status: "PENDING",
+        type: { in: [...BALANCE_AFFECTING_CHARGE_TYPES] },
+      },
+      _sum: { amount: true },
+    });
+    const pendingBacked = Math.max(0, Number(pendingAgg._sum.amount ?? 0));
+    const reduction = r2(-delta);
+    const offsettable = Math.max(0, r2(oldBalanceDue - pendingBacked));
+    const absorbed = Math.min(reduction, offsettable);
+    creditAmount = r2(reduction - absorbed);
+    newBalanceDue = Math.max(0, r2(oldBalanceDue - absorbed));
+  } else {
+    newBalanceDue = Math.max(
+      0,
+      toNumber(roundCents(aud(oldBalanceDue).plus(delta))),
+    );
+  }
 
   // Eligibility against the NEW category, staff-sighted mode (no
   // licenceType → the image gate is skipped; staff sight documents at
@@ -441,6 +472,19 @@ export async function applyCategoryAmendment(
       code: "FORBIDDEN",
       message: "A category downgrade refund requires a manager.",
     });
+  }
+  // A manager price override is free-form, so bound the refundable portion
+  // by the money actually collected: a fat-fingered negative delta beyond
+  // amountPaid would otherwise commit the amendment and then push an
+  // impossible over-refund into the retry queue where it can never land.
+  if (args.mode === "MANAGER_PRICE_OVERRIDE" && preview.creditAmount > 0) {
+    const collected = Math.max(0, Number(booking.amountPaid));
+    if (preview.creditAmount > collected + 0.005) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `The override would refund ${formatCurrency(preview.creditAmount)}, but only ${formatCurrency(collected)} has been collected on this booking — lower the override so the refund does not exceed the collected amount.`,
+      });
+    }
   }
 
   // Money fields per mode. GOODWILL keeps the invoice exactly as-is (the
@@ -631,13 +675,16 @@ export async function applyCategoryAmendment(
   // surface as an opaque 500 that reads as "amendment failed". Record the
   // failure, alert managers, and let the amendment result return normally.
   let refundOutcome: ApplyCategoryAmendmentResult["refundOutcome"] = "NONE";
+  let refundRows: AmendRefundRow[] = [];
   if (preview.direction === "DECREASE" && preview.creditAmount > 0) {
     try {
-      refundOutcome = await refundAmendmentOverpayment(prisma, {
+      const ladder = await refundAmendmentOverpayment(prisma, {
         booking,
         amount: preview.creditAmount,
         actorUserId: args.actorId,
       });
+      refundOutcome = ladder.outcome;
+      refundRows = ladder.rows;
     } catch (err) {
       refundOutcome = "FAILED";
       const msg = err instanceof Error ? err.message : String(err);
@@ -653,39 +700,90 @@ export async function applyCategoryAmendment(
     }
   }
 
-  // ATO §29-75 adjustment note for the delta (skipped for a price-neutral
-  // amendment — goodwill included: consideration is unchanged).
+  // ATO §29-75 adjustment note(s) for the delta (skipped for a price-neutral
+  // amendment — goodwill included: consideration is unchanged). A DECREASE is
+  // issued as one note per refund Payment row the ladder created —
+  // AdjustmentNote.paymentId is 1:1 (@unique), so each AMEND-REF /
+  // AMEND-REF-GC / AMEND-CREDIT row carries its own linked note and the
+  // invoice-generate retroactive sweep (which backfills a DECREASE for any
+  // SUCCEEDED REFUND / MANUAL_CREDIT row with `adjustmentNote: null`) can
+  // never double the reduction. The slice absorbed by the unpaid balance has
+  // no payment row and goes on a final unlinked note; note totals sum
+  // exactly to |delta| and their GST to the delta GST.
   if (preview.direction !== "NONE") {
     const magnitude = Math.abs(preview.delta);
-    let paymentId: string | null = null;
-    if (preview.direction === "INCREASE" && paymentReference) {
-      const row = await prisma.payment.findFirst({
-        where: { bookingId: booking.id, reference: paymentReference },
-        select: { id: true },
+    const description = `Category change ${preview.oldCategoryName} → ${preview.newCategoryName} — ${
+      preview.direction === "INCREASE" ? "additional charge" : "reduction"
+    }${args.mode === "MANAGER_PRICE_OVERRIDE" ? " (manager price override)" : ""}`;
+    const baseDetail = `${booking.durationDays} day(s), same hire window`;
+    const issueNote = (amount: number, gstAmount: number, detail: string, paymentId: string | null) =>
+      tryIssueAdjustmentForBooking({
+        bookingId: booking.id,
+        type: preview.direction as "INCREASE" | "DECREASE",
+        reason: "AMENDMENT",
+        description,
+        lineItems: [
+          {
+            description: `Category change — ${preview.oldCategoryName} → ${preview.newCategoryName}`,
+            detail,
+            quantity: 1,
+            unitPrice: amount,
+            totalPrice: amount,
+            gstAmount,
+            gstIncluded: true,
+          },
+        ],
+        paymentId,
+        issuedById: args.actorId,
       });
-      paymentId = row?.id ?? null;
+
+    if (preview.direction === "INCREASE") {
+      let paymentId: string | null = null;
+      if (paymentReference) {
+        const row = await prisma.payment.findFirst({
+          where: { bookingId: booking.id, reference: paymentReference },
+          select: { id: true },
+        });
+        paymentId = row?.id ?? null;
+      }
+      await issueNote(magnitude, preview.deltaGst, baseDetail, paymentId);
+    } else {
+      const KIND_LABEL: Record<AmendRefundRow["kind"], string> = {
+        GIFT_RESTORE: "restored to gift card",
+        CARD_REFUND: "refunded to original payment method",
+        MANUAL_CREDIT: "manual credit (source charge >180d)",
+      };
+      const slices = refundRows
+        .filter((row) => row.amount > 0.005)
+        .map((row) => ({
+          amount: row.amount,
+          paymentId: row.id as string | null,
+          detail: `${baseDetail} — ${KIND_LABEL[row.kind]}`,
+        }));
+      const linkedTotal = r2(slices.reduce((acc, s) => acc + s.amount, 0));
+      const residual = r2(magnitude - linkedTotal);
+      if (residual > 0.005 || slices.length === 0) {
+        // Balance-absorbed remainder — or the whole reduction when the
+        // ladder crashed before creating any row (kept unlinked, exactly
+        // the pre-linkage behaviour).
+        slices.push({
+          amount: r2(Math.max(residual, 0)),
+          paymentId: null,
+          detail: `${baseDetail} — applied to outstanding balance`,
+        });
+      }
+      let gstLeft = preview.deltaGst;
+      for (let i = 0; i < slices.length; i++) {
+        const slice = slices[i]!;
+        if (slice.amount <= 0.005) continue;
+        const gst =
+          i === slices.length - 1
+            ? Math.max(0, gstLeft)
+            : Math.min(gstLeft, toNumber(gstFromInclusive(slice.amount)));
+        gstLeft = r2(gstLeft - gst);
+        await issueNote(slice.amount, gst, slice.detail, slice.paymentId);
+      }
     }
-    await tryIssueAdjustmentForBooking({
-      bookingId: booking.id,
-      type: preview.direction,
-      reason: "AMENDMENT",
-      description: `Category change ${preview.oldCategoryName} → ${preview.newCategoryName} — ${
-        preview.direction === "INCREASE" ? "additional charge" : "reduction"
-      }${args.mode === "MANAGER_PRICE_OVERRIDE" ? " (manager price override)" : ""}`,
-      lineItems: [
-        {
-          description: `Category change — ${preview.oldCategoryName} → ${preview.newCategoryName}`,
-          detail: `${booking.durationDays} day(s), same hire window`,
-          quantity: 1,
-          unitPrice: magnitude,
-          totalPrice: magnitude,
-          gstAmount: preview.deltaGst,
-          gstIncluded: true,
-        },
-      ],
-      paymentId,
-      issuedById: args.actorId,
-    });
   }
 
   await writeAudit(prisma, {
@@ -823,6 +921,14 @@ export async function applyCategoryAmendment(
   };
 }
 
+/** A Payment row created by the amendment refund ladder, so the caller can
+ *  link each row to its own DECREASE adjustment note (paymentId is 1:1). */
+type AmendRefundRow = {
+  id: string;
+  amount: number;
+  kind: "GIFT_RESTORE" | "CARD_REFUND" | "MANUAL_CREDIT";
+};
+
 /**
  * Refund an amendment DECREASE overpayment for real — the booking-change
  * ladder: the gift-card-funded slice restores to the funding card(s) first
@@ -834,8 +940,13 @@ export async function applyCategoryAmendment(
 async function refundAmendmentOverpayment(
   prisma: PrismaClient,
   args: { booking: LoadedBooking; amount: number; actorUserId: string },
-): Promise<"SUCCEEDED" | "PARTIAL" | "FAILED" | "MANUAL_CREDIT"> {
+): Promise<{
+  outcome: "SUCCEEDED" | "PARTIAL" | "FAILED" | "MANUAL_CREDIT";
+  /** Payment rows this ladder created, for per-row adjustment-note linkage. */
+  rows: AmendRefundRow[];
+}> {
   const { booking } = args;
+  const rows: AmendRefundRow[] = [];
   // Next refund sequence = highest trailing integer across ALL THREE
   // reference families this ladder writes ('AMEND-REF-<id>-N',
   // 'AMEND-REF-GC-<id>-N', 'AMEND-CREDIT-<id>-N') + 1. A plain count of one
@@ -880,7 +991,7 @@ async function refundAmendmentOverpayment(
         amount: giftRefund,
         reason: `Refund — booking ${booking.bookingReference} category-change reduction`,
       });
-      await tx.payment.create({
+      const giftRow = await tx.payment.create({
         data: {
           reference: `AMEND-REF-GC-${booking.id}-${seq}`,
           bookingId: booking.id,
@@ -898,6 +1009,7 @@ async function refundAmendmentOverpayment(
               : `Category-change reduction restored to gift card (A$${restored.toFixed(2)} of A$${giftRefund.toFixed(2)} — remainder needs manual follow-up)`,
         },
       });
+      rows.push({ id: giftRow.id, amount: giftRefund, kind: "GIFT_RESTORE" });
       const fresh = await tx.booking.findUniqueOrThrow({
         where: { id: booking.id },
         select: { amountPaid: true },
@@ -909,7 +1021,7 @@ async function refundAmendmentOverpayment(
     });
   }
 
-  if (cardRefund <= 0) return "SUCCEEDED";
+  if (cardRefund <= 0) return { outcome: "SUCCEEDED", rows };
 
   const source = await prisma.payment.findFirst({
     where: {
@@ -934,7 +1046,7 @@ async function refundAmendmentOverpayment(
     const chargeAt = source.processedAt ?? source.createdAt;
     const daysSince = (Date.now() - chargeAt.getTime()) / 86_400_000;
     if (daysSince > 180) {
-      await prisma.payment.create({
+      const creditRow = await prisma.payment.create({
         data: {
           reference: `AMEND-CREDIT-${booking.id}-${seq}`,
           bookingId: booking.id,
@@ -949,7 +1061,8 @@ async function refundAmendmentOverpayment(
             "Category-change reduction >180d after source charge: needs manual reconcile via credit note / bank transfer.",
         },
       });
-      return "MANUAL_CREDIT";
+      rows.push({ id: creditRow.id, amount: cardRefund, kind: "MANUAL_CREDIT" });
+      return { outcome: "MANUAL_CREDIT", rows };
     }
   }
 
@@ -998,6 +1111,7 @@ async function refundAmendmentOverpayment(
         : `Category-change reduction refund FAILED — ${failNote}`,
     },
   });
+  rows.push({ id: row.id, amount: cardRefund, kind: "CARD_REFUND" });
 
   if (refundOk) {
     const fresh = await prisma.booking.findUniqueOrThrow({
@@ -1008,7 +1122,7 @@ async function refundAmendmentOverpayment(
       where: { id: booking.id },
       data: { amountPaid: Math.max(0, r2(Number(fresh.amountPaid) - cardRefund)) },
     });
-    return "SUCCEEDED";
+    return { outcome: "SUCCEEDED", rows };
   }
 
   // Recovery ladder: automated retry + manager alert. The retry job
@@ -1036,7 +1150,7 @@ async function refundAmendmentOverpayment(
     body: `The A$${cardRefund.toFixed(2)} overpayment refund for booking ${booking.bookingReference} failed at Stripe (${failNote}). An automatic retry is queued; if it keeps failing, refund manually from the payment console.`,
     data: { refundPaymentId: row.id, amountAud: cardRefund },
   });
-  return giftRefund > 0 ? "PARTIAL" : "FAILED";
+  return { outcome: giftRefund > 0 ? "PARTIAL" : "FAILED", rows };
 }
 
 /**
