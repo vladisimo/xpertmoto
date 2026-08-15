@@ -1337,6 +1337,56 @@ describe("bookingSwap.confirmSwap money core", () => {
       }),
     );
   });
+
+  it("manager override survives the same-category zero-delta guard (override becomes the delta)", async () => {
+    // Same category, identically priced units → computed delta is 0. The
+    // zero-delta LATERAL-steer must not fire when a manager forces a
+    // non-zero delta — the override IS the effective delta.
+    const { ctx, prisma } = makeConfirmCtx({
+      role: "MANAGER",
+      reason: "UPGRADE",
+      bookingCategoryId: "cat-A",
+      incomingCategoryId: "cat-A",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+      priceAdjustmentOverride: 60,
+    });
+    expect(res.direction).toBe("CHARGE");
+    expect(res.deltaAmount).toBeCloseTo(60, 2);
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ amount: 60 }),
+      }),
+    );
+  });
+
+  it("staff without an override are still steered to LATERAL on a same-category zero-delta UPGRADE", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      role: "STAFF",
+      reason: "UPGRADE",
+      bookingCategoryId: "cat-A",
+      incomingCategoryId: "cat-A",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("use LATERAL"),
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1767,7 +1817,7 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
   /** Simulates the row's actual state: the status-guarded updateMany only
    *  matches while the row is still PENDING, so a second call loses the
    *  race (count 0) instead of double-decrementing. */
-  function makeReconcileCtx() {
+  function makeReconcileCtx(opts: { amountPaid?: number } = {}) {
     const credit = {
       id: "p-credit",
       type: "MANUAL_CREDIT",
@@ -1795,7 +1845,14 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
           },
         ),
       },
-      booking: { update: vi.fn(async () => ({})) },
+      booking: {
+        // The clamp re-reads amountPaid inside the tx before writing the
+        // floored absolute value.
+        findUniqueOrThrow: vi.fn(async () => ({
+          amountPaid: new Prisma.Decimal(opts.amountPaid ?? 500),
+        })),
+        update: vi.fn(async () => ({})),
+      },
       auditLog: { create: vi.fn(async () => null) },
     };
     const prisma = {
@@ -1814,7 +1871,7 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
   }
 
   it("decrements booking.amountPaid by the credited amount when the transfer is marked SUCCEEDED", async () => {
-    const { ctx, models, credit } = makeReconcileCtx();
+    const { ctx, models } = makeReconcileCtx({ amountPaid: 500 });
     const caller = bookingSwapRouter.createCaller(ctx as never);
     const res = await caller.reconcileCreditTransfer({
       paymentId: "p-credit",
@@ -1825,9 +1882,26 @@ describe("bookingSwap.reconcileCreditTransfer", () => {
     expect(models.payment.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "p-credit", status: "PENDING" } }),
     );
+    // 500 − 110 = 390, written as a clamped absolute value.
     expect(models.booking.update).toHaveBeenCalledWith({
       where: { id: "b1" },
-      data: { amountPaid: { decrement: credit.amount } },
+      data: { amountPaid: 390 },
+    });
+  });
+
+  it("clamps the amountPaid write-down at zero for pre-fix rows whose amountPaid sits below the credit", async () => {
+    // Historical SWAP-CREDIT rows committed under older semantics can leave
+    // amountPaid below the credit amount — the reconcile must land at 0,
+    // never negative. (reconcile-swap-money.ts never moves amountPaid for
+    // SWAP-CREDIT rows, so there is no double-heal to worry about.)
+    const { ctx, models } = makeReconcileCtx({ amountPaid: 50 });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-CLAMP" }),
+    ).resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(models.booking.update).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 0 },
     });
   });
 

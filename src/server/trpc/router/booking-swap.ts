@@ -879,12 +879,6 @@ export const bookingSwapRouter = createTRPCRouter({
       const useQuoted = !zeroDelta && (categoryChanged || specChange);
       let deltaAmount = useQuoted ? quote.deltaAmount : 0;
       let gstAmount = useQuoted ? quote.gstAmount : 0;
-      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
-        });
-      }
 
       if (input.priceAdjustmentOverride !== undefined) {
         if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
@@ -899,6 +893,19 @@ export const bookingSwapRouter = createTRPCRouter({
           // GST: still 1/11 of the absolute delta for display.
           gstAmount = toNumber(gstFromInclusive(Math.abs(deltaAmount)));
         }
+      }
+
+      // Same-category UPGRADE/DOWNGRADE with no price difference is a
+      // mislabelled LATERAL — but the guard runs on the EFFECTIVE delta,
+      // AFTER the manager override above: a manager forcing a non-zero
+      // delta on identically priced units is legitimate (goodwill charge or
+      // credit), so only staff-without-override (and a still-zero override)
+      // get steered to LATERAL.
+      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
+        });
       }
 
       // High-delta gate: require manager for any non-zero delta above
@@ -1973,11 +1980,29 @@ export const bookingSwapRouter = createTRPCRouter({
         }
         // The credited cash has now actually left via bank transfer — the
         // booking's paid-to-date drops by it here, not at swap commit
-        // (totals/balance were already written down in confirmSwap).
+        // (totals/balance were already written down in confirmSwap). Clamp
+        // at zero: historical pre-fix SWAP-CREDIT rows were committed under
+        // older semantics where amountPaid can already sit below the credit
+        // amount, and a blind decrement would drive it negative.
+        //
+        // No double-heal with scripts/reconcile-swap-money.ts: that script
+        // reconstructs totals/gst and marker-backfills amountPaid ONLY for
+        // SUCCEEDED `SWAP-REF-*` cash refunds — it never moves amountPaid
+        // for `SWAP-CREDIT-*` rows (see reconstructSwapNet), so this
+        // reconcile is the sole amountPaid mover for credits.
         if (p.bookingId) {
+          const fresh = await tx.booking.findUniqueOrThrow({
+            where: { id: p.bookingId },
+            select: { amountPaid: true },
+          });
           await tx.booking.update({
             where: { id: p.bookingId },
-            data: { amountPaid: { decrement: p.amount } },
+            data: {
+              amountPaid: Math.max(
+                0,
+                toNumber(roundCents(aud(fresh.amountPaid).minus(aud(p.amount)))),
+              ),
+            },
           });
         }
         return tx.payment.findUniqueOrThrow({ where: { id: p.id } });
