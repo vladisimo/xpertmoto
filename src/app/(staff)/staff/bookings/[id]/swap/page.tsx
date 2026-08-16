@@ -153,6 +153,11 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
   const [step, setStep] = useState<Step>("reason");
   const [swapId, setSwapId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // LOSS_REPLACEMENT drafts (opened via "Arrange replacement" on the booking
+  // page) skip the reason picker AND the outgoing inspection — the vehicle is
+  // lost, so there is nothing to inspect and confirmSwap rejects an outgoing
+  // payload for this reason.
+  const [isLossReplacement, setIsLossReplacement] = useState(false);
 
   // Step 1
   const [reason, setReason] = useState<(typeof REASON_OPTIONS)[number]["value"] | "">("");
@@ -192,7 +197,12 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
   // already chosen — so resuming a draft straight onto the incoming/review
   // steps can still resolve `selectedCandidate`.
   const candidates = trpc.bookingSwap.listCandidates.useQuery(
-    { bookingId: id, includeCrossCategory: isFaultReason || includeCrossCategory },
+    {
+      bookingId: id,
+      // A lost vehicle's replacement doesn't need to match category — the
+      // reason forces zero delta regardless (same as the fault reasons).
+      includeCrossCategory: isFaultReason || isLossReplacement || includeCrossCategory,
+    },
     { enabled: (step === "select" || Boolean(incomingVehicleId)) && Boolean(booking?.vehicle) },
   );
 
@@ -220,6 +230,8 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
     const d = draftQuery.data;
     if (d) {
       setSwapId(d.id);
+      const loss = d.reason === "LOSS_REPLACEMENT";
+      setIsLossReplacement(loss);
       // LOSS_REPLACEMENT drafts are driven by their own flow, not this
       // wizard's reason picker — leave the picker untouched for them.
       if (d.reason !== "LOSS_REPLACEMENT") setReason(d.reason);
@@ -228,7 +240,10 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
       setOriginDetails(d.originDetails ?? "");
       const s = d.draftState as unknown as PersistedDraftState | null;
       if (s) {
-        setStep(s.step ?? "outgoing");
+        const restored = s.step ?? "outgoing";
+        // A loss draft never runs the reason/outgoing steps — coerce any
+        // stale persisted step straight onto vehicle selection.
+        setStep(loss && (restored === "reason" || restored === "outgoing") ? "select" : restored);
         setOutgoing(s.outgoing ?? emptyInspection());
         setIncoming(s.incoming ?? emptyInspection());
         setIncomingVehicleId(s.incomingVehicleId ?? "");
@@ -239,8 +254,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
         setWorkOrderPriority(s.workOrderPriority ?? "HIGH");
       } else {
         // Legacy draft from before draftState existed — its reason is saved,
-        // so resume past the reason step onto the outgoing inspection.
-        setStep("outgoing");
+        // so resume past the reason step onto the outgoing inspection (or
+        // straight onto selection when the outgoing leg is waived).
+        setStep(loss ? "select" : "outgoing");
       }
     }
     hydratedRef.current = true;
@@ -356,8 +372,14 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
 
   async function handleConfirm() {
     if (!swapId || !incomingVehicleId) return;
-    if (!outgoing.odometerKm || !incoming.odometerKm) {
+    // LOSS_REPLACEMENT waives the outgoing leg — confirmSwap rejects an
+    // outgoing payload for it, so only the incoming reading is required.
+    if (!isLossReplacement && !outgoing.odometerKm) {
       setErr("Both odometer readings are required.");
+      return;
+    }
+    if (!incoming.odometerKm) {
+      setErr("The incoming odometer reading is required.");
       return;
     }
     setErr(null);
@@ -365,7 +387,7 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
       await confirm.mutateAsync({
         swapId,
         incomingVehicleId,
-        outgoingInspection: inspectionPayload(outgoing),
+        outgoingInspection: isLossReplacement ? undefined : inspectionPayload(outgoing),
         incomingInspection: inspectionPayload(incoming),
         customerSignatureUrl: customerSignatureUrl ?? undefined,
         staffSignatureUrl: staffSignatureUrl ?? undefined,
@@ -396,7 +418,14 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
         }
       />
 
-      <StepNav current={step} swapId={swapId} />
+      <StepNav current={step} swapId={swapId} lossReplacement={isLossReplacement} />
+
+      {isLossReplacement && (
+        <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+          Loss replacement — outgoing inspection waived (vehicle lost). No price change for
+          the customer.
+        </div>
+      )}
 
       {err && (
         <div className="rounded-md border border-destructive bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -494,9 +523,11 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
         <PageSection
           title="Choose replacement vehicle"
           description={
-            isFaultReason
-              ? "Fault swap — any available vehicle, no price change."
-              : "Pick a replacement. Pricing delta shown inline."
+            isLossReplacement
+              ? "Loss replacement — any available vehicle, no price change."
+              : isFaultReason
+                ? "Fault swap — any available vehicle, no price change."
+                : "Pick a replacement. Pricing delta shown inline."
           }
         >
           <div className="space-y-4">
@@ -513,12 +544,23 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
                 onSelect={setIncomingVehicleId}
                 includeCrossCategory={includeCrossCategory}
                 onIncludeCrossCategoryChange={setIncludeCrossCategory}
-                showCrossCategoryToggle={!isFaultReason && reason !== "LATERAL"}
+                showCrossCategoryToggle={
+                  !isFaultReason && !isLossReplacement && reason !== "LATERAL"
+                }
                 isLoading={candidates.isLoading}
               />
             )}
 
-            {selectedCandidate && deltaQuote.data && (
+            {selectedCandidate && isLossReplacement && (
+              <div className="rounded-md border bg-muted/30 px-4 py-3 text-sm">
+                <div className="font-medium">Pricing preview</div>
+                <p className="mt-1 text-muted-foreground">
+                  No price change — loss replacement forces zero delta.
+                </p>
+              </div>
+            )}
+
+            {selectedCandidate && !isLossReplacement && deltaQuote.data && (
               <div className="rounded-md border bg-muted/30 px-4 py-3 text-sm">
                 <div className="font-medium">Pricing preview</div>
                 {deltaQuote.data.forcedZero ? (
@@ -540,7 +582,7 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
             )}
 
             <StepFooter
-              onBack={() => setStep("outgoing")}
+              onBack={isLossReplacement ? undefined : () => setStep("outgoing")}
               onNext={() => setStep("incoming")}
               nextDisabled={!incomingVehicleId}
             />
@@ -579,7 +621,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
               <CardContent className="space-y-2 text-sm">
                 <div>
                   <span className="text-muted-foreground">Reason: </span>
-                  {REASON_OPTIONS.find((r) => r.value === reason)?.label}
+                  {isLossReplacement
+                    ? "Loss replacement (vehicle lost)"
+                    : REASON_OPTIONS.find((r) => r.value === reason)?.label}
                 </div>
                 <div>
                   <span className="text-muted-foreground">Origin: </span>
@@ -588,7 +632,9 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
                 <div>
                   <span className="text-muted-foreground">Outgoing: </span>
                   {currentVehicle.internalCode} · {currentVehicle.rego} ·{" "}
-                  {outgoing.odometerKm} km · fuel {outgoing.fuelLevel}%
+                  {isLossReplacement
+                    ? "inspection waived (vehicle lost)"
+                    : `${outgoing.odometerKm} km · fuel ${outgoing.fuelLevel}%`}
                 </div>
                 <div>
                   <span className="text-muted-foreground">Incoming: </span>
@@ -603,7 +649,7 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
                     {deltaQuote.data.gstAmount.toFixed(2)})
                   </div>
                 )}
-                {deltaQuote.data?.forcedZero && (
+                {(isLossReplacement || deltaQuote.data?.forcedZero) && (
                   <div>
                     <span className="text-muted-foreground">Price adjustment: </span>
                     No change
@@ -692,14 +738,30 @@ export default function SwapWizardPage(props: { params: Promise<{ id: string }> 
   );
 }
 
-function StepNav({ current, swapId }: { current: Step; swapId: string | null }) {
-  const steps: Array<{ key: Step; label: string }> = [
-    { key: "reason", label: "Reason" },
-    { key: "outgoing", label: "Outgoing" },
-    { key: "select", label: "Choose" },
-    { key: "incoming", label: "Incoming" },
-    { key: "review", label: "Review" },
-  ];
+function StepNav({
+  current,
+  swapId,
+  lossReplacement,
+}: {
+  current: Step;
+  swapId: string | null;
+  lossReplacement?: boolean;
+}) {
+  // Loss replacements never run the reason/outgoing steps — hide them so
+  // the rail doesn't imply an inspection of a vehicle that no longer exists.
+  const steps: Array<{ key: Step; label: string }> = lossReplacement
+    ? [
+        { key: "select", label: "Choose" },
+        { key: "incoming", label: "Incoming" },
+        { key: "review", label: "Review" },
+      ]
+    : [
+        { key: "reason", label: "Reason" },
+        { key: "outgoing", label: "Outgoing" },
+        { key: "select", label: "Choose" },
+        { key: "incoming", label: "Incoming" },
+        { key: "review", label: "Review" },
+      ];
   const currentIdx = steps.findIndex((s) => s.key === current);
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">

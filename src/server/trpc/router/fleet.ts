@@ -16,14 +16,17 @@ import { sendNotification } from "@/server/services/notification-sender";
 import { recordIncidentForCustomer } from "@/server/services/revenue-aggregator";
 import { writeAuditAsync } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import { getBookingExcess, getDamageLiabilityUsed } from "@/server/services/excess";
 import {
-  applyExcessCap,
-  getBookingExcess,
-  getDamageLiabilityUsed,
-} from "@/server/services/excess";
+  chargeCustomerForIncident,
+  recordWorkOrderCostForIncident,
+} from "@/server/services/incident-charge";
+import { findCandidateBookingsForVehicleAt } from "@/server/services/booking-matcher";
+import {
+  terminateBookingForLoss,
+  TERMINATABLE_STATUSES,
+} from "@/server/services/booking-termination";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
-import { gstFromInclusive } from "@/lib/money";
-import { capturePaymentIntent } from "@/lib/stripe";
 import { trackServer } from "@/lib/analytics";
 import { SERVER_EVENTS } from "@/lib/analytics/server-event-names";
 import {
@@ -614,6 +617,48 @@ const addVehicleDocumentInput = z.discriminatedUnion("type", [
   }),
 ]);
 export type AddVehicleDocumentInput = z.infer<typeof addVehicleDocumentInput>;
+
+/**
+ * Shared "vehicle leaves service" write: disposition status + isActive +
+ * soft-delete + status log in one place, used by both `decommission` (all
+ * four disposal reasons) and `confirmTheft` (STOLEN). Runs inside the
+ * caller's transaction; the caller owns booking reassignment and any
+ * post-commit fan-out.
+ */
+export async function markVehicleLost(
+  tx: Prisma.TransactionClient,
+  args: {
+    vehicleId: string;
+    actorId: string;
+    status: "SOLD" | "WRITTEN_OFF" | "END_OF_LIFE" | "STOLEN";
+    reason: string;
+    notes?: string;
+  },
+) {
+  const previousStatus = (
+    await tx.vehicle.findUniqueOrThrow({
+      where: { id: args.vehicleId },
+      select: { status: true },
+    })
+  ).status;
+  return tx.vehicle.update({
+    where: { id: args.vehicleId },
+    data: {
+      status: args.status,
+      isActive: false,
+      deletedAt: new Date(),
+      ...(args.notes !== undefined ? { notes: args.notes } : {}),
+      statusLog: {
+        create: {
+          previousStatus,
+          newStatus: args.status,
+          changedById: args.actorId,
+          reason: args.reason,
+        },
+      },
+    },
+  });
+}
 
 export const fleetRouter = createTRPCRouter({
   dashboard: staffProcedure.query(async ({ ctx }) => {
@@ -2128,20 +2173,14 @@ export const fleetRouter = createTRPCRouter({
       const newStatus = input.reason; // reason enum matches status enum exactly
 
       const result = await ctx.prisma.$transaction(async (tx) => {
-        const previousStatus = (await tx.vehicle.findUniqueOrThrow({ where: { id: input.vehicleId }, select: { status: true } })).status;
-        const vehicle = await tx.vehicle.update({
-          where: { id: input.vehicleId },
-          data: {
-            status: newStatus,
-            isActive: false,
-            deletedAt: new Date(),
-            notes: input.salePrice
-              ? `Decommissioned via ${input.reason}, sale price A$${input.salePrice}`
-              : `Decommissioned: ${input.reason}`,
-            statusLog: {
-              create: { previousStatus, newStatus, changedById: ctx.user.id, reason: input.reason },
-            },
-          },
+        const vehicle = await markVehicleLost(tx, {
+          vehicleId: input.vehicleId,
+          actorId: ctx.user.id,
+          status: newStatus,
+          reason: input.reason,
+          notes: input.salePrice
+            ? `Decommissioned via ${input.reason}, sale price A$${input.salePrice}`
+            : `Decommissioned: ${input.reason}`,
         });
         const reassignment = await reassignFutureBookings(
           tx,
@@ -2327,6 +2366,21 @@ export const fleetRouter = createTRPCRouter({
           actualCost: input.actualCost ?? null,
           staffUserId: ctx.user.id,
         });
+
+        // Area 5: repair work order tied to an incident — feed the actual
+        // cost back (backfill Incident.actualDamageCost, nudge managers to
+        // review the incident charge / issue a partial refund when the
+        // actual cost came in under what was charged).
+        if (wo.relatedIncidentId) {
+          await recordWorkOrderCostForIncident(ctx.prisma, {
+            incidentId: wo.relatedIncidentId,
+            workOrderNumber: wo.workOrderNumber,
+            actualCost:
+              input.actualCost ??
+              (wo.actualCost != null ? Number(wo.actualCost) : null),
+            actorId: ctx.user.id,
+          });
+        }
       }
 
       await trackServer({
@@ -2367,6 +2421,10 @@ export const fleetRouter = createTRPCRouter({
         estimatedDamageCost: z.number().optional(),
         customerLiable: z.boolean().default(false),
         customerChargeAmount: z.number().optional(),
+        // Theft/accident paperwork (Area 3): captured up front when known;
+        // otherwise added later via `updateIncidentDetails` / `confirmTheft`.
+        policeReportNumber: z.string().trim().min(1).max(100).optional(),
+        insuranceClaimNumber: z.string().trim().min(1).max(100).optional(),
       }),
     )
     .meta({ audit: { customerIdPath: "customerId" } })
@@ -2441,33 +2499,86 @@ export const fleetRouter = createTRPCRouter({
     }),
   ),
 
-  incidentDetail: staffProcedure.input(z.object({ id: z.string() })).query(({ ctx, input }) =>
-    ctx.prisma.incident.findUnique({
+  incidentDetail: staffProcedure.input(z.object({ id: z.string() })).query(async ({ ctx, input }) => {
+    const incident = await ctx.prisma.incident.findUnique({
       where: { id: input.id },
       include: {
         vehicle: { include: { category: true } },
-        booking: { include: { customer: true } },
+        booking: {
+          include: {
+            customer: true,
+            // Bond-vs-card split preview on the charge card: how much of a
+            // still-HELD bond the charge would capture before card follow-up.
+            bondLedger: {
+              select: { status: true, heldAmount: true, capturedAmount: true },
+            },
+          },
+        },
         reportedBy: true,
         assignedTo: true,
         photos: true,
         notes: { include: { user: true }, orderBy: { createdAt: "desc" } },
+        // Unified damage surface: charge rows parented by this incident.
+        damageCharges: { orderBy: { createdAt: "asc" } },
       },
-    }),
-  ),
+    });
+    if (!incident) return null;
+    // INC-% payments for this incident (bond capture + card follow-up).
+    // Historical pre-unification charges have these payments but no
+    // DamageCharge rows, so the payment list is the authoritative "has this
+    // incident been charged" surface.
+    const chargeReference = `INC-${incident.incidentNumber}`;
+    const chargePayments = await ctx.prisma.payment.findMany({
+      where: {
+        reference: { in: [chargeReference, `${chargeReference}-CARD`] },
+        deletedAt: null,
+      },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        reference: true,
+        amount: true,
+        status: true,
+        method: true,
+        createdAt: true,
+        processedAt: true,
+      },
+    });
+    return { ...incident, chargePayments };
+  }),
 
   /**
-   * D2: one-click "charge customer" on an incident. Creates the damage
-   * charge payment(s), captures from the bond ledger when there's still
-   * an active hold, and transitions the incident to RESOLVED. Idempotent
-   * via the `chargeReference` check: running it twice won't double-charge.
-   *
-   * Behaviour depends on the state of the bond at the time of the charge:
-   *   - Bond still HELD → capture up to the damage amount from the bond;
-   *     any excess creates a second PENDING payment for card-on-file
-   *     follow-up.
-   *   - Bond already RELEASED / FULLY_CAPTURED → create a PENDING card
-   *     charge for the whole amount. Staff processes it through the
-   *     normal payment flow.
+   * Area 5 — who held this vehicle when the incident happened? Wires the
+   * swap-aware matcher (`booking-matcher.ts`) so the incident sheet / detail
+   * page can suggest the booking to link. One candidate → `match`;
+   * overlapping rentals → every candidate flagged `ambiguous` so staff pick
+   * deliberately (a mismatching manual pick warns, never blocks).
+   */
+  candidateBookingsForIncident: staffProcedure
+    .input(z.object({ vehicleId: z.string(), at: z.coerce.date() }))
+    .query(async ({ ctx, input }) => {
+      const candidates = await findCandidateBookingsForVehicleAt(
+        ctx.prisma as PrismaClient,
+        input.vehicleId,
+        input.at,
+      );
+      const confidence: "match" | "ambiguous" =
+        candidates.length === 1 ? "match" : "ambiguous";
+      return candidates.map((b) => ({
+        bookingId: b.id,
+        bookingReference: b.bookingReference,
+        customerId: b.customerId,
+        customerName: `${b.customer.firstName} ${b.customer.lastName}`.trim(),
+        confidence,
+      }));
+    }),
+
+  /**
+   * D2: one-click "charge customer" on an incident. Thin auth/input wrapper
+   * around the shared `incident-charge` service (the theft-confirmation
+   * flow composes the same service) — the money behaviour (bond-first
+   * capture, excess cap, balanceDue raise, GST, adjustment notes, audits)
+   * lives there.
    */
   chargeCustomerForIncident: managerProcedure
     .input(
@@ -2484,268 +2595,15 @@ export const fleetRouter = createTRPCRouter({
         overrideExcessCap: z.object({ reason: z.string().min(3) }).optional(),
       }),
     )
-    .mutation(async ({ ctx, input }) => {
-      const incident = await ctx.prisma.incident.findUniqueOrThrow({
-        where: { id: input.incidentId },
-        include: {
-          booking: {
-            include: { bondLedger: true, pickupDepot: { select: { slug: true } } },
-          },
-        },
-      });
-      if (!incident.booking) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Incident must be linked to a booking before charging." });
-      }
-      if (!incident.customerLiable) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Incident must be marked customerLiable before charging." });
-      }
-      const requestedAmount = input.amount ?? Number(incident.customerChargeAmount ?? 0);
-      if (requestedAmount <= 0) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "No charge amount set on incident." });
-      }
-      const bookingId = incident.booking.id;
-      const customerId = incident.booking.customerId;
-
-      // Excess cap (per-hire aggregate): the customer's insurance excess is
-      // the ceiling on TOTAL damage recovery for the hire — return-assessment
-      // lines, quote close-outs and incident charges all draw on it. Clamped
-      // here BEFORE any Payment is created, unless the incident's excess was
-      // voided (§6 grounds via setIncidentExcessVoided) or the manager
-      // explicitly overrides for this one charge (audited below).
-      const bookingExcess = await getBookingExcess(ctx.prisma, bookingId);
-      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, bookingId);
-      const capResult = applyExcessCap({
-        proposed: requestedAmount,
-        used: liabilityUsed,
-        excess: bookingExcess.excess,
-        voided: incident.excessVoided,
-        managerOverride: !!input.overrideExcessCap,
-      });
-      const amount = capResult.chargeable;
-      if (amount <= 0) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `Insurance excess cap exhausted — excess A$${bookingExcess.excess.toFixed(2)}, already recovered A$${liabilityUsed.toFixed(2)}. Nothing chargeable. Void the excess on the incident (manager) or override with a reason to proceed.`,
-        });
-      }
-
-      // Idempotency: if a DAMAGE_CHARGE payment already references this
-      // incident, abort — the charge has already been applied.
-      const chargeReference = `INC-${incident.incidentNumber}`;
-      const existing = await ctx.prisma.payment.findFirst({
-        where: { reference: chargeReference },
-        select: { id: true },
-      });
-      if (existing) {
-        throw new TRPCError({ code: "CONFLICT", message: "Customer has already been charged for this incident." });
-      }
-
-      const bond = incident.booking!.bondLedger;
-      const bondHeld =
-        bond && bond.status === "HELD" ? Number(bond.heldAmount) - Number(bond.capturedAmount) : 0;
-      const fromBond = Math.min(bondHeld, amount);
-      const fromCard = Math.round((amount - fromBond) * 100) / 100;
-
-      // Capture the bond hold at Stripe BEFORE the DB transaction — never hold
-      // a Postgres transaction open across a Stripe round-trip. A manual hold
-      // is single-capture, so this consumes the hold (Stripe releases the
-      // rest); any excess is billed to the card as a PENDING follow-up below.
-      let bondChargeId: string | null = null;
-      if (fromBond > 0 && bond) {
-        try {
-          const capture = await capturePaymentIntent(bond.stripePaymentIntentId, {
-            amountToCaptureCents: Math.round(fromBond * 100),
-            idempotencyKey: `bond-capture-incident-${incident.id}`,
-          });
-          bondChargeId = capture.latestChargeId;
-        } catch (err) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: `Stripe could not capture the bond hold: ${
-              err instanceof Error ? err.message : "unknown error"
-            }. No charge was applied.`,
-          });
-        }
-      }
-
-      const result = await ctx.prisma.$transaction(async (tx) => {
-        const payments: { id: string; amount: number; source: "BOND" | "CARD" }[] = [];
-
-        if (fromBond > 0 && bond) {
-          const bondPayment = await tx.payment.create({
-            data: {
-              reference: chargeReference,
-              bookingId,
-              customerId,
-              type: "DAMAGE_CHARGE",
-              method: "STRIPE",
-              amount: fromBond,
-              // Bond-funded damage recovery is a taxable supply — GST-inclusive
-              // like the card remainder below (gst-bas-export reads Payment.gstAmount).
-              gstAmount: gstFromInclusive(fromBond),
-              status: "SUCCEEDED",
-              // Link the Stripe ids so reconcile matches this to the charge.
-              stripePaymentIntentId: bond.stripePaymentIntentId,
-              stripeChargeId: bondChargeId,
-              notes: input.notes ?? `Damage charge captured from bond for incident ${incident.incidentNumber}`,
-              processedById: ctx.user.id,
-              processedAt: new Date(),
-            },
-          });
-          const newCaptured = Number(bond.capturedAmount) + fromBond;
-          const newReleased = Math.max(0, Number(bond.heldAmount) - newCaptured);
-          const prior = Array.isArray(bond.deductions) ? (bond.deductions as unknown[]) : [];
-          await tx.bondLedger.update({
-            where: { bookingId },
-            data: {
-              capturedAmount: newCaptured,
-              releasedAmount: newReleased,
-              // Single-capture: the hold is finalised once captured (Stripe
-              // released the remainder), so always land terminal.
-              status: "FULLY_CAPTURED",
-              deductions: [
-                ...prior,
-                { reason: `Incident ${incident.incidentNumber}`, amount: fromBond },
-              ] as Prisma.InputJsonValue,
-            },
-          });
-          payments.push({ id: bondPayment.id, amount: fromBond, source: "BOND" });
-        }
-
-        if (fromCard > 0) {
-          const cardPayment = await tx.payment.create({
-            data: {
-              reference: `${chargeReference}-CARD`,
-              bookingId,
-              customerId,
-              type: "DAMAGE_CHARGE",
-              method: "STRIPE",
-              amount: fromCard,
-              gstAmount: gstFromInclusive(fromCard),
-              status: "PENDING",
-              notes:
-                input.notes ??
-                `Damage charge remainder for incident ${incident.incidentNumber} — bond insufficient, follow-up card charge required`,
-              processedById: ctx.user.id,
-            },
-          });
-          payments.push({ id: cardPayment.id, amount: fromCard, source: "CARD" });
-          // Raise→add half of the balance-due contract (balance-due.ts):
-          // DAMAGE_CHARGE is balance-affecting, so its capture decrements
-          // balanceDue — without this increment the capture would eat into
-          // UNRELATED debt on the booking and silently stop it being dunned.
-          await tx.booking.update({
-            where: { id: bookingId },
-            data: { balanceDue: { increment: fromCard } },
-          });
-        }
-
-        const updatedIncident = await tx.incident.update({
-          where: { id: incident.id },
-          data: {
-            status: "RESOLVED",
-            resolvedAt: incident.resolvedAt ?? new Date(),
-            actualDamageCost: incident.actualDamageCost ?? amount,
-            customerChargeAmount: amount,
-          },
-        });
-
-        return { incident: updatedIncident, payments, fromBond, fromCard };
-      });
-
-      // Excess-cap audit trail: pre-cap vs charged, or the manager's
-      // attested reason for charging past the cap.
-      if (input.overrideExcessCap) {
-        writeAuditAsync(ctx.prisma, {
-          userId: ctx.user.id,
-          action: "EXCESS_CAP_OVERRIDDEN",
-          entity: "Incident",
-          entityId: incident.id,
-          newData: {
-            bookingId,
-            reason: input.overrideExcessCap.reason,
-            uncappedAmount: requestedAmount,
-            charged: amount,
-            excess: bookingExcess.excess,
-            usedBefore: liabilityUsed,
-            capRemaining: capResult.capRemaining,
-          },
-        });
-      } else if (capResult.cappedBy > 0) {
-        writeAuditAsync(ctx.prisma, {
-          userId: ctx.user.id,
-          action: "EXCESS_CAP_APPLIED",
-          entity: "Incident",
-          entityId: incident.id,
-          newData: {
-            bookingId,
-            preCapAmount: requestedAmount,
-            charged: amount,
-            cappedBy: capResult.cappedBy,
-            excess: bookingExcess.excess,
-            excessSource: bookingExcess.source,
-            usedBefore: liabilityUsed,
-          },
-        });
-      }
-
-      // Issue an ATO §29-75 adjustment note for the damage charge. Each
-      // payment row (bond capture and / or card capture) gets a
-      // separate adjustment so the audit trail mirrors the cash flow.
-      try {
-        const { tryIssueAdjustmentForBooking } = await import(
-          "@/server/services/invoice-lifecycle"
-        );
-        for (const p of result.payments) {
-          await tryIssueAdjustmentForBooking({
-            bookingId,
-            type: "INCREASE",
-            reason: "DAMAGE",
-            description: `Damage charge — incident ${incident.incidentNumber}${
-              p.source === "BOND" ? " (captured from bond)" : ""
-            }`,
-            lineItems: [
-              {
-                description: `Damage to vehicle (incident ${incident.incidentNumber})`,
-                detail:
-                  input.notes ??
-                  (p.source === "BOND"
-                    ? "Captured from security bond hold"
-                    : "Charged to card on file"),
-                quantity: 1,
-                unitPrice: p.amount,
-                totalPrice: p.amount,
-                gstAmount: gstFromInclusive(p.amount).toNumber(),
-                gstIncluded: true,
-              },
-            ],
-            paymentId: p.id,
-            issuedById: ctx.user.id,
-          });
-        }
-      } catch {
-        // tryIssueAdjustmentForBooking already logs internal failures.
-      }
-
-      await trackServer({
-        event: SERVER_EVENTS.incidentCustomerCharged,
-        distinctId: customerId,
-        properties: {
-          incidentId: incident.id,
-          incidentNumber: incident.incidentNumber,
-          bookingId,
-          amountAud: amount,
-          fromBondAud: result.fromBond,
-          fromCardAud: result.fromCard,
-          actorUserId: ctx.user.id,
-        },
-        ...(incident.booking?.pickupDepot?.slug
-          ? { groups: { depot: incident.booking.pickupDepot.slug } }
-          : {}),
-      });
-
-      return result;
-    }),
+    .mutation(({ ctx, input }) =>
+      chargeCustomerForIncident(ctx.prisma, {
+        incidentId: input.incidentId,
+        amount: input.amount,
+        notes: input.notes,
+        overrideExcessCap: input.overrideExcessCap,
+        actorId: ctx.user.id,
+      }),
+    ),
 
   /**
    * D3: same shape as D2 for infringements. Creates an
@@ -2921,6 +2779,559 @@ export const fleetRouter = createTRPCRouter({
         },
       });
       return updated;
+    }),
+
+  /**
+   * Area 3 — fill in the paperwork columns on an incident (police report /
+   * insurance claim numbers, location, third-party details) without walking
+   * the status machine. Staff-level: recording a reference number is data
+   * entry, not a money decision.
+   */
+  updateIncidentDetails: staffProcedure
+    .input(
+      z.object({
+        id: z.string(),
+        policeReportNumber: z.string().trim().max(100).nullish(),
+        insuranceClaimNumber: z.string().trim().max(100).nullish(),
+        location: z.string().trim().max(300).nullish(),
+        thirdPartyInvolved: z.boolean().optional(),
+        thirdPartyDetails: z.record(z.unknown()).nullish(),
+        /** Area 5 — link (or unlink with null) the booking that held the
+         *  vehicle at the incident time. Linking derives `customerId` from
+         *  the booking; unlinking clears both. */
+        bookingId: z.string().nullish(),
+        /** Area 5 — charge-card precondition: mark the customer liable. */
+        customerLiable: z.boolean().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const incident = await ctx.prisma.incident.findUniqueOrThrow({
+        where: { id: input.id },
+        select: {
+          id: true,
+          incidentNumber: true,
+          policeReportNumber: true,
+          insuranceClaimNumber: true,
+          location: true,
+          thirdPartyInvolved: true,
+          bookingId: true,
+          customerId: true,
+          customerLiable: true,
+        },
+      });
+      const data: Prisma.IncidentUncheckedUpdateInput = {};
+      if (input.policeReportNumber !== undefined) {
+        data.policeReportNumber = input.policeReportNumber || null;
+      }
+      if (input.insuranceClaimNumber !== undefined) {
+        data.insuranceClaimNumber = input.insuranceClaimNumber || null;
+      }
+      if (input.location !== undefined) data.location = input.location || null;
+      if (input.thirdPartyInvolved !== undefined) {
+        data.thirdPartyInvolved = input.thirdPartyInvolved;
+      }
+      if (input.thirdPartyDetails !== undefined) {
+        data.thirdPartyDetails =
+          input.thirdPartyDetails === null
+            ? Prisma.DbNull
+            : (input.thirdPartyDetails as Prisma.InputJsonValue);
+      }
+      if (input.customerLiable !== undefined) {
+        data.customerLiable = input.customerLiable;
+      }
+      if (input.bookingId !== undefined) {
+        if (input.bookingId === null) {
+          data.bookingId = null;
+          data.customerId = null;
+        } else if (input.bookingId !== incident.bookingId) {
+          const booking = await ctx.prisma.booking.findUnique({
+            where: { id: input.bookingId },
+            select: { id: true, customerId: true, deletedAt: true },
+          });
+          if (!booking || booking.deletedAt) {
+            throw new TRPCError({ code: "NOT_FOUND", message: "Booking not found." });
+          }
+          data.bookingId = booking.id;
+          data.customerId = booking.customerId;
+        }
+      }
+      const updated = await ctx.prisma.incident.update({
+        where: { id: incident.id },
+        data,
+        select: {
+          id: true,
+          incidentNumber: true,
+          policeReportNumber: true,
+          insuranceClaimNumber: true,
+          location: true,
+          thirdPartyInvolved: true,
+          thirdPartyDetails: true,
+          bookingId: true,
+          customerId: true,
+          customerLiable: true,
+        },
+      });
+      // Late linkage keeps the customer's incident counter honest — the
+      // create path only records when a customer was known up front.
+      if (!incident.customerId && updated.customerId) {
+        await recordIncidentForCustomer(ctx.prisma, updated.customerId);
+      }
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.user.id,
+        action: "INCIDENT_DETAILS_UPDATED",
+        entity: "Incident",
+        entityId: incident.id,
+        previousData: {
+          policeReportNumber: incident.policeReportNumber,
+          insuranceClaimNumber: incident.insuranceClaimNumber,
+          location: incident.location,
+          thirdPartyInvolved: incident.thirdPartyInvolved,
+          bookingId: incident.bookingId,
+          customerId: incident.customerId,
+          customerLiable: incident.customerLiable,
+        },
+        newData: {
+          policeReportNumber: updated.policeReportNumber,
+          insuranceClaimNumber: updated.insuranceClaimNumber,
+          location: updated.location,
+          thirdPartyInvolved: updated.thirdPartyInvolved,
+          bookingId: updated.bookingId,
+          customerId: updated.customerId,
+          customerLiable: updated.customerLiable,
+        },
+      });
+      return updated;
+    }),
+
+  /**
+   * Area 3 — the theft ladder's terminal manager act. Formally confirms a
+   * THEFT incident: records the police report (number XOR audited
+   * "pending" escape), advances the incident to INSURANCE_CLAIM (ASSESSED
+   * while the report is pending), marks the vehicle STOLEN via the shared
+   * `markVehicleLost` write (reassigning future bookings like
+   * `decommission`), raises the excess-capped theft charge through the
+   * incident-charge service (bond-first, before the auth lapses), and
+   * terminates the hire via the Area-2 loss-termination service (FORFEIT
+   * pre-selected; manager picks REFUND for no-negligence third-party
+   * theft). Stripe-touching steps (charge, termination) run OUTSIDE any
+   * wrapping transaction — this procedure composes the existing services
+   * rather than one mega-tx, so a mid-sequence failure can be re-run: every
+   * step is individually idempotent or skip-guarded.
+   */
+  confirmTheft: managerProcedure
+    .input(
+      z
+        .object({
+          incidentId: z.string(),
+          policeReportNumber: z.string().trim().min(1).max(100).optional(),
+          /** Audited escape hatch: confirm before the report number exists
+           *  (e.g. event number not yet issued). Requires a reason. */
+          policeReportPending: z.boolean().optional(),
+          policeReportPendingReason: z.string().trim().min(3).max(500).optional(),
+          insuranceClaimNumber: z.string().trim().min(1).max(100).optional(),
+          /** Defaults to min(vehicle book value ?? estimated damage, excess
+           *  headroom). Pass 0 explicitly to skip the charge. */
+          chargeAmount: z.number().min(0).optional(),
+          overrideExcessCap: z.object({ reason: z.string().min(3) }).optional(),
+          terminate: z.boolean().default(true),
+          refundMode: z.enum(["REFUND", "CREDIT", "FORFEIT"]).default("FORFEIT"),
+          bondDisposition: z
+            .enum(["RELEASED", "HELD_FOR_CLAIM", "CAPTURED_VIA_INCIDENT"])
+            .optional(),
+        })
+        .refine((v) => !!v.policeReportNumber !== !!v.policeReportPending, {
+          message:
+            "Provide the police report number OR mark the report pending — exactly one.",
+          path: ["policeReportNumber"],
+        })
+        .refine(
+          (v) => !v.policeReportPending || !!v.policeReportPendingReason,
+          {
+            message:
+              "A written reason is required to confirm theft without a police report number.",
+            path: ["policeReportPendingReason"],
+          },
+        ),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+      const incident = await ctx.prisma.incident.findUniqueOrThrow({
+        where: { id: input.incidentId },
+        select: {
+          id: true,
+          incidentNumber: true,
+          type: true,
+          status: true,
+          deletedAt: true,
+          excessVoided: true,
+          estimatedDamageCost: true,
+          policeReportNumber: true,
+          insuranceClaimNumber: true,
+          booking: {
+            select: {
+              id: true,
+              status: true,
+              bookingReference: true,
+              customerId: true,
+              customer: { select: { id: true, firstName: true, lastName: true } },
+            },
+          },
+          vehicle: {
+            select: {
+              id: true,
+              internalCode: true,
+              rego: true,
+              status: true,
+              depotId: true,
+              currentBookValue: true,
+            },
+          },
+        },
+      });
+      if (incident.deletedAt) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Incident has been deleted." });
+      }
+      if (incident.type !== "THEFT") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Only THEFT incidents can be confirmed as theft (this one is ${incident.type}).`,
+        });
+      }
+      if (!incident.booking) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Incident must be linked to a booking before confirming theft.",
+        });
+      }
+      const booking = incident.booking;
+      const vehicle = incident.vehicle;
+
+      // Charge default: the smaller of what the vehicle was worth (frozen
+      // book value; estimated damage as fallback) and the remaining excess
+      // headroom — unless the cap is voided/overridden, in which case the
+      // full loss figure stands and the service skips the clamp.
+      const bookingExcess = await getBookingExcess(ctx.prisma, booking.id);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, booking.id);
+      const headroom = r2(Math.max(0, bookingExcess.excess - liabilityUsed));
+      const capLifted = incident.excessVoided || !!input.overrideExcessCap;
+      const lossFigure = Number(
+        vehicle.currentBookValue ?? incident.estimatedDamageCost ?? 0,
+      );
+      const baseAmount = input.chargeAmount ?? lossFigure;
+      const plannedCharge = r2(capLifted ? baseAmount : Math.min(baseAmount, headroom));
+
+      const newStatus = input.policeReportPending ? "ASSESSED" : "INSURANCE_CLAIM";
+      const willCharge = plannedCharge > 0;
+
+      // ── Step 1: incident paperwork + vehicle disposition (pure DB tx) ──
+      const alreadyDisposed = ["SOLD", "END_OF_LIFE", "STOLEN", "WRITTEN_OFF"].includes(
+        vehicle.status,
+      );
+      const { reassignment } = await ctx.prisma.$transaction(async (tx) => {
+        await tx.incident.update({
+          where: { id: incident.id },
+          data: {
+            status: newStatus,
+            policeReportNumber:
+              input.policeReportNumber ?? incident.policeReportNumber,
+            insuranceClaimNumber:
+              input.insuranceClaimNumber ?? incident.insuranceClaimNumber,
+            // Confirming theft with a charge is the act of holding the
+            // customer liable — the charge service requires the flag.
+            ...(willCharge ? { customerLiable: true } : {}),
+          },
+        });
+        await tx.incidentNote.create({
+          data: {
+            incidentId: incident.id,
+            userId: ctx.user.id,
+            note: input.policeReportPending
+              ? `Theft CONFIRMED by manager — police report PENDING: ${input.policeReportPendingReason}`
+              : `Theft CONFIRMED by manager — police report ${input.policeReportNumber}${
+                  input.insuranceClaimNumber
+                    ? `, insurance claim ${input.insuranceClaimNumber}`
+                    : ""
+                }`,
+            isInternal: true,
+          },
+        });
+        let summary: Awaited<ReturnType<typeof reassignFutureBookings>> | null = null;
+        if (!alreadyDisposed) {
+          await markVehicleLost(tx, {
+            vehicleId: vehicle.id,
+            actorId: ctx.user.id,
+            status: "STOLEN",
+            reason: `Theft confirmed — incident ${incident.incidentNumber}`,
+          });
+          summary = await reassignFutureBookings(
+            tx,
+            vehicle.id,
+            ctx.user.id,
+            `Vehicle ${vehicle.internalCode} → STOLEN (theft confirmed)`,
+          );
+        }
+        // Close the open "Confirm theft" task on the board.
+        await autoCloseByTarget(tx, "Incident", incident.id, {
+          types: ["INCIDENT_INVESTIGATE", "INCIDENT_TRIAGE"],
+          reason: "completed",
+          closingUserId: ctx.user.id,
+        });
+        return { reassignment: summary };
+      });
+
+      // ── Step 2: excess-capped charge (bond-first) via the shared service.
+      // Outside any tx — the service does its own Stripe-then-tx dance. A
+      // CONFLICT means a prior run already charged; treat as done.
+      let charge: { amount: number; fromBond: number; fromCard: number } | null = null;
+      let chargeSkippedReason: string | null = null;
+      if (willCharge) {
+        try {
+          const res = await chargeCustomerForIncident(ctx.prisma, {
+            incidentId: incident.id,
+            amount: plannedCharge,
+            notes: `Theft of ${vehicle.internalCode} — incident ${incident.incidentNumber}${
+              input.policeReportNumber
+                ? ` (police report ${input.policeReportNumber})`
+                : " (police report pending)"
+            }`,
+            overrideExcessCap: input.overrideExcessCap,
+            actorId: ctx.user.id,
+            keepStatus: true,
+          });
+          charge = {
+            amount: r2(res.fromBond + res.fromCard),
+            fromBond: res.fromBond,
+            fromCard: res.fromCard,
+          };
+        } catch (err) {
+          if (err instanceof TRPCError && err.code === "CONFLICT") {
+            chargeSkippedReason = "already-charged";
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        chargeSkippedReason =
+          input.chargeAmount === 0
+            ? "manager-set-zero"
+            : headroom <= 0
+              ? "no-excess-headroom"
+              : "no-loss-figure";
+      }
+
+      // ── Step 3: terminate the hire (Area 2 service; Stripe inside it).
+      // Bond disposition derives from PERSISTED state, not just this run's
+      // in-memory charge result: on a re-run after a prior partial run
+      // already captured the bond via the incident charge, the charge step
+      // above short-circuits as already-charged (CONFLICT) and `charge`
+      // stays null — but the bond really was captured via the incident. The
+      // bond-funded slice always lands a SUCCEEDED `INC-<num>` DAMAGE_CHARGE
+      // Payment in the same tx as the ledger capture, so that row is the
+      // authoritative signal.
+      let bondDisposition: NonNullable<typeof input.bondDisposition>;
+      if (input.bondDisposition) {
+        bondDisposition = input.bondDisposition;
+      } else if (charge && charge.fromBond > 0) {
+        bondDisposition = "CAPTURED_VIA_INCIDENT";
+      } else {
+        const priorBondCapture = await ctx.prisma.payment.findFirst({
+          where: {
+            bookingId: booking.id,
+            reference: `INC-${incident.incidentNumber}`,
+            type: "DAMAGE_CHARGE",
+            status: "SUCCEEDED",
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        bondDisposition = priorBondCapture ? "CAPTURED_VIA_INCIDENT" : "HELD_FOR_CLAIM";
+      }
+      let termination: Awaited<ReturnType<typeof terminateBookingForLoss>> | null = null;
+      let terminationSkippedReason: string | null = null;
+      if (input.terminate) {
+        const bookingNow = await ctx.prisma.booking.findUnique({
+          where: { id: booking.id },
+          select: { status: true, termination: { select: { id: true } } },
+        });
+        if (
+          bookingNow &&
+          !bookingNow.termination &&
+          (TERMINATABLE_STATUSES as readonly string[]).includes(bookingNow.status)
+        ) {
+          termination = await terminateBookingForLoss(ctx.prisma, {
+            bookingId: booking.id,
+            cause: "STOLEN",
+            refundMode: input.refundMode,
+            incidentId: incident.id,
+            bondDisposition,
+            notes: `Theft confirmed — incident ${incident.incidentNumber}`,
+            actorId: ctx.user.id,
+          });
+        } else {
+          terminationSkippedReason = bookingNow?.termination
+            ? "already-terminated"
+            : `booking-status-${bookingNow?.status ?? "unknown"}`;
+        }
+      } else {
+        terminationSkippedReason = "manager-opted-out";
+      }
+
+      // ── Step 4: post-commit fan-out (best-effort, never unwinds money) ──
+      if (reassignment) {
+        try {
+          await notifyReassignmentOutcome({
+            vehicleId: vehicle.id,
+            actorUserId: ctx.user.id,
+            summary: reassignment,
+            reasonLabel: "STOLEN",
+          });
+        } catch (err) {
+          logger.warn(
+            { vehicleId: vehicle.id, err: err instanceof Error ? err.message : String(err) },
+            "confirmTheft: reassignment fan-out failed",
+          );
+        }
+      }
+
+      const policeLine = input.policeReportPending
+        ? "Police report: pending (to be supplied)"
+        : `Police report: ${input.policeReportNumber}`;
+      try {
+        // Customer: formal theft-recorded notice. The termination service
+        // sends its own settlement email; this one records the theft act.
+        await sendNotification({
+          userId: booking.customerId,
+          type: "INCIDENT_REPORTED",
+          channels: ["EMAIL"],
+          subject: `Vehicle theft recorded — booking ${booking.bookingReference}`,
+          title: "Vehicle theft recorded",
+          body:
+            `Dear ${booking.customer.firstName},\n\n` +
+            `This is formal notice that the theft of the vehicle hired under booking ${booking.bookingReference} (${vehicle.internalCode}, rego ${vehicle.rego}) has been recorded.\n\n` +
+            `${policeLine}\n` +
+            (input.insuranceClaimNumber
+              ? `Insurance claim: ${input.insuranceClaimNumber}\n`
+              : "") +
+            (charge
+              ? `An amount of A$${charge.amount.toFixed(2)} has been charged in accordance with your rental agreement${
+                  charge.fromBond > 0
+                    ? ` (A$${charge.fromBond.toFixed(2)} applied from your security bond)`
+                    : ""
+                }.\n`
+              : "") +
+            `\nIf you have information about the vehicle's whereabouts, contact your depot immediately.`,
+          bookingId: booking.id,
+          data: {
+            incidentId: incident.id,
+            incidentNumber: incident.incidentNumber,
+            policeReportNumber: input.policeReportNumber ?? null,
+            chargedAud: charge?.amount ?? 0,
+          },
+          sentById: ctx.user.id,
+        });
+      } catch (err) {
+        logger.warn(
+          { incidentId: incident.id, err: err instanceof Error ? err.message : String(err) },
+          "confirmTheft: customer notification failed",
+        );
+      }
+      try {
+        const managers = await ctx.prisma.user.findMany({
+          where: {
+            role: { in: ["MANAGER", "ADMIN"] },
+            deletedAt: null,
+            OR: [{ depotId: vehicle.depotId }, { depotId: null }],
+          },
+          select: { id: true },
+        });
+        for (const m of managers) {
+          await sendNotification({
+            userId: m.id,
+            type: "INCIDENT_REPORTED",
+            category: "OPERATIONAL",
+            channels: ["IN_APP", "EMAIL"],
+            subject: `Theft confirmed — ${vehicle.internalCode} (${incident.incidentNumber})`,
+            title: `Theft confirmed — ${vehicle.internalCode}`,
+            body:
+              `Theft of ${vehicle.internalCode} (booking ${booking.bookingReference}) has been formally confirmed.\n` +
+              `${policeLine}\n` +
+              `Charge: ${
+                charge
+                  ? `A$${charge.amount.toFixed(2)} (bond A$${charge.fromBond.toFixed(2)}, card A$${charge.fromCard.toFixed(2)})`
+                  : `none (${chargeSkippedReason})`
+              }\n` +
+              `Hire: ${
+                termination
+                  ? `terminated, refund mode ${termination.refundMode}, refund A$${termination.refundAmount.toFixed(2)}`
+                  : `not terminated (${terminationSkippedReason})`
+              }\n` +
+              `Bond disposition: ${bondDisposition}`,
+            data: { incidentId: incident.id, vehicleId: vehicle.id, bookingId: booking.id },
+            sentById: ctx.user.id,
+          });
+        }
+      } catch (err) {
+        logger.warn(
+          { incidentId: incident.id, err: err instanceof Error ? err.message : String(err) },
+          "confirmTheft: manager notification failed",
+        );
+      }
+
+      writeAuditAsync(ctx.prisma, {
+        userId: ctx.user.id,
+        action: "VEHICLE_THEFT_CONFIRMED",
+        entity: "Incident",
+        entityId: incident.id,
+        newData: {
+          incidentNumber: incident.incidentNumber,
+          bookingId: booking.id,
+          vehicleId: vehicle.id,
+          policeReportNumber: input.policeReportNumber ?? null,
+          policeReportPending: !!input.policeReportPending,
+          policeReportPendingReason: input.policeReportPendingReason ?? null,
+          insuranceClaimNumber: input.insuranceClaimNumber ?? null,
+          incidentStatus: newStatus,
+          vehicleMarkedStolen: !alreadyDisposed,
+          charge,
+          chargeSkippedReason,
+          plannedCharge,
+          excess: bookingExcess.excess,
+          excessHeadroomBefore: headroom,
+          overrideExcessCap: input.overrideExcessCap?.reason ?? null,
+          refundMode: input.refundMode,
+          bondDisposition,
+          terminationId: termination?.terminationId ?? null,
+          terminationRefundAmount: termination?.refundAmount ?? null,
+          terminationSkippedReason,
+          reassignment: reassignment
+            ? {
+                reassigned: reassignment.reassigned.length,
+                needsManual: reassignment.needsManual.length,
+              }
+            : null,
+        },
+      });
+
+      return {
+        incidentId: incident.id,
+        incidentNumber: incident.incidentNumber,
+        incidentStatus: newStatus,
+        vehicleId: vehicle.id,
+        vehicleMarkedStolen: !alreadyDisposed,
+        charge,
+        chargeSkippedReason,
+        bondDisposition,
+        termination: termination
+          ? {
+              terminationId: termination.terminationId,
+              refundMode: termination.refundMode,
+              refundAmount: termination.refundAmount,
+              unusedDays: termination.unusedDays,
+              cardRefundOutcome: termination.cardRefundOutcome,
+            }
+          : null,
+        terminationSkippedReason,
+      };
     }),
 
   /**

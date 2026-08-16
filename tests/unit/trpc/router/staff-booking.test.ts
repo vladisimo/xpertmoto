@@ -77,6 +77,32 @@ vi.mock("@/server/services/booking-termination", () => ({
   previewLossTermination: (...a: unknown[]) => previewLossTerminationMock(...a),
   terminateBookingForLoss: (...a: unknown[]) => terminateBookingForLossMock(...a),
 }));
+// Category-amendment service (Area 4) — the router tests only cover the
+// role gates + Zod combos; the money mechanics live in
+// tests/unit/services/booking-amend-category.test.ts.
+const previewCategoryAmendmentMock = vi.fn();
+const applyCategoryAmendmentMock = vi.fn();
+vi.mock("@/server/services/booking-amend-category", () => ({
+  previewCategoryAmendment: (...a: unknown[]) => previewCategoryAmendmentMock(...a),
+  applyCategoryAmendment: (...a: unknown[]) => applyCategoryAmendmentMock(...a),
+}));
+// Excess cap readers (checkIn damage clamp) — stubbed with generous
+// defaults so non-cap tests behave unchanged; cap tests override per test.
+// The pure applyExcessCap stays real via the importOriginal spread.
+const getBookingExcessMock = vi.fn();
+const getDamageLiabilityUsedMock = vi.fn();
+vi.mock("@/server/services/excess", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getBookingExcess: (...a: unknown[]) => getBookingExcessMock(...a),
+  getDamageLiabilityUsed: (...a: unknown[]) => getDamageLiabilityUsedMock(...a),
+}));
+// Adjustment notes are raised via a dynamic import inside checkIn — stub so
+// the unit never touches the real @/lib/prisma client.
+const tryIssueAdjustmentForBookingMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/invoice-lifecycle", () => ({
+  tryIssueAdjustmentForBooking: (...a: unknown[]) =>
+    tryIssueAdjustmentForBookingMock(...a),
+}));
 // Deterministic settings: defaults unless a test writes into the override
 // map (the real getSettings would read whatever the dev DB holds).
 const settingsOverride: Record<string, unknown> = {};
@@ -107,6 +133,8 @@ beforeEach(() => {
   isVehicleFreeMock.mockResolvedValue(true);
   allocateVehicleMock.mockResolvedValue("veh-ok");
   quotePricingMock.mockResolvedValue(makeQuote());
+  getBookingExcessMock.mockResolvedValue({ excess: 100000, source: "SETTING", tierName: null });
+  getDamageLiabilityUsedMock.mockResolvedValue(0);
 });
 
 /** Minimal PricingQuote shape for the fields createWalkIn persists. */
@@ -935,5 +963,335 @@ describe("staffBooking loss termination (Area 2)", () => {
     expect(terminateBookingForLossMock).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking category amendment (Area 4)", () => {
+  const AMEND_INPUT = {
+    bookingId: "b1",
+    newCategoryId: "cat-new",
+    mode: "CHARGE_DELTA" as const,
+  };
+
+  function makeAmendCtx(role: "STAFF" | "MANAGER") {
+    const prisma = {
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot1" })) },
+      $transaction: vi.fn(),
+    };
+    return {
+      ctx: {
+        prisma,
+        user: { id: "u1", role },
+        session: { user: { id: "u1", role } },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        reqId: "r1",
+        _skipAudit: true,
+      },
+      prisma,
+    };
+  }
+
+  beforeEach(() => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100 });
+    applyCategoryAmendmentMock.mockResolvedValue({
+      bookingId: "b1",
+      direction: "INCREASE",
+      delta: 100,
+    });
+  });
+
+  it("staff may execute a CHARGE_DELTA upgrade; the service gets allowNegativeDelta:false", async () => {
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategory(AMEND_INPUT);
+    expect(res).toMatchObject({ direction: "INCREASE" });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        bookingId: "b1",
+        newCategoryId: "cat-new",
+        mode: "CHARGE_DELTA",
+        actorId: "u1",
+        allowNegativeDelta: false,
+      }),
+    );
+  });
+
+  it("staff CANNOT execute a downgrade (preview delta < 0) — FORBIDDEN, service never runs", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: -80 });
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.amendCategory(AMEND_INPUT)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a goodwill upgrade — FORBIDDEN before any service call", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "SERVICE_RECOVERY",
+        goodwillNote: "fleet swap",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a price override — FORBIDDEN", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        managerDelta: -20,
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("manager may run goodwill and downgrades; allowNegativeDelta:true, no gate preview", async () => {
+    const { ctx, prisma } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.amendCategory({
+      ...AMEND_INPUT,
+      mode: "GOODWILL_FREE_UPGRADE",
+      goodwillReason: "FLEET_REASSIGNMENT",
+      goodwillNote: "original bike written off",
+    });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "FLEET_REASSIGNMENT",
+        goodwillNote: "original bike written off",
+        allowNegativeDelta: true,
+      }),
+    );
+    // The manager path never needs the router-side gate preview.
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("Zod rejects bad mode combos before any service call", async () => {
+    const { ctx } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    // GOODWILL without reason/note.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, mode: "GOODWILL_FREE_UPGRADE" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // OVERRIDE without a delta.
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // CHARGE_DELTA smuggling override/goodwill fields.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, managerDelta: -50 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, goodwillReason: "RETENTION" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("amendCategoryPreview is staff-visible and quote-only", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100, direction: "INCREASE" });
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategoryPreview({
+      bookingId: "b1",
+      newCategoryId: "cat-new",
+    });
+    expect(res).toMatchObject({ delta: 100 });
+    // The mode defaults to CHARGE_DELTA when omitted.
+    expect(previewCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ bookingId: "b1", mode: "CHARGE_DELTA" }),
+    );
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking.checkIn — excess cap on the legacy damage path", () => {
+  // The legacy (direct-API) settle flow used to raise the ad-hoc
+  // damageChargeAmount uncapped, bypassing the per-hire insurance excess
+  // that return.finalise enforces. It now clamps the damage slice through
+  // applyExcessCap; late/fuel/cleaning stay outside the cap.
+  function makeCheckInCtx(over: { bondLedger?: Record<string, unknown> | null } = {}) {
+    const booking = {
+      id: "b1",
+      bookingReference: "SCT-TEST-0001",
+      status: "ACTIVE",
+      customerId: "cust1",
+      depotId: "depot1",
+      vehicleId: null,
+      returnDepotId: null,
+      pickupOdometerKm: 100,
+      durationDays: 2,
+      // Scheduled return still an hour away — no late fee in play.
+      returnDateTime: new Date(Date.now() + 60 * 60 * 1000),
+      bondAmount: new Prisma.Decimal(0),
+      subtotal: new Prisma.Decimal(110),
+      addonTotal: new Prisma.Decimal(19),
+      gstAmount: new Prisma.Decimal(11.73),
+      totalAmount: new Prisma.Decimal(129),
+      category: { baseDailyRate: new Prisma.Decimal(80) },
+      vehicle: null,
+    };
+    const bondLedger = over.bondLedger === undefined ? null : over.bondLedger;
+    const bookingUpdate = vi.fn(
+      async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "b1",
+        status: (data.status as string) ?? "COMPLETED",
+      }),
+    );
+    const bondLedgerUpdate = vi.fn(async () => ({}));
+    const auditCreate = vi.fn(async () => ({}));
+    const prisma = {
+      booking: {
+        findUniqueOrThrow: vi.fn(async () => booking),
+        update: bookingUpdate,
+      },
+      inspection: {
+        // POST_HIRE gate first (clean COMPLETED inspection so the D4
+        // zero-damage gate stays out of the way), PRE_HIRE fuel read second.
+        findFirst: vi.fn(async ({ where }: { where: { type?: string } }) =>
+          where?.type === "POST_HIRE"
+            ? { status: "COMPLETED", items: [], overallCondition: "GOOD" }
+            : { fuelLevel: 100 },
+        ),
+      },
+      payment: {
+        aggregate: vi.fn(async () => ({ _sum: { amount: 0 } })),
+        findFirst: vi.fn(async () => null),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "pay1",
+          ...data,
+        })),
+      },
+      bondLedger: {
+        findUnique: vi.fn(async () => bondLedger),
+        update: bondLedgerUpdate,
+      },
+      damageCharge: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      auditLog: { create: auditCreate },
+      user: { findUnique: vi.fn(async () => ({ firstName: "Ada" })) },
+      returnAssessment: {
+        findUnique: vi.fn(async () => null),
+        findFirst: vi.fn(async () => null),
+      },
+      $transaction: vi.fn(async (cb: (t: unknown) => unknown) => cb(prisma)),
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: null },
+      session: { user: { id: "staff1", role: "STAFF" as const } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    return { ctx, prisma, bookingUpdate, bondLedgerUpdate, auditCreate };
+  }
+
+  it("clamps the damage slice to the remaining excess headroom and audits EXCESS_CAP_APPLIED", async () => {
+    const { ctx, bookingUpdate, auditCreate } = makeCheckInCtx();
+    getBookingExcessMock.mockResolvedValue({
+      excess: 1000,
+      source: "BOOKING_INSURANCE",
+      tierName: "Basic",
+    });
+    getDamageLiabilityUsedMock.mockResolvedValue(800); // A$200 headroom left
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    await caller.checkIn({
+      bookingId: "b1",
+      odometerKm: 150,
+      fuelLevel: 100, // no fuel shortfall
+      damageChargeAmount: 500,
+      damageReason: "Cracked mirror",
+    });
+
+    const updateData = (
+      bookingUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }
+    ).data;
+    // Only the capped A$200 is raised (no bond → all card) and only that
+    // amount enters balanceDue.
+    expect(updateData.balanceDue).toBe(200);
+    const created = (
+      updateData.payments as { create: Array<Record<string, unknown>> }
+    ).create;
+    const dmg = created.find((p) => p.type === "DAMAGE_CHARGE");
+    expect(dmg).toMatchObject({ amount: 200, status: "PENDING", customerId: "cust1" });
+    // Same audit action return.finalise writes when it caps.
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: "EXCESS_CAP_APPLIED" }),
+      }),
+    );
+    // Revenue recognises the capped figure, not the requested one.
+    expect(recordAdditionalChargesMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ damageAmount: 200 }),
+    );
+  });
+
+  it("cap exhausted: zeroes the damage slice (bond released in full) while fuel stays billable", async () => {
+    const { ctx, bookingUpdate, bondLedgerUpdate } = makeCheckInCtx({
+      bondLedger: {
+        heldAmount: 500,
+        capturedAmount: 0,
+        releasedAmount: 0,
+        status: "HELD",
+        stripePaymentIntentId: "pi_bond_1",
+        deductions: [],
+      },
+    });
+    getBookingExcessMock.mockResolvedValue({
+      excess: 1000,
+      source: "BOOKING_INSURANCE",
+      tierName: "Basic",
+    });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000); // nothing left
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.checkIn({
+      bookingId: "b1",
+      odometerKm: 150,
+      fuelLevel: 50, // 4L short on an 8L tank
+      fuelChargePerLitre: 2,
+      damageChargeAmount: 300,
+      damageReason: "Scuffed panel",
+    });
+
+    const updateData = (
+      bookingUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }
+    ).data;
+    const created = (
+      updateData.payments as { create: Array<Record<string, unknown>> }
+    ).create;
+    // Fuel sits OUTSIDE the excess cap — still raised in full.
+    expect(created.find((p) => p.type === "FUEL_CHARGE")).toMatchObject({ amount: 8 });
+    // The damage slice is capped to zero: no DAMAGE_CHARGE raise at all…
+    expect(created.find((p) => p.type === "DAMAGE_CHARGE")).toBeUndefined();
+    expect(updateData.balanceDue).toBe(8);
+    // …and the bond is NOT consumed for uncollectable damage — full release.
+    expect(bondLedgerUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ releasedAmount: 500, status: "RELEASED" }),
+      }),
+    );
+    expect(res.additionalCharges).toBe(8);
   });
 });

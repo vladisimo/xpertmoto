@@ -415,7 +415,7 @@ describe("return.finalise — excess cap (Area 1)", () => {
     expect(audits.some((a) => a.action === "EXCESS_CAP_APPLIED")).toBe(true);
   });
 
-  it("zeroes later STANDARD lines outright when the cap is already exhausted", async () => {
+  it("lands cap-exhausted STANDARD lines in the terminal WAIVED shape (bond-auto-release must not see open damage)", async () => {
     const h = makeFinaliseHarness({
       excess: 1000,
       used: 1000,
@@ -429,9 +429,237 @@ describe("return.finalise — excess cap (Area 1)", () => {
     expect(out.totalDueNow).toBe(0);
     expect(h.paymentCreate).not.toHaveBeenCalled();
     const updates = h.damageChargeUpdate.mock.calls.map((call) => call[0] as { where: { id: string }; data: Record<string, unknown> });
-    expect(updates.find((u) => u.where.id === "c1")?.data).toMatchObject({ amount: 0, status: "CONFIRMED" });
+    // Round-2 item 5: CONFIRMED + capturedPaymentId null would read as
+    // "raised, uncollected" to bond-auto-release and block the bond forever.
+    // The zero-billed line must land the same terminal WAIVED shape as the
+    // quote close-out zero path, with a cap-exhausted staff note.
+    const c1 = updates.find((u) => u.where.id === "c1")?.data;
+    expect(c1).toMatchObject({ amount: 0, status: "WAIVED", resolution: "WAIVED" });
+    expect(String(c1?.staffNote)).toContain("excess cap exhausted");
     // Nothing owed → balanceDue untouched.
     expect(h.bookingUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 item 4 — upsertDamageCharge update-path ownership guards (mirror of
+// removeDamageCharge): no cross-assessment edits, no incident-parented edits,
+// no resetting billed lines.
+// ---------------------------------------------------------------------------
+describe("return.upsertDamageCharge — update-path ownership guards", () => {
+  function updateCtx(existingCharge: Record<string, unknown> | null) {
+    const update = vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
+      id: where.id,
+      ...data,
+    }));
+    const prisma = {
+      returnAssessment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "ra1",
+          status: "DRAFT",
+          inspectionId: "insp1",
+          bookingId: "b1",
+          booking: { vehicleId: "v1" },
+          inspection: { id: "insp1" },
+        })),
+      },
+      damageCharge: {
+        findUnique: vi.fn(async () => existingCharge),
+        update,
+      },
+    };
+    const user = { id: "staff1", role: "STAFF" as const };
+    const ctx = {
+      prisma,
+      user,
+      session: { user },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    } as unknown as Parameters<Caller["upsertDamageCharge"]>[0];
+    return { ctx, update };
+  }
+
+  const input = {
+    chargeId: "dc1",
+    assessmentId: "ra1",
+    description: "Updated description",
+    severity: "MINOR" as const,
+    resolution: "STANDARD" as const,
+    amount: 90,
+  };
+
+  it("updates a PROVISIONAL charge that belongs to this DRAFT assessment", async () => {
+    const { ctx, update } = updateCtx({
+      id: "dc1",
+      status: "PROVISIONAL",
+      returnAssessmentId: "ra1",
+    });
+    const c = returnRouter.createCaller(ctx as never);
+    await c.upsertDamageCharge(input);
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "dc1" },
+        data: expect.objectContaining({ amount: 90, status: "PROVISIONAL" }),
+      }),
+    );
+  });
+
+  it("rejects a chargeId that belongs to a different assessment", async () => {
+    const { ctx, update } = updateCtx({
+      id: "dc1",
+      status: "PROVISIONAL",
+      returnAssessmentId: "ra-FOREIGN",
+    });
+    const c = returnRouter.createCaller(ctx as never);
+    await expect(c.upsertDamageCharge(input)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incident-parented charge", async () => {
+    const { ctx, update } = updateCtx({
+      id: "dc1",
+      status: "PROVISIONAL",
+      returnAssessmentId: null,
+    });
+    const c = returnRouter.createCaller(ctx as never);
+    await expect(c.upsertDamageCharge(input)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("rejects editing a non-PROVISIONAL (already billed) charge", async () => {
+    const { ctx, update } = updateCtx({
+      id: "dc1",
+      status: "CONFIRMED",
+      returnAssessmentId: "ra1",
+    });
+    const c = returnRouter.createCaller(ctx as never);
+    await expect(c.upsertDamageCharge(input)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown chargeId", async () => {
+    const { ctx, update } = updateCtx(null);
+    const c = returnRouter.createCaller(ctx as never);
+    await expect(c.upsertDamageCharge(input)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 item 6 — confirmCharge clamps the raised Payment to the remaining
+// excess headroom; clamp-to-zero lands the terminal WAIVED shape (item 5).
+// ---------------------------------------------------------------------------
+describe("return.confirmCharge — excess cap", () => {
+  function confirmHarness(over: { chargeAmount: number; excess: number; used: number }) {
+    getBookingExcessMock.mockResolvedValue({
+      excess: over.excess,
+      source: "BOOKING_INSURANCE",
+      tierName: "Basic",
+    });
+    getDamageLiabilityUsedMock.mockResolvedValue(over.used);
+
+    const paymentCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+      id: "pay-dmg",
+      ...data,
+    }));
+    const damageChargeUpdate = vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
+      id: where.id,
+      ...data,
+    }));
+    const bookingUpdate = vi.fn(async () => ({}));
+    const prisma = {
+      damageCharge: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "dc1",
+          status: "PROVISIONAL",
+          resolution: "STANDARD",
+          amount: over.chargeAmount,
+          capturedPaymentId: null,
+          staffNote: null,
+          description: "Cracked fairing",
+          returnAssessment: {
+            id: "ra1",
+            status: "SIGNED",
+            bookingId: "b1",
+            booking: { customerId: "cust1", bookingReference: "BK1" },
+          },
+          inspection: { id: "insp1" },
+        })),
+        update: damageChargeUpdate,
+      },
+      payment: { create: paymentCreate, findUnique: vi.fn(async () => null) },
+      booking: { update: bookingUpdate },
+      auditLog: { create: vi.fn(async () => ({})) },
+      $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+    };
+    const user = { id: "staff1", role: "STAFF" as const };
+    const ctx = {
+      prisma,
+      user,
+      session: { user },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    } as unknown as Parameters<Caller["confirmCharge"]>[0];
+    return { ctx, prisma, paymentCreate, damageChargeUpdate, bookingUpdate };
+  }
+
+  it("clamps the raised Payment and balanceDue increment to the remaining headroom", async () => {
+    // 400 proposed, 1000 excess with 900 used → bill 100.
+    const h = confirmHarness({ chargeAmount: 400, excess: 1000, used: 900 });
+    const c = returnRouter.createCaller(h.ctx as never);
+    const out = await c.confirmCharge({ damageChargeId: "dc1" });
+
+    expect(out.paymentId).toBe("pay-dmg");
+    expect(h.paymentCreate).toHaveBeenCalledTimes(1);
+    expect((h.paymentCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data).toMatchObject({
+      reference: "DMG-dc1",
+      amount: 100,
+    });
+    expect(h.bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { balanceDue: { increment: 100 } },
+    });
+    // The charge row records the post-cap figure.
+    expect(h.damageChargeUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ amount: 100, status: "CONFIRMED" }) }),
+    );
+    // EXCESS_CAP_APPLIED audit row records the clamp.
+    const audits = (h.prisma.auditLog.create as ReturnType<typeof vi.fn>).mock.calls.map(
+      (call) => (call[0] as { data: Record<string, unknown> }).data,
+    );
+    expect(audits.some((a) => a.action === "EXCESS_CAP_APPLIED")).toBe(true);
+  });
+
+  it("raises the full amount untouched when headroom covers it (no cap audit)", async () => {
+    const h = confirmHarness({ chargeAmount: 250, excess: 1000, used: 0 });
+    const c = returnRouter.createCaller(h.ctx as never);
+    await c.confirmCharge({ damageChargeId: "dc1" });
+    expect((h.paymentCreate.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data).toMatchObject({
+      amount: 250,
+    });
+    const audits = (h.prisma.auditLog.create as ReturnType<typeof vi.fn>).mock.calls.map(
+      (call) => (call[0] as { data: Record<string, unknown> }).data,
+    );
+    expect(audits.some((a) => a.action === "EXCESS_CAP_APPLIED")).toBe(false);
+  });
+
+  it("cap exhausted → lands the terminal WAIVED shape and raises no Payment", async () => {
+    const h = confirmHarness({ chargeAmount: 400, excess: 1000, used: 1000 });
+    const c = returnRouter.createCaller(h.ctx as never);
+    const out = await c.confirmCharge({ damageChargeId: "dc1" });
+
+    expect(out.paymentId).toBeNull();
+    expect(h.paymentCreate).not.toHaveBeenCalled();
+    expect(h.bookingUpdate).not.toHaveBeenCalled();
+    expect(h.damageChargeUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ amount: 0, status: "WAIVED", resolution: "WAIVED" }),
+      }),
+    );
+    const note = (h.damageChargeUpdate.mock.calls[0]?.[0] as { data: { staffNote?: string } }).data.staffNote;
+    expect(String(note)).toContain("excess cap exhausted");
   });
 });
 

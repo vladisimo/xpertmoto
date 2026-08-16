@@ -54,6 +54,7 @@ export const PHASE_1_TASK_TYPES: readonly StaffTaskType[] = [
   "MAINTENANCE_WORK_ORDER",
   "RENTAL_AGREEMENT_SIGN",
   "RETURN_ASSESSMENT_FINALISE",
+  "INCIDENT_INVESTIGATE",
 ] as const;
 
 export function compareVirtualTasks(a: VirtualTask, b: VirtualTask): number {

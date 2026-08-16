@@ -14,8 +14,15 @@
  *      `gstAmount = gstFromInclusive(amount)`. Reported
  *      per Australian financial year so the BAS impact per period is visible.
  *   2. PENDING INC-%-CARD rows — re-apply the missing balanceDue increment.
- *      Idempotent: a "[RECONCILED:balance-due]" marker is appended to the
- *      payment notes and marked rows are skipped on re-run.
+ *      REQUIRES `--before <ISO timestamp>`: pass the deploy timestamp of the
+ *      balance-due fix (the incident-charge.ts change that raises the
+ *      increment at charge time). Rows created at/after that instant already
+ *      got their increment at raise — re-applying would DOUBLE-increment —
+ *      so only rows created strictly before the cutoff are eligible, and the
+ *      pass refuses to run (with an explanation) when candidates exist and
+ *      --before was not given. Idempotent within the eligible set: a
+ *      "[RECONCILED:balance-due]" marker is appended to the payment notes
+ *      and marked rows are skipped on re-run.
  *   3. SUCCEEDED INC-%-CARD rows — REPORT ONLY, never auto-applied. Their
  *      capture already decremented balanceDue (clamped at 0), so the missed
  *      raise-increment is not blindly reversible; the report prints the
@@ -24,8 +31,8 @@
  * No customer is charged or emailed. Dry-run by default.
  *
  * Usage:
- *   npx tsx scripts/reconcile-incident-charges.ts                 # dry-run report
- *   npx tsx scripts/reconcile-incident-charges.ts --apply         # write changes
+ *   npx tsx scripts/reconcile-incident-charges.ts                 # dry-run report (pass 2 needs --before)
+ *   npx tsx scripts/reconcile-incident-charges.ts --before 2026-08-20T00:00:00Z --apply
  *   npx tsx scripts/reconcile-incident-charges.ts --booking-id X  # one booking (id or reference)
  */
 import { PrismaClient } from "@prisma/client";
@@ -40,6 +47,10 @@ const RECONCILED_MARKER = "[RECONCILED:balance-due]";
 type Args = {
   apply: boolean;
   bookingId?: string;
+  /** Pass-2 eligibility cutoff: only PENDING INC-%-CARD rows created strictly
+   *  before this instant may receive the balanceDue raise. Set it to the
+   *  deploy timestamp of the balance-due fix in incident-charge.ts. */
+  before?: Date;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -51,6 +62,14 @@ function parseArgs(argv: string[]): Args {
       const v = argv[++i];
       if (!v) throw new Error("--booking-id requires a value");
       args.bookingId = v;
+    } else if (a === "--before") {
+      const v = argv[++i];
+      if (!v) throw new Error("--before requires an ISO-8601 timestamp");
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) {
+        throw new Error(`--before is not a parseable date: ${v}`);
+      }
+      args.before = d;
     } else {
       throw new Error(`unknown argument: ${a}`);
     }
@@ -127,11 +146,17 @@ async function main() {
   }
 
   // ---- Pass 2: missing balanceDue raise on PENDING INC-%-CARD rows --------
+  // Post-fix, incident-charge.ts raises the balanceDue increment itself at
+  // charge time — a still-PENDING row created AFTER the fix deployed already
+  // carries its raise, and re-adding it here would double-increment. The
+  // `--before` cutoff (deploy timestamp of that fix) bounds this pass to
+  // pre-fix history; without it the pass REFUSES to touch candidate rows.
   const pendingCard = await p.payment.findMany({
     where: {
       type: "DAMAGE_CHARGE",
       reference: { startsWith: "INC-", endsWith: "-CARD" },
       status: "PENDING",
+      ...(args.before ? { createdAt: { lt: args.before } } : {}),
       ...bookingFilter,
     },
     include: {
@@ -142,36 +167,78 @@ async function main() {
 
   let raisesApplied = 0;
   let raisesSkipped = 0;
-  for (const row of pendingCard) {
-    const ref = row.booking?.bookingReference ?? row.bookingId ?? "-";
-    const amount = Number(row.amount);
-    if (row.notes?.includes(RECONCILED_MARKER)) {
-      raisesSkipped++;
-      console.log(`SKIP  ${ref}  ${row.reference}  ${money(amount)} — already reconciled`);
-      continue;
-    }
-    if (!row.bookingId || !row.booking) {
-      raisesSkipped++;
-      console.log(`SKIP  ${ref}  ${row.reference}  ${money(amount)} — no booking linked`);
-      continue;
-    }
+  let pass2Refused = false;
+  if (!args.before && pendingCard.length > 0) {
+    pass2Refused = true;
     console.log(
-      `RAISE ${ref}  ${row.reference}  balanceDue ${money(Number(row.booking.balanceDue))} ` +
-        `+ ${money(amount)}`,
+      `REFUSED pass 2 — ${pendingCard.length} PENDING INC-%-CARD row(s) found but no --before cutoff was given.\n` +
+        `      Rows created after the balance-due fix in incident-charge.ts deployed already received their\n` +
+        `      raise at charge time; re-applying it here would double-increment Booking.balanceDue.\n` +
+        `      Re-run with \`--before <ISO timestamp of that deploy>\` — only rows created strictly before\n` +
+        `      that instant are eligible. Passes 1 and 3 are unaffected.`,
     );
-    if (!args.apply) continue;
-    // Increment + marker in one tx so a re-run can't double-apply.
-    await p.$transaction([
-      p.booking.update({
-        where: { id: row.bookingId },
-        data: { balanceDue: { increment: amount } },
-      }),
-      p.payment.update({
-        where: { id: row.id },
-        data: { notes: `${row.notes ? `${row.notes} ` : ""}${RECONCILED_MARKER}` },
-      }),
-    ]);
-    raisesApplied++;
+  } else {
+    for (const row of pendingCard) {
+      const ref = row.booking?.bookingReference ?? row.bookingId ?? "-";
+      const amount = Number(row.amount);
+      if (row.notes?.includes(RECONCILED_MARKER)) {
+        raisesSkipped++;
+        console.log(`SKIP  ${ref}  ${row.reference}  ${money(amount)} — already reconciled`);
+        continue;
+      }
+      if (!row.bookingId || !row.booking) {
+        raisesSkipped++;
+        console.log(`SKIP  ${ref}  ${row.reference}  ${money(amount)} — no booking linked`);
+        continue;
+      }
+      console.log(
+        `RAISE ${ref}  ${row.reference}  balanceDue ${money(Number(row.booking.balanceDue))} ` +
+          `+ ${money(amount)}`,
+      );
+      if (!args.apply) continue;
+      // Increment + marker in one interactive tx, with an in-tx re-check
+      // that the row is STILL PENDING. Between the candidate scan above and
+      // this write, the live capture sweep (capture-pending-payments /
+      // capture-retry / Stripe webhook) may capture the row — flipping it
+      // SUCCEEDED and decrementing balanceDue — and re-applying the raise
+      // after that would over-increment the booking. The guarded updateMany
+      // (id + status PENDING + marker absent) runs FIRST: it takes the row
+      // lock, re-verifies the state, and consumes the marker, so a
+      // concurrent flip serialises against it; only when it wins does the
+      // increment apply.
+      const applied = await p.$transaction(async (tx) => {
+        const fresh = await tx.payment.findFirst({
+          where: { id: row.id },
+          select: { status: true, notes: true },
+        });
+        if (!fresh || fresh.status !== "PENDING" || fresh.notes?.includes(RECONCILED_MARKER)) {
+          return false;
+        }
+        const guard = await tx.payment.updateMany({
+          where: {
+            id: row.id,
+            status: "PENDING",
+            NOT: { notes: { contains: RECONCILED_MARKER } },
+          },
+          data: { notes: `${fresh.notes ? `${fresh.notes} ` : ""}${RECONCILED_MARKER}` },
+        });
+        if (guard.count === 0) return false;
+        await tx.booking.update({
+          where: { id: row.bookingId! },
+          data: { balanceDue: { increment: amount } },
+        });
+        return true;
+      });
+      if (!applied) {
+        raisesSkipped++;
+        console.log(
+          `SKIP  ${ref}  ${row.reference}  ${money(amount)} — row was captured/changed by the ` +
+            `live sweep between scan and write; raise NOT applied (would over-increment)`,
+        );
+        continue;
+      }
+      raisesApplied++;
+    }
   }
 
   // ---- Pass 3: SUCCEEDED INC-%-CARD rows — report only --------------------
@@ -214,7 +281,8 @@ async function main() {
 
   console.log(
     `\nScanned: ${gstRows.length} GST backfill row(s), ` +
-      `${pendingCard.length} PENDING card row(s) (${raisesSkipped} skipped), ` +
+      `${pendingCard.length} PENDING card row(s) ` +
+      `(${pass2Refused ? "pass 2 REFUSED — missing --before" : `${raisesSkipped} skipped`}), ` +
       `${succeededCard.length} SUCCEEDED card row(s) flagged for manual review.`,
   );
   if (args.apply) {

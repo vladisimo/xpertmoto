@@ -1,11 +1,13 @@
 import { render } from "@react-email/render";
 import { createElement } from "react";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { formatCurrency } from "@/lib/utils";
 import { BOOKING_RULES } from "@/lib/constants";
 import { getBranding } from "@/lib/branding";
 import { sendNotification } from "@/server/services/notification-sender";
+import { ensureFreshBondHold } from "@/server/services/bond";
 import OverdueNotice from "../../../emails/overdue-notice";
 import { getQueue, monitorCron, registerWorker } from "./queue";
 import { logger } from "@/lib/logger";
@@ -104,6 +106,23 @@ export async function runOverdueCheck(): Promise<OverdueRunResult> {
         },
         "overdue-check: skipping booking — vehicle in disposition status (loss flow owns it)",
       );
+      // STOLEN / WRITTEN_OFF have owning flows (theft ladder / loss
+      // termination). SOLD / END_OF_LIFE have none — a live hire on such a
+      // vehicle would otherwise silently fall out of the ladder with nothing
+      // chasing it, so page the depot managers to resolve it manually.
+      if (b.vehicle.status === "SOLD" || b.vehicle.status === "END_OF_LIFE") {
+        try {
+          await pageManagersForOrphanedDisposition(b);
+        } catch (err) {
+          logger.error(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              bookingId: b.id,
+            },
+            "overdue-check: orphaned-disposition manager page failed",
+          );
+        }
+      }
       continue;
     }
     const hoursLate = (now - b.returnDateTime.getTime()) / (1000 * 60 * 60);
@@ -362,13 +381,130 @@ async function stageThreeManagerEscalation(b: CandidateBooking): Promise<void> {
   );
 }
 
+/**
+ * A hire whose vehicle went SOLD / END_OF_LIFE mid-hire is excluded from the
+ * ladder (no fees, no stages) but has no owning flow — unlike STOLEN /
+ * WRITTEN_OFF, which the theft ladder / loss termination pick up. Page the
+ * depot managers to resolve it manually via terminate-for-loss. The
+ * per-recipient dedupKey (Redis-backed, shared across processes — the
+ * booking-swap manager-broadcast convention) keeps the 15-minute tick from
+ * re-paging on every run.
+ */
+async function pageManagersForOrphanedDisposition(b: CandidateBooking): Promise<void> {
+  const vehicleStatus = b.vehicle?.status ?? "UNKNOWN";
+  const managers = await prisma.user.findMany({
+    where: {
+      role: { in: ["MANAGER", "ADMIN"] },
+      status: "ACTIVE",
+      OR: [{ depotId: b.pickupDepotId }, { depotId: null }],
+    },
+    select: { id: true },
+  });
+  for (const m of managers) {
+    await sendNotification({
+      userId: m.id,
+      type: "BOOKING_OVERDUE_ESCALATION",
+      category: "OPERATIONAL",
+      channels: ["PUSH", "IN_APP"],
+      title: `Manual resolution needed — ${b.bookingReference}`,
+      body:
+        `Booking ${b.bookingReference} is past its return time but its vehicle is ${vehicleStatus}, ` +
+        `so the overdue ladder does not apply and no automated flow owns this hire. ` +
+        `Resolve it manually via Terminate for loss on the booking page.`,
+      bookingId: b.id,
+      data: {
+        url: `/staff/bookings/${b.id}`,
+        vehicleStatus,
+        reason: "disposition-orphan",
+      },
+      dedupKey: `overdue-disposition-orphan:${b.id}:${m.id}`,
+    });
+  }
+}
+
+/**
+ * Author identity for automated internal notes. IncidentNote.userId is a
+ * required FK and no dedicated system user exists, so — following the
+ * admin-pool fallback convention in support-routing.ts — the
+ * longest-standing ACTIVE SUPER_ADMIN (then ADMIN) stands in as the
+ * automation author. Never the booking's customer: an internal investigation
+ * note must not be authored as the suspect.
+ */
+async function resolveSystemAuthorId(): Promise<string | null> {
+  for (const role of ["SUPER_ADMIN", "ADMIN"] as const) {
+    const user = await prisma.user.findFirst({
+      where: { role, status: "ACTIVE" },
+      orderBy: { createdAt: "asc" },
+      select: { id: true },
+    });
+    if (user) return user.id;
+  }
+  return null;
+}
+
 async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
+  // Last known GPS fix (Area 3): snapshotted onto the incident (write-once)
+  // and dropped into an internal note with a maps link so a recovery attempt
+  // can start from the manager page immediately. A vehicle without live
+  // tracking degrades gracefully — the ladder still fires.
+  let livePosition: {
+    deviceId: string;
+    latitude: number;
+    longitude: number;
+    speedKph: number | null;
+    ignitionOn: boolean | null;
+    timestamp: Date;
+  } | null = null;
+  if (b.vehicle) {
+    try {
+      livePosition = await prisma.vehicleLivePosition.findUnique({
+        where: { vehicleId: b.vehicle.id },
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), vehicleId: b.vehicle.id },
+        "overdue-check: live-position lookup failed; incident proceeds without GPS snapshot",
+      );
+    }
+  }
+  const gpsSnapshot = livePosition
+    ? {
+        lat: livePosition.latitude,
+        lng: livePosition.longitude,
+        speedKph: livePosition.speedKph,
+        ignitionOn: livePosition.ignitionOn,
+        timestamp: livePosition.timestamp.toISOString(),
+        deviceId: livePosition.deviceId,
+      }
+    : null;
+  const mapsLink = livePosition
+    ? `https://www.google.com/maps?q=${livePosition.latitude},${livePosition.longitude}`
+    : null;
+  const fixAgeMinutes = livePosition
+    ? Math.max(0, Math.round((Date.now() - livePosition.timestamp.getTime()) / 60000))
+    : null;
+
+  // Author for the internal GPS note — a staff/system identity, never the
+  // suspect customer. If no admin exists (should never happen in a seeded
+  // deployment) the note is skipped; the GPS data still lives on the
+  // incident's gpsSnapshot and in the manager page below.
+  let systemAuthorId: string | null = null;
+  if (gpsSnapshot && mapsLink) {
+    systemAuthorId = await resolveSystemAuthorId();
+    if (!systemAuthorId) {
+      logger.warn(
+        { bookingId: b.id, mapsLink },
+        "overdue-check: no ACTIVE admin to author the GPS incident note — note skipped (snapshot retained on incident)",
+      );
+    }
+  }
+
   await withUniqueRetry(
     () =>
       prisma.$transaction(async (tx) => {
         await tx.booking.update({ where: { id: b.id }, data: { overdueStage: 4 } });
         if (b.vehicle) {
-          await tx.incident.create({
+          const incident = await tx.incident.create({
             data: {
               incidentNumber: generateIncidentNumber("INC-AUTO"),
               vehicleId: b.vehicle.id,
@@ -380,8 +516,29 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
               dateTime: new Date(),
               description: `Automated: vehicle not returned within 72 hours of scheduled return (${b.returnDateTime.toISOString()}). Review and escalate to police report if appropriate.`,
               customerLiable: true,
+              ...(gpsSnapshot
+                ? { gpsSnapshot: gpsSnapshot as Prisma.InputJsonValue }
+                : {}),
             },
           });
+          if (gpsSnapshot && mapsLink && systemAuthorId) {
+            await tx.incidentNote.create({
+              data: {
+                incidentId: incident.id,
+                userId: systemAuthorId,
+                note:
+                  `Automated: last GPS fix at incident creation — ${gpsSnapshot.lat}, ${gpsSnapshot.lng} ` +
+                  `(${fixAgeMinutes} min old${
+                    gpsSnapshot.speedKph != null ? `, ${Math.round(gpsSnapshot.speedKph)} km/h` : ""
+                  }${
+                    gpsSnapshot.ignitionOn != null
+                      ? `, ignition ${gpsSnapshot.ignitionOn ? "ON" : "off"}`
+                      : ""
+                  }). Map: ${mapsLink}`,
+                isInternal: true,
+              },
+            });
+          }
           await recordIncidentForCustomer(tx, b.customer.id);
         }
         await tx.bookingNote.create({
@@ -395,10 +552,38 @@ async function stageFourAutoIncident(b: CandidateBooking): Promise<void> {
       }),
     { constraintFields: ["incidentNumber"] },
   );
+
+  // Theft-suspected bond re-hold (Area 3): refresh the manual-capture auth
+  // NOW, before the card network lets it lapse, so a later confirmTheft can
+  // still capture. Failure is non-fatal — it rides the manager alert below.
+  let bondAlertLine = "";
+  try {
+    const holdResult = await ensureFreshBondHold(prisma, {
+      bookingId: b.id,
+      reason: "theft-suspected",
+    });
+    if (!holdResult.ok) {
+      bondAlertLine = ` BOND RE-HOLD FAILED (${holdResult.action}) — the hold may lapse before capture; review urgently.`;
+      logger.warn(
+        { bookingId: b.id, action: holdResult.action },
+        "overdue-check: theft-suspected bond re-hold failed",
+      );
+    }
+  } catch (err) {
+    bondAlertLine = " BOND RE-HOLD ERRORED — the hold may lapse before capture; review urgently.";
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), bookingId: b.id },
+      "overdue-check: theft-suspected bond re-hold errored",
+    );
+  }
+
+  const fixLine = gpsSnapshot
+    ? ` Last GPS fix: ${gpsSnapshot.lat}, ${gpsSnapshot.lng} (${fixAgeMinutes} min ago) ${mapsLink}.`
+    : " No live GPS fix on record for this vehicle.";
   await notifyManagers(
     b,
     `72h overdue: incident created for ${b.bookingReference}`,
-    `${b.customer.firstName} ${b.customer.lastName}'s vehicle has not been returned for 72+ hours. Incident created — review now.`,
+    `${b.customer.firstName} ${b.customer.lastName}'s vehicle has not been returned for 72+ hours. Incident created — review now.${fixLine}${bondAlertLine}`,
   );
 }
 

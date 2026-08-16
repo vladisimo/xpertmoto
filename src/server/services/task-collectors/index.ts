@@ -8,6 +8,7 @@ import { collectInspectionTasks } from "./inspections";
 import { collectWorkOrderTasks } from "./work-orders";
 import { collectAgreementTasks } from "./agreements";
 import { collectReturnAssessmentTasks } from "./returns";
+import { collectIncidentTasks } from "./incidents";
 
 export type { CollectorOpts } from "./bookings";
 
@@ -46,6 +47,11 @@ export const COLLECTORS: ReadonlyArray<{
     key: "returns",
     types: ["RETURN_ASSESSMENT_FINALISE"],
     run: collectReturnAssessmentTasks,
+  },
+  {
+    key: "incidents",
+    types: ["INCIDENT_INVESTIGATE"],
+    run: collectIncidentTasks,
   },
 ];
 

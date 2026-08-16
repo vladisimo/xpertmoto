@@ -9,7 +9,16 @@ import {
   BALANCE_AFFECTING_CHARGE_TYPES,
 } from "@/server/services/balance-due";
 import { writePaymentAudit } from "@/server/services/audit-payment";
-import { captureBookingId, readCapturedBookingId } from "@/server/services/audit";
+import {
+  captureBookingId,
+  readCapturedBookingId,
+  writeAuditAsync,
+} from "@/server/services/audit";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
 import { writePaymentEvent } from "@/server/services/payment-events";
 import { gstFromInclusive, aud, roundCents, times } from "@/lib/money";
 import { trackServer } from "@/lib/analytics";
@@ -402,10 +411,25 @@ export const bookingSettlementRouter = createTRPCRouter({
         bookingId: z.string(),
         amount: z.number().positive(),
         deductionLabel: z.string().min(1, "Label the deduction"),
+        /** Manager-attested reason to capture beyond the insurance excess
+         *  cap for this one capture (audited as EXCESS_CAP_OVERRIDDEN) —
+         *  mirrors fleet.chargeCustomerForIncident's escape hatch. */
+        overrideExcessCap: z.object({ reason: z.string().min(3) }).optional(),
       }),
     )
     .meta({ audit: { bookingIdPath: "bookingId" } })
     .mutation(async ({ ctx, input }) => {
+      // The override lifts a consumer-protection ceiling — manager+ only
+      // (the incident-flow equivalent lives on a managerProcedure).
+      if (
+        input.overrideExcessCap &&
+        !["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)
+      ) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only a manager can override the insurance excess cap.",
+        });
+      }
       const ledger = await ctx.prisma.bondLedger.findUniqueOrThrow({
         where: { bookingId: input.bookingId },
       });
@@ -426,13 +450,35 @@ export const bookingSettlementRouter = createTRPCRouter({
             "This bond has already been captured once — Stripe holds are single-capture. Charge the card on file for any further amount.",
         });
       }
+      // Excess cap (per-hire aggregate): a manual bond capture is a damage
+      // recovery — the console has no reason discriminator and damage is
+      // what these captures are in practice — so it draws on the same
+      // insurance-excess ceiling as return-assessment lines, quote
+      // close-outs and incident charges. Clamped BEFORE any Stripe call,
+      // with the manager-override escape mirroring the incident flow.
+      const bookingExcess = await getBookingExcess(ctx.prisma, input.bookingId);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, input.bookingId);
+      const capResult = applyExcessCap({
+        proposed: input.amount,
+        used: liabilityUsed,
+        excess: bookingExcess.excess,
+        managerOverride: !!input.overrideExcessCap,
+      });
+      const captureAmount = capResult.chargeable;
+      if (captureAmount <= 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Insurance excess cap exhausted — excess A$${bookingExcess.excess.toFixed(2)}, already recovered A$${liabilityUsed.toFixed(2)}. Nothing capturable. A manager can override with a reason if grounds exist.`,
+        });
+      }
+
       const held = Number(ledger.heldAmount);
       const alreadyReleased = Number(ledger.releasedAmount);
       // How much of the hold is still capturable per our ledger. Capturing
       // this much releases the rest at Stripe automatically.
       const capturable = Math.max(0, held - alreadyReleased);
-      const fromBond = Math.min(input.amount, capturable);
-      const fromCard = roundCents(aud(input.amount).minus(fromBond)).toNumber();
+      const fromBond = Math.min(captureAmount, capturable);
+      const fromCard = roundCents(aud(captureAmount).minus(fromBond)).toNumber();
 
       // Capture the held PaymentIntent BEFORE any DB write — never hold a
       // Postgres transaction open across a Stripe round-trip. On a Stripe
@@ -558,6 +604,43 @@ export const bookingSettlementRouter = createTRPCRouter({
         } catch {
           // tryIssueAdjustmentForBooking already logs internal failures.
         }
+      }
+      // Excess-cap audit trail — clamped captures record pre-cap vs
+      // captured; overridden captures record the manager's attested reason
+      // (same EXCESS_CAP_APPLIED / EXCESS_CAP_OVERRIDDEN pair as the
+      // incident charge flow).
+      if (input.overrideExcessCap) {
+        writeAuditAsync(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_OVERRIDDEN",
+          entity: "BondLedger",
+          entityId: ledger.id,
+          newData: {
+            bookingId: input.bookingId,
+            reason: input.overrideExcessCap.reason,
+            uncappedAmount: input.amount,
+            captured: captureAmount,
+            excess: bookingExcess.excess,
+            usedBefore: liabilityUsed,
+            capRemaining: capResult.capRemaining,
+          },
+        });
+      } else if (capResult.cappedBy > 0) {
+        writeAuditAsync(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "BondLedger",
+          entityId: ledger.id,
+          newData: {
+            bookingId: input.bookingId,
+            preCapAmount: input.amount,
+            captured: captureAmount,
+            cappedBy: capResult.cappedBy,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            usedBefore: liabilityUsed,
+          },
+        });
       }
       await trackServer({
         event: "bond.captured",

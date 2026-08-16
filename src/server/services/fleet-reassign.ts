@@ -107,7 +107,7 @@ export async function reassignFutureBookings(
     if (b.pickupDateTime <= now) {
       await flagNeedsManual(
         b,
-        "original vehicle removed from service after the scheduled pickup time. Staff must contact the customer to arrange a replacement, an upgrade, or a refund.",
+        "original vehicle removed from service after the scheduled pickup time. Staff must contact the customer to arrange a replacement, offer an upgrade via the Change category action on the booking page, or refund.",
       );
       continue;
     }
@@ -146,7 +146,7 @@ export async function reassignFutureBookings(
     } else {
       await flagNeedsManual(
         b,
-        "original vehicle removed and no compatible replacement available at the same depot. Staff must contact the customer to offer an upgrade, a different depot, or a refund.",
+        "original vehicle removed and no compatible replacement available at the same depot. Staff must contact the customer to offer an upgrade via the Change category action on the booking page, a different depot, or a refund.",
       );
     }
   }
@@ -300,7 +300,7 @@ export async function notifyReassignmentOutcome(args: {
             "",
             ...lines,
             "",
-            "Contact each customer to offer an upgrade, a different depot, or a refund.",
+            "Contact each customer to offer an upgrade (Change category on the booking page — goodwill free upgrade available to managers), a different depot, or a refund.",
           ].join("\n"),
           data: {
             vehicleId,

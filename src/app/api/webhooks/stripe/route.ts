@@ -975,14 +975,91 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       if (!parsed) return;
       const refundStatus = parsed.status ?? "unknown";
       const failedReason = parsed.failure_reason ?? null;
+      if (refundStatus === "succeeded") {
+        // Settlement for refunds booked PENDING at creation. Two creator
+        // families write PENDING REFUND rows with DIFFERENT amountPaid
+        // semantics:
+        //   - bookingSwap.confirmSwap's `SWAP-REF-*` rows defer their
+        //     amountPaid decrement to this webhook (see the settlement-
+        //     policy comment there) — flip AND decrement.
+        //   - booking-cancellation's rows already decremented amountPaid at
+        //     creation (any Stripe-accepted card slice counts as settled
+        //     there) — flip ONLY; decrementing again would double-count.
+        // The status flip itself is correct for every family; only the
+        // deferred ledger effect is gated on the SWAP-REF reference family.
+        //
+        // Matching: prefer the refund-id match (rows store the Stripe
+        // refund id in stripeChargeId). Fall back to the PI only when it
+        // resolves to exactly ONE pending row — with several PENDING
+        // refunds on one PI we cannot tell which one this event settles,
+        // so skip and leave the rows for manual reconciliation.
+        let pendingRefund = await prisma.payment.findFirst({
+          where: { type: "REFUND", status: "PENDING", stripeChargeId: parsed.id },
+          select: { id: true, bookingId: true, amount: true, reference: true },
+        });
+        if (!pendingRefund && parsed.payment_intent) {
+          const candidates = await prisma.payment.findMany({
+            where: {
+              type: "REFUND",
+              status: "PENDING",
+              stripePaymentIntentId: parsed.payment_intent,
+            },
+            select: { id: true, bookingId: true, amount: true, reference: true },
+            take: 2,
+          });
+          if (candidates.length === 1) {
+            pendingRefund = candidates[0] ?? null;
+          } else if (candidates.length > 1) {
+            logger.warn(
+              { refundId: parsed.id, paymentIntentId: parsed.payment_intent },
+              "stripe webhook: multiple PENDING refunds match this payment intent and none match the refund id — skipping settlement, reconcile manually",
+            );
+          }
+        }
+        if (pendingRefund) {
+          const matched = pendingRefund;
+          // Only the swap flow defers its amountPaid decrement to this
+          // webhook; every other creator settled amountPaid at creation.
+          const deferredDecrement = matched.reference.startsWith("SWAP-REF-");
+          await prisma.$transaction(async (tx) => {
+            const flipped = await tx.payment.updateMany({
+              where: { id: matched.id, status: "PENDING" },
+              data: { status: "SUCCEEDED", processedAt: new Date() },
+            });
+            if (flipped.count === 1 && deferredDecrement && matched.bookingId) {
+              const fresh = await tx.booking.findUnique({
+                where: { id: matched.bookingId },
+                select: { amountPaid: true },
+              });
+              if (fresh) {
+                await tx.booking.update({
+                  where: { id: matched.bookingId },
+                  data: {
+                    amountPaid: Math.max(
+                      0,
+                      Math.round(
+                        (Number(fresh.amountPaid) - Number(matched.amount)) * 100,
+                      ) / 100,
+                    ),
+                  },
+                });
+              }
+            }
+          });
+        }
+        return;
+      }
       if (refundStatus !== "failed" && refundStatus !== "canceled") {
-        // Most updates are succeeded/pending — no action needed.
+        // Remaining updates (pending, metadata, …) — no action needed.
         return;
       }
       const pi = parsed.payment_intent ?? null;
       if (!pi) return;
       // Flip the source payment back to SUCCEEDED and the REFUND row to
-      // FAILED so the ledger reflects reality.
+      // FAILED so the ledger reflects reality. PENDING REFUND rows (async
+      // refunds whose amountPaid effect is deferred to the succeeded branch
+      // above) fail here too — nothing to restore for them, the deferred
+      // decrement simply never happens.
       await prisma.payment.updateMany({
         where: {
           stripePaymentIntentId: pi,
@@ -993,9 +1070,9 @@ async function handleEvent(event: StripeWebhookEvent): Promise<void> {
       });
       await prisma.payment.updateMany({
         where: {
-          stripePaymentIntentId: pi,
           type: "REFUND",
-          status: "SUCCEEDED",
+          status: { in: ["SUCCEEDED", "PENDING"] },
+          OR: [{ stripePaymentIntentId: pi }, { stripeChargeId: parsed.id }],
         },
         data: { status: "FAILED", notes: `Async refund failure: ${failedReason ?? refundStatus}` },
       });

@@ -34,20 +34,53 @@ beforeEach(() => {
 });
 
 describe("swap-draft cleanup job", () => {
-  it("voids stale DRAFT swaps", async () => {
+  it("voids stale DRAFT swaps, freeing the 1:1 incident slot so a retry draft can re-link", async () => {
     mockedSwapFindMany.mockResolvedValue([
-      { id: "sw1", bookingId: "b1", swappedById: "u1", createdAt: new Date(0) },
+      {
+        id: "sw1",
+        bookingId: "b1",
+        swappedById: "u1",
+        createdAt: new Date(0),
+        reasonNotes: null,
+      },
     ]);
 
     const res = await runSwapDraftCleanup();
 
     expect(res).toEqual({ voidedDrafts: 1, completedTurnarounds: 0 });
+    // incidentId: null mirrors voidSwapDraft — without it the unique
+    // BookingSwap.incidentId relation on the voided row would still block
+    // startLossReplacementDraft's conflict check (it has no status filter).
     expect(mockedSwapUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "sw1" },
-        data: expect.objectContaining({ status: "VOIDED" }),
+        data: expect.objectContaining({
+          status: "VOIDED",
+          incidentId: null,
+          reasonNotes: expect.stringContaining("[AUTO-VOIDED"),
+        }),
       }),
     );
+  });
+
+  it("appends the auto-void marker to existing reasonNotes instead of overwriting them", async () => {
+    mockedSwapFindMany.mockResolvedValue([
+      {
+        id: "sw2",
+        bookingId: "b2",
+        swappedById: "u1",
+        createdAt: new Date(0),
+        reasonNotes: "Manager: front wheel written off in hit-and-run",
+      },
+    ]);
+
+    await runSwapDraftCleanup();
+
+    const call = mockedSwapUpdate.mock.calls.find(
+      (c) => (c[0] as { where: { id: string } }).where.id === "sw2",
+    );
+    const notes = (call![0] as { data: { reasonNotes: string } }).data.reasonNotes;
+    expect(notes).toMatch(/^Manager: front wheel written off in hit-and-run\n\n\[AUTO-VOIDED/);
   });
 
   it("completes expired turnaround work orders only — OPEN + CUSTOM + title prefix + lapsed window", async () => {

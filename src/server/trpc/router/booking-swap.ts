@@ -6,6 +6,7 @@ import type { Inspection, PrismaClient, SwapOrigin, SwapReason } from "@prisma/c
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
 import { isBookingOverlapViolation, isVehicleFree } from "@/server/services/availability";
+import { BALANCE_AFFECTING_CHARGE_TYPES } from "@/server/services/balance-due";
 import { quoteSwapDelta } from "@/server/services/pricing";
 import { BOOKING_RULES } from "@/lib/constants";
 import { TURNAROUND_WO_TITLE_PREFIX } from "@/server/jobs/swap-draft-cleanup";
@@ -878,12 +879,6 @@ export const bookingSwapRouter = createTRPCRouter({
       const useQuoted = !zeroDelta && (categoryChanged || specChange);
       let deltaAmount = useQuoted ? quote.deltaAmount : 0;
       let gstAmount = useQuoted ? quote.gstAmount : 0;
-      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
-        });
-      }
 
       if (input.priceAdjustmentOverride !== undefined) {
         if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
@@ -898,6 +893,19 @@ export const bookingSwapRouter = createTRPCRouter({
           // GST: still 1/11 of the absolute delta for display.
           gstAmount = toNumber(gstFromInclusive(Math.abs(deltaAmount)));
         }
+      }
+
+      // Same-category UPGRADE/DOWNGRADE with no price difference is a
+      // mislabelled LATERAL — but the guard runs on the EFFECTIVE delta,
+      // AFTER the manager override above: a manager forcing a non-zero
+      // delta on identically priced units is legitimate (goodwill charge or
+      // credit), so only staff-without-override (and a still-zero override)
+      // get steered to LATERAL.
+      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
+        });
       }
 
       // High-delta gate: require manager for any non-zero delta above
@@ -972,8 +980,19 @@ export const bookingSwapRouter = createTRPCRouter({
       let refundOffset = 0;
       let refundCash = 0;
       if (direction === "REFUND") {
+        // Only PENDING *raises* (balance-affecting charge types) belong to
+        // the capture sweep and shrink the unpaid base. PENDING credits owed
+        // TO the customer — MANUAL_CREDIT / REFUND rows, which this very
+        // flow creates via the >180d fallback — must not, or a booking with
+        // real debt plus a pending credit would over-refund cash here while
+        // leaving zombie balanceDue to be dunned.
         const pendingRaised = await ctx.prisma.payment.aggregate({
-          where: { bookingId: booking.id, status: "PENDING" },
+          where: {
+            bookingId: booking.id,
+            status: "PENDING",
+            type: { in: [...BALANCE_AFFECTING_CHARGE_TYPES] },
+            deletedAt: null,
+          },
           _sum: { amount: true },
         });
         const unpaidBase = Math.max(
@@ -1157,6 +1176,34 @@ export const bookingSwapRouter = createTRPCRouter({
               },
             },
           });
+        } else if (isLossReplacement) {
+          // The draft gate also admits vehicles with an open TOTAL_LOSS
+          // incident that haven't been decommissioned yet — those are still
+          // RENTED (or RESERVED) here, and once the booking re-points at the
+          // replacement nothing would ever move them again. Park them in
+          // IN_MAINTENANCE with a log directing staff to finish the
+          // write-off/theft confirmation. Vehicles already in a disposition
+          // status (STOLEN / WRITTEN_OFF / END_OF_LIFE) stay untouched.
+          const outgoingNow = await tx.vehicle.findUniqueOrThrow({
+            where: { id: outgoingVehicleId },
+            select: { status: true },
+          });
+          if (outgoingNow.status === "RENTED" || outgoingNow.status === "RESERVED") {
+            await tx.vehicle.update({
+              where: { id: outgoingVehicleId },
+              data: {
+                status: "IN_MAINTENANCE",
+                statusLog: {
+                  create: {
+                    previousStatus: outgoingNow.status,
+                    newStatus: "IN_MAINTENANCE",
+                    changedById: ctx.user.id,
+                    reason: `Loss replacement committed on ${booking.bookingReference} — awaiting write-off/theft confirmation; decommission this vehicle.`,
+                  },
+                },
+              },
+            });
+          }
         }
         await tx.vehicle.update({
           where: { id: incomingVehicle.id },
@@ -1393,20 +1440,57 @@ export const bookingSwapRouter = createTRPCRouter({
               }
             }
           }
-          // Ledger write-down: totals drop by the full delta (the reduced
-          // consideration), balanceDue by the offset slice, amountPaid only
-          // by cash that actually left via Stripe — the MANUAL_CREDIT slice
-          // decrements amountPaid at reconcileCreditTransfer instead. A
-          // FAILED Stripe refund leaves the ledger untouched; the manager
-          // notification after the transaction owns the follow-up.
+          // Refund settlement policy (the §29-75 DECREASE note after the
+          // transaction is gated on exactly the same condition, so the note
+          // and this write-down can never diverge):
+          //   - FAILED Stripe refund → NOTHING is booked: no write-down, no
+          //     note. The manager notification after the transaction owns
+          //     the follow-up.
+          //   - SUCCEEDED / PENDING / no-cash (pure offset or the >180d
+          //     MANUAL_CREDIT fallback) → the consideration reduction is
+          //     booked now: totals drop by the full delta, balanceDue by the
+          //     offset slice, and the note issues. amountPaid, however, only
+          //     moves when cash has actually settled: at commit for a
+          //     SUCCEEDED refund, at the charge.refund.updated webhook for a
+          //     PENDING one (the row stays PENDING until Stripe confirms),
+          //     and at reconcileCreditTransfer for the MANUAL_CREDIT slice.
           if (refundPaymentData?.status !== "FAILED") {
+            // refundOffset was computed from a PRE-Stripe read of balanceDue,
+            // and a concurrent capture during the Stripe round-trip may have
+            // shrunk the balance since — a blind decrement would overshoot
+            // (negative-clamp or eat unrelated fresh raises). Clamp against
+            // a fresh in-tx read. The Stripe cash amount is NOT adjustable
+            // here: that money already moved before the transaction opened,
+            // so only the offset half can react to the fresh read.
+            let offsetApplied = 0;
+            if (refundOffset > 0.005) {
+              const freshBooking = await tx.booking.findUniqueOrThrow({
+                where: { id: booking.id },
+                select: { balanceDue: true },
+              });
+              offsetApplied = Math.min(
+                refundOffset,
+                Math.max(0, toNumber(roundCents(aud(freshBooking.balanceDue)))),
+              );
+              if (offsetApplied < refundOffset - 0.005) {
+                logger.warn(
+                  {
+                    swapId: draft.id,
+                    bookingId: booking.id,
+                    refundOffset,
+                    offsetApplied,
+                  },
+                  "swap refund offset clamped — balanceDue shrank during the Stripe round-trip; reconcile the shortfall manually",
+                );
+              }
+            }
             await tx.booking.update({
               where: { id: booking.id },
               data: {
                 totalAmount: { decrement: absDelta },
                 gstAmount: { decrement: gstAmount },
-                ...(refundOffset > 0.005
-                  ? { balanceDue: { decrement: refundOffset } }
+                ...(offsetApplied > 0.005
+                  ? { balanceDue: { decrement: offsetApplied } }
                   : {}),
                 ...(refundPaymentData?.status === "SUCCEEDED"
                   ? { amountPaid: { decrement: refundCash } }
@@ -1484,8 +1568,13 @@ export const bookingSwapRouter = createTRPCRouter({
       // Issue an ATO §29-75 adjustment note for the swap pricing delta.
       // CHARGE → INCREASE adjustment; REFUND (via Stripe or credit) →
       // DECREASE adjustment. Zero-delta swaps (operational / fault) skip
-      // issuance — there's no consideration change.
-      if (result.direction !== "NONE" && result.absDelta > 0.005) {
+      // issuance — there's no consideration change. A REFUND whose Stripe
+      // call FAILED skips it too: the transaction booked no write-down for
+      // it (see the settlement-policy comment there), so issuing the note
+      // would document a consideration change the ledger never recorded.
+      const refundBooked =
+        result.direction !== "REFUND" || refundPaymentData?.status !== "FAILED";
+      if (result.direction !== "NONE" && result.absDelta > 0.005 && refundBooked) {
         try {
           const { tryIssueAdjustmentForBooking } = await import(
             "@/server/services/invoice-lifecycle"
@@ -1869,8 +1958,13 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
       return ctx.prisma.$transaction(async (tx) => {
-        const updated = await tx.payment.update({
-          where: { id: p.id },
+        // Status-guarded flip: the PENDING pre-check above is a plain read,
+        // so two concurrent reconcile calls could both pass it and
+        // double-decrement amountPaid. Gate the transition on the row still
+        // being PENDING and apply the ledger decrement only when this call
+        // won the flip.
+        const flipped = await tx.payment.updateMany({
+          where: { id: p.id, status: "PENDING" },
           data: {
             status: "SUCCEEDED",
             processedAt: new Date(),
@@ -1878,16 +1972,40 @@ export const bookingSwapRouter = createTRPCRouter({
             notes: `${p.notes ?? ""}\nReconciled via bank transfer ref ${input.reference} by ${ctx.user.id}.`,
           },
         });
-        // The credited cash has now actually left via bank transfer — the
-        // booking's paid-to-date drops by it here, not at swap commit
-        // (totals/balance were already written down in confirmSwap).
-        if (p.bookingId) {
-          await tx.booking.update({
-            where: { id: p.bookingId },
-            data: { amountPaid: { decrement: p.amount } },
+        if (flipped.count !== 1) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "This credit was already reconciled by another request.",
           });
         }
-        return updated;
+        // The credited cash has now actually left via bank transfer — the
+        // booking's paid-to-date drops by it here, not at swap commit
+        // (totals/balance were already written down in confirmSwap). Clamp
+        // at zero: historical pre-fix SWAP-CREDIT rows were committed under
+        // older semantics where amountPaid can already sit below the credit
+        // amount, and a blind decrement would drive it negative.
+        //
+        // No double-heal with scripts/reconcile-swap-money.ts: that script
+        // reconstructs totals/gst and marker-backfills amountPaid ONLY for
+        // SUCCEEDED `SWAP-REF-*` cash refunds — it never moves amountPaid
+        // for `SWAP-CREDIT-*` rows (see reconstructSwapNet), so this
+        // reconcile is the sole amountPaid mover for credits.
+        if (p.bookingId) {
+          const fresh = await tx.booking.findUniqueOrThrow({
+            where: { id: p.bookingId },
+            select: { amountPaid: true },
+          });
+          await tx.booking.update({
+            where: { id: p.bookingId },
+            data: {
+              amountPaid: Math.max(
+                0,
+                toNumber(roundCents(aud(fresh.amountPaid).minus(aud(p.amount)))),
+              ),
+            },
+          });
+        }
+        return tx.payment.findUniqueOrThrow({ where: { id: p.id } });
       });
     }),
 

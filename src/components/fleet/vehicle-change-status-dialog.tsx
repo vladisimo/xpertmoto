@@ -169,6 +169,7 @@ export function VehicleChangeStatusDialog({
     outcome !== null &&
     outcome.reassignment.reassigned.length === 0 &&
     outcome.reassignment.needsManual.length === 0 &&
+    outcome.reassignment.quotesUnassigned.length === 0 &&
     outcome.activeRentals.length === 0;
 
   return (
@@ -225,6 +226,25 @@ export function VehicleChangeStatusDialog({
                   </p>
                   <BookingLinkList
                     items={outcome.reassignment.needsManual.map((b) => ({
+                      id: b.bookingId,
+                      label: b.reference,
+                    }))}
+                  />
+                </div>
+              )}
+
+              {outcome.reassignment.quotesUnassigned.length > 0 && (
+                <div className="rounded-md border bg-muted p-3 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground">
+                    Quote{outcome.reassignment.quotesUnassigned.length === 1 ? "" : "s"} detached
+                    from this vehicle ({outcome.reassignment.quotesUnassigned.length})
+                  </p>
+                  <p className="mt-0.5 text-xs opacity-80">
+                    Unconfirmed quotes that referenced this vehicle were left unassigned — a
+                    vehicle will be allocated if they convert. No customer action needed.
+                  </p>
+                  <BookingLinkList
+                    items={outcome.reassignment.quotesUnassigned.map((b) => ({
                       id: b.bookingId,
                       label: b.reference,
                     }))}

@@ -125,6 +125,129 @@ describe("getDamageLiabilityUsed — aggregation and dedupe", () => {
     });
     expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(0);
   });
+
+  // ---- Area 5: unified damage surface ----
+
+  it("queries charges parented by return assessments OR incidents on the booking", async () => {
+    const prisma = makePrisma({});
+    await getDamageLiabilityUsed(prisma as never, "b1");
+    expect(prisma.damageCharge.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [{ returnAssessment: { bookingId: "b1" } }, { incident: { bookingId: "b1" } }],
+        }),
+      }),
+    );
+  });
+
+  it("counts post-unification incident slices exactly once — charge rows in, their INC-% payments deduped out", async () => {
+    // The incident-charge service writes BOTH a DamageCharge row and an
+    // INC-% Payment per slice. The charge rows carry the amounts; the
+    // capturedPaymentId link must knock the payments out of the fallback.
+    const prisma = makePrisma({
+      charges: [
+        // Bond slice (CAPTURED) + card slice (CONFIRMED) of one A$800 charge.
+        { amount: 500, capturedPaymentId: "pay-INC-2026-0042" },
+        { amount: 300, capturedPaymentId: "pay-INC-2026-0042-CARD" },
+      ],
+      payments: [
+        [
+          { id: "pay-INC-2026-0042", amount: 500 },
+          { id: "pay-INC-2026-0042-CARD", amount: 300 },
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(800);
+  });
+
+  // ---- Round-2 items 2b/3: quick check-in + settlement-console recoveries ----
+
+  it("counts quick check-in DMG-<timestamp> payments (no charge row) while deduping finalise's linked DMG-<chargeId> rows", async () => {
+    const prisma = makePrisma({
+      charges: [
+        // Finalise line: charge row carries the FULL 300 (bond share +
+        // residual); its residual card payment is linked → deduped.
+        { amount: 300, capturedPaymentId: "pay-dmg-c1" },
+      ],
+      payments: [
+        [
+          { id: "pay-dmg-c1", amount: 180 }, // DMG-c1 residual — linked, deduped
+          { id: "pay-dmg-ts", amount: 220 }, // DMG-1723600000000 quick check-in — counted
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(520); // 300 + 220
+  });
+
+  it("counts settlement-console bond captures (BOND-CAP + BOND-CAP-OVF payments, no charge rows)", async () => {
+    const prisma = makePrisma({
+      charges: [],
+      payments: [
+        [
+          { id: "pay-bond-cap", amount: 400 }, // BOND_CAPTURE BOND-CAP-<ts>
+          { id: "pay-bond-ovf", amount: 150 }, // DAMAGE_CHARGE BOND-CAP-OVF-<ts>
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(550);
+  });
+
+  it("recovery-payment query targets exactly the unlinked damage families (INC-/DMG-/BOND-CAP-OVF-/BOND-CAP-) and excludes finalise + no-show bond captures", async () => {
+    const prisma = makePrisma({});
+    await getDamageLiabilityUsed(prisma as never, "b1");
+    const firstCall = prisma.payment.findMany.mock.calls[0]?.[0] as {
+      where: Record<string, unknown>;
+    };
+    expect(firstCall.where).toMatchObject({
+      bookingId: "b1",
+      status: { in: ["PENDING", "SUCCEEDED"] },
+      deletedAt: null,
+      OR: [
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "INC-" } },
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "DMG-" } },
+        { type: "DAMAGE_CHARGE", reference: { startsWith: "BOND-CAP-OVF-" } },
+        {
+          type: "BOND_CAPTURE",
+          reference: { startsWith: "BOND-CAP-" },
+          NOT: [
+            { reference: { startsWith: "BOND-CAP-RET-" } },
+            { reference: { startsWith: "BOND-CAP-NOSHOW-" } },
+          ],
+        },
+      ],
+    });
+    // Refund netting covers BOND_CAPTURE parents too (a refunded bond
+    // capture frees the cap back up).
+    const refundCall = prisma.payment.findMany.mock.calls[1]?.[0] as {
+      where: Record<string, unknown>;
+    };
+    expect(refundCall.where).toMatchObject({
+      type: "REFUND",
+      parentPayment: { type: { in: ["DAMAGE_CHARGE", "BOND_CAPTURE"] } },
+    });
+  });
+
+  it("still counts historical pre-unification INC-% payments that have no charge row", async () => {
+    const prisma = makePrisma({
+      charges: [
+        // A post-unification incident slice…
+        { amount: 300, capturedPaymentId: "pay-INC-2026-0042" },
+      ],
+      payments: [
+        [
+          // …its own payment (deduped) plus a legacy incident charge from
+          // before the unification, which only exists as a Payment.
+          { id: "pay-INC-2026-0042", amount: 300 },
+          { id: "pay-INC-2025-0007", amount: 400 },
+        ],
+        [],
+      ],
+    });
+    expect(await getDamageLiabilityUsed(prisma as never, "b1")).toBe(700);
+  });
 });
 
 describe("applyExcessCap", () => {
