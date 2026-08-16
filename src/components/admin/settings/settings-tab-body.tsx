@@ -92,6 +92,7 @@ const TAB_DEFS: Record<SettingsTabKey, TabDef> = {
     description: "Tax settings, bond behaviour, and accepted payment methods.",
     fields: [
       { key: "tax.gstRate", label: "GST rate", type: "decimal", suffix: "ratio" },
+      { key: "insurance.defaultExcessAmount", label: "Default damage excess", type: "decimal", suffix: "A$" },
       { key: "payment.bondHoldDays", label: "Bond hold duration", type: "number", suffix: "days" },
       { key: "payment.bondReleaseDays", label: "Auto-release bond after", type: "number", suffix: "days" },
       { key: "payment.acceptCash", label: "Accept cash", type: "boolean" },

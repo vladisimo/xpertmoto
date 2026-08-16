@@ -16,6 +16,8 @@ import { BookingTabActivity } from "@/components/staff/booking-tab-activity";
 import { UnallocatedVehicleBanner } from "@/components/staff/unallocated-vehicle-banner";
 import { PaymentConsole } from "@/components/staff/payment-console";
 import { SwapVehicleButton } from "@/components/staff/swap-vehicle-button";
+import { ChangeCategoryDialog } from "@/components/staff/change-category-dialog";
+import { TerminateForLossDialog } from "@/components/staff/terminate-for-loss-dialog";
 import { BookingSwapHistory } from "@/components/staff/booking-swap-history";
 import { BookingHeaderActions } from "@/components/staff/booking-header-actions";
 import { InvoiceResendButton } from "@/components/staff/invoice-resend-button";
@@ -155,6 +157,22 @@ export default async function StaffBookingDetail({
     0,
   );
 
+  // Loss-replacement entry (Area 2): the assigned vehicle counts as lost when
+  // it carries a disposition status or an open TOTAL_LOSS incident — mirrors
+  // the server-side gate in bookingSwap.startLossReplacementDraft.
+  const openTotalLossIncident = b.incidents.find(
+    (i) =>
+      i.vehicleId === b.vehicleId &&
+      i.severity === "TOTAL_LOSS" &&
+      i.status !== "RESOLVED" &&
+      i.status !== "CLOSED" &&
+      !i.deletedAt,
+  );
+  const vehicleLost =
+    !!b.vehicle &&
+    (["STOLEN", "WRITTEN_OFF", "END_OF_LIFE"].includes(b.vehicle.status) ||
+      !!openTotalLossIncident);
+
   return (
     <PageShell>
       <PageHeader
@@ -202,6 +220,27 @@ export default async function StaffBookingDetail({
           status={b.status}
           hasVehicle={!!b.vehicleId}
           hasPendingSwap={b.swaps.length > 0}
+          vehicleLost={vehicleLost}
+          canManage={canFetchAuthoritative}
+          lossIncidentId={openTotalLossIncident?.id}
+        />
+        <ChangeCategoryDialog
+          bookingId={b.id}
+          status={b.status}
+          currentCategoryId={b.categoryId}
+          currentCategoryName={b.category.name}
+          canManage={canFetchAuthoritative}
+        />
+        <TerminateForLossDialog
+          bookingId={b.id}
+          status={b.status}
+          canTerminate={canFetchAuthoritative}
+          incidents={b.incidents.map((i) => ({
+            id: i.id,
+            incidentNumber: i.incidentNumber,
+            type: i.type,
+            customerLiable: i.customerLiable,
+          }))}
         />
       </div>
 

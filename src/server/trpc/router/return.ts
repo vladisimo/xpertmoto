@@ -14,6 +14,11 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
 import { logger } from "@/lib/logger";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
 import { getBranding } from "@/lib/branding";
@@ -145,14 +150,30 @@ export const returnRouter = createTRPCRouter({
 
       // Link the charge to the labelled inspection issue it came from (if any),
       // and default the evidence photos to that issue's photo so the charge
-      // points at the picture the damage was identified against.
+      // points at the picture the damage was identified against. The issue
+      // may belong to this return's inspection, or to a COMPLETED SWAP_OUT
+      // inspection on the same booking — damage pinned when a vehicle was
+      // swapped off mid-hire is still this hire's damage and is chargeable
+      // at check-in. Issues from other bookings stay rejected.
       let derivedPhotoUrls = input.photoUrls ?? [];
       if (input.inspectionIssueId) {
         const issue = await ctx.prisma.inspectionIssue.findUnique({
           where: { id: input.inspectionIssueId },
-          select: { inspectionId: true, inspectionPhoto: { select: { url: true } } },
+          select: {
+            inspectionId: true,
+            inspectionPhoto: { select: { url: true } },
+            inspection: { select: { bookingId: true, purpose: true, status: true } },
+          },
         });
-        if (!issue || issue.inspectionId !== assessment.inspectionId) {
+        const sameBookingSwapOut =
+          !!issue &&
+          issue.inspection.purpose === "SWAP_OUT" &&
+          issue.inspection.status === "COMPLETED" &&
+          issue.inspection.bookingId === assessment.bookingId;
+        if (
+          !issue ||
+          (issue.inspectionId !== assessment.inspectionId && !sameBookingSwapOut)
+        ) {
           throw new TRPCError({
             code: "BAD_REQUEST",
             message: "Issue does not belong to this return inspection",
@@ -178,6 +199,36 @@ export const returnRouter = createTRPCRouter({
       };
 
       if (input.chargeId) {
+        // Ownership guards (mirror of removeDamageCharge): the update must
+        // not be able to reach across assessments, rewrite incident-parented
+        // charges, or reset an already-billed line back to PROVISIONAL.
+        const existing = await ctx.prisma.damageCharge.findUnique({
+          where: { id: input.chargeId },
+          select: { id: true, status: true, returnAssessmentId: true },
+        });
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Charge not found" });
+        }
+        if (!existing.returnAssessmentId) {
+          // Unified damage surface: incident-parented charges are managed via
+          // the incident detail flow, never the return wizard.
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "This charge belongs to an incident — manage it from the incident detail page.",
+          });
+        }
+        if (existing.returnAssessmentId !== assessment.id) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Charge does not belong to this assessment",
+          });
+        }
+        if (existing.status !== "PROVISIONAL") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Only provisional charges can be edited",
+          });
+        }
         return ctx.prisma.damageCharge.update({
           where: { id: input.chargeId },
           data: base,
@@ -234,6 +285,14 @@ export const returnRouter = createTRPCRouter({
         where: { id: input.chargeId },
         include: { returnAssessment: true },
       });
+      if (!charge.returnAssessment) {
+        // Unified damage surface: incident-parented charges are managed via
+        // the incident detail flow, never the return wizard.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — manage it from the incident detail page.",
+        });
+      }
       captureBookingId(ctx, charge.returnAssessment.bookingId);
       if (charge.returnAssessment.status !== "DRAFT") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Assessment sealed" });
@@ -403,7 +462,9 @@ export const returnRouter = createTRPCRouter({
           },
           inspection: { include: { photos: true, issues: { include: { inspectionPhoto: true, damageTariff: true } } } },
           staff: true,
-          damageCharges: { include: { damageTariff: true } },
+          // Creation order matters: the excess cap consumes headroom line by
+          // line, so the clamp must be deterministic (and match the UI).
+          damageCharges: { include: { damageTariff: true }, orderBy: { createdAt: "asc" } },
         },
       });
       if (assessment.status !== "DRAFT") {
@@ -470,12 +531,52 @@ export const returnRouter = createTRPCRouter({
         Math.round((fees.lateFee - Number(priorLateRaised._sum.amount ?? 0)) * 100) / 100,
       );
 
+      const r2 = (x: number) => Math.round(x * 100) / 100;
+
+      // ---- Excess cap (Area 1). The customer's insurance excess is a
+      // PER-HIRE AGGREGATE ceiling on damage recovery: incident charges,
+      // standard damage lines and quote close-outs all draw on the same cap.
+      // Late / fuel / cleaning fees sit OUTSIDE it. Clamp STANDARD lines in
+      // creation order (later lines reduce to the remaining headroom, then
+      // zero), then clamp QUOTE_PENDING acknowledgements to what's left.
+      const bookingExcess = await getBookingExcess(ctx.prisma, assessment.bookingId);
+      const liabilityUsedBefore = await getDamageLiabilityUsed(ctx.prisma, assessment.bookingId);
+      const initialCapRemaining = Math.max(0, r2(bookingExcess.excess - liabilityUsedBefore));
+      let liabilityUsed = liabilityUsedBefore;
+      const chargedAmountById = new Map<string, number>();
+      const cappedStandardLines: Array<{ id: string; description: string; preCap: number; charged: number }> = [];
+      for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
+        const preCap = Number(c.amount);
+        const { chargeable, cappedBy } = applyExcessCap({
+          proposed: preCap,
+          used: liabilityUsed,
+          excess: bookingExcess.excess,
+        });
+        chargedAmountById.set(c.id, chargeable);
+        liabilityUsed = r2(liabilityUsed + chargeable);
+        if (cappedBy > 0) {
+          cappedStandardLines.push({ id: c.id, description: c.description, preCap, charged: chargeable });
+        }
+      }
+      let quoteHeadroom = Math.max(0, r2(bookingExcess.excess - liabilityUsed));
+      const quoteCapById = new Map<string, number>();
+      const cappedQuoteLines: Array<{ id: string; description: string; preCap: number; cap: number }> = [];
+      for (const c of assessment.damageCharges.filter((x) => x.resolution === "QUOTE_PENDING")) {
+        const preCap = Number(c.quoteCapAmount ?? 0);
+        const clamped = r2(Math.min(preCap, quoteHeadroom));
+        quoteCapById.set(c.id, clamped);
+        quoteHeadroom = r2(quoteHeadroom - clamped);
+        if (clamped < preCap) {
+          cappedQuoteLines.push({ id: c.id, description: c.description, preCap, cap: clamped });
+        }
+      }
+
       const standardTotal = assessment.damageCharges
         .filter((c) => c.resolution === "STANDARD")
-        .reduce((acc, c) => acc + Number(c.amount), 0);
+        .reduce((acc, c) => acc + (chargedAmountById.get(c.id) ?? Number(c.amount)), 0);
       const pendingCapTotal = assessment.damageCharges
         .filter((c) => c.resolution === "QUOTE_PENDING")
-        .reduce((acc, c) => acc + Number(c.quoteCapAmount ?? 0), 0);
+        .reduce((acc, c) => acc + (quoteCapById.get(c.id) ?? Number(c.quoteCapAmount ?? 0)), 0);
       const cleaningFee = Math.round((input.cleaningFee ?? 0) * 100) / 100;
       const totalDueNow =
         Math.round(
@@ -508,7 +609,6 @@ export const returnRouter = createTRPCRouter({
       // is already authorised, so unlike a fresh card charge it can't
       // decline). Read the LEDGER, not booking.bondAmount — part-captured or
       // released holds must not be re-counted.
-      const r2 = (x: number) => Math.round(x * 100) / 100;
       const ledger = await ctx.prisma.bondLedger.findUnique({
         where: { bookingId: assessment.bookingId },
       });
@@ -620,8 +720,15 @@ export const returnRouter = createTRPCRouter({
           description: c.description,
           severity: c.severity,
           resolution: c.resolution,
-          amount: Number(c.amount),
-          quoteCapAmount: c.quoteCapAmount ? Number(c.quoteCapAmount) : null,
+          // The signed PDF states what is ACTUALLY charged / acknowledged —
+          // post-excess-cap figures, not the raw tariff amounts.
+          amount: chargedAmountById.get(c.id) ?? Number(c.amount),
+          quoteCapAmount:
+            c.resolution === "QUOTE_PENDING"
+              ? (quoteCapById.get(c.id) ?? (c.quoteCapAmount ? Number(c.quoteCapAmount) : null))
+              : c.quoteCapAmount
+                ? Number(c.quoteCapAmount)
+                : null,
           tariffName: c.damageTariff?.name ?? null,
           photoUrl: (c.inspectionIssueId ? issuePhotoById.get(c.inspectionIssueId) : null) ?? c.photoUrls[0] ?? null,
         })),
@@ -759,7 +866,10 @@ export const returnRouter = createTRPCRouter({
         };
 
         for (const c of assessment.damageCharges.filter((x) => x.resolution === "STANDARD")) {
-          const amountNumber = Number(c.amount);
+          // Post-excess-cap figure — the DamageCharge row records what was
+          // actually charged (getDamageLiabilityUsed sums these), while the
+          // EXCESS_CAP_APPLIED audit keeps the pre-cap trail.
+          const amountNumber = chargedAmountById.get(c.id) ?? Number(c.amount);
           if (amountNumber > 0) {
             const { bondShare, residual } = takeFromBond(
               amountNumber,
@@ -785,6 +895,7 @@ export const returnRouter = createTRPCRouter({
               await tx.damageCharge.update({
                 where: { id: c.id },
                 data: {
+                  amount: amountNumber,
                   status: "CONFIRMED",
                   capturedPaymentId: payment.id,
                   bondDeductionCents: bondShare > 0 ? Math.round(bondShare * 100) : null,
@@ -797,6 +908,7 @@ export const returnRouter = createTRPCRouter({
               await tx.damageCharge.update({
                 where: { id: c.id },
                 data: {
+                  amount: amountNumber,
                   status: "CAPTURED",
                   capturedPaymentId: bondCapturePaymentId,
                   bondDeductionCents: Math.round(bondShare * 100),
@@ -806,15 +918,60 @@ export const returnRouter = createTRPCRouter({
               });
             }
           } else {
+            // Nothing chargeable on this line. CONFIRMED + capturedPaymentId
+            // null reads as "raised, uncollected" to bond-auto-release and
+            // would block the bond release forever (a zero-excess premium
+            // tier hits this on its first damage line) — land the terminal
+            // WAIVED shape instead, same as damage-quote-closeout's
+            // zero-bill path. STANDARD lines validate amount > 0 at upsert,
+            // so a $0 here is almost always the excess cap; distinguish the
+            // (historical) zero-amount case on the staff note.
+            const waiveReason =
+              Number(c.amount) > 0
+                ? `Waived at return — insurance excess cap exhausted (excess A$${bookingExcess.excess.toFixed(2)}, A$${liabilityUsedBefore.toFixed(2)} already recovered).`
+                : "Waived at return — zero-amount line (nothing to charge).";
             await tx.damageCharge.update({
               where: { id: c.id },
               data: {
-                status: "CONFIRMED",
+                amount: 0,
+                status: "WAIVED",
+                resolution: "WAIVED",
+                staffNote: c.staffNote ? `${c.staffNote}\n${waiveReason}` : waiveReason,
                 resolvedAt: new Date(),
                 resolvedById: ctx.user.id,
               },
             });
           }
+        }
+        // Excess-capped QUOTE_PENDING acknowledgements: persist the clamped
+        // cap so close-out (which bills min(final, quoteCapAmount, headroom))
+        // can never exceed what the excess allows.
+        for (const q of cappedQuoteLines) {
+          await tx.damageCharge.update({
+            where: { id: q.id },
+            data: { quoteCapAmount: q.cap },
+          });
+        }
+        if (cappedStandardLines.length > 0 || cappedQuoteLines.length > 0) {
+          const parts = [
+            ...cappedStandardLines.map(
+              (l) => `${l.description.slice(0, 60)}: A$${l.preCap.toFixed(2)} → A$${l.charged.toFixed(2)}`,
+            ),
+            ...cappedQuoteLines.map(
+              (l) => `${l.description.slice(0, 60)} (quote cap): A$${l.preCap.toFixed(2)} → A$${l.cap.toFixed(2)}`,
+            ),
+          ];
+          await tx.bookingNote.create({
+            data: {
+              bookingId: assessment.bookingId,
+              userId: ctx.user.id,
+              note:
+                `Insurance excess cap applied at return (excess A$${bookingExcess.excess.toFixed(2)}${
+                  bookingExcess.tierName ? ` — ${bookingExcess.tierName}` : ""
+                }, A$${liabilityUsedBefore.toFixed(2)} already used): ${parts.join("; ")}`,
+              isInternal: true,
+            },
+          });
         }
         await tx.damageCharge.updateMany({
           where: { returnAssessmentId: assessment.id, resolution: { in: ["WAIVED", "WARRANTY"] } },
@@ -954,6 +1111,24 @@ export const returnRouter = createTRPCRouter({
         });
       });
 
+      if (cappedStandardLines.length > 0 || cappedQuoteLines.length > 0) {
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "ReturnAssessment",
+          entityId: assessment.id,
+          newData: {
+            bookingId: assessment.bookingId,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            tierName: bookingExcess.tierName,
+            usedBefore: liabilityUsedBefore,
+            capRemainingBefore: initialCapRemaining,
+            cappedStandardLines,
+            cappedQuoteLines,
+          },
+        });
+      }
       await writeAudit(ctx.prisma, {
         userId: ctx.user.id,
         action: "RETURN_ASSESSMENT_SIGNED",
@@ -988,7 +1163,12 @@ export const returnRouter = createTRPCRouter({
   byBooking: staffProcedure.input(z.object({ bookingId: z.string() })).query(({ ctx, input }) =>
     ctx.prisma.returnAssessment.findUnique({
       where: { bookingId: input.bookingId },
-      include: { damageCharges: { include: { damageTariff: true } }, staff: { select: { firstName: true, lastName: true } } },
+      include: {
+        // Creation order — the excess cap consumes headroom line by line at
+        // finalise, so the assess page must project the clamp the same way.
+        damageCharges: { include: { damageTariff: true }, orderBy: { createdAt: "asc" } },
+        staff: { select: { firstName: true, lastName: true } },
+      },
     }),
   ),
 
@@ -1041,6 +1221,15 @@ export const returnRouter = createTRPCRouter({
         },
       });
 
+      if (!charge.returnAssessment) {
+        // Unified damage surface: confirmCharge stays assessment-parented
+        // only. Incident-parented charges are raised (already CONFIRMED /
+        // CAPTURED with their Payment) by the incident-charge service.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — it is billed via the incident charge flow.",
+        });
+      }
       if (charge.returnAssessment.status !== "SIGNED") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -1100,6 +1289,64 @@ export const returnRouter = createTRPCRouter({
       }
       const bookingId = charge.returnAssessment.bookingId;
       const bookingReference = charge.returnAssessment.booking?.bookingReference ?? charge.id;
+
+      // Excess cap (per-hire aggregate) — same clamp finalise applies to its
+      // STANDARD lines: the customer's insurance excess is the ceiling on
+      // TOTAL damage recovery for the hire, and this PROVISIONAL→CONFIRMED
+      // billing path must not raise past the remaining headroom. The charge
+      // is still PROVISIONAL here, so getDamageLiabilityUsed does not count
+      // it yet.
+      const bookingExcess = await getBookingExcess(ctx.prisma, bookingId);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, bookingId);
+      const capResult = applyExcessCap({
+        proposed: amountNumber,
+        used: liabilityUsed,
+        excess: bookingExcess.excess,
+      });
+      const chargeableAmount = capResult.chargeable;
+      if (chargeableAmount <= 0) {
+        // Cap exhausted → nothing may be billed. Land the terminal WAIVED
+        // shape (same as finalise / quote close-out zero paths) so
+        // bond-auto-release's open-damage gate doesn't read this line as
+        // "raised, uncollected" and block the bond forever.
+        const waiveReason = `Waived at confirm — insurance excess cap exhausted (excess A$${bookingExcess.excess.toFixed(2)}, A$${liabilityUsed.toFixed(2)} already recovered).`;
+        const updated = await ctx.prisma.damageCharge.update({
+          where: { id: charge.id },
+          data: {
+            amount: 0,
+            status: "WAIVED",
+            resolution: "WAIVED",
+            staffNote: charge.staffNote ? `${charge.staffNote}\n${waiveReason}` : waiveReason,
+            resolvedById: ctx.user.id,
+            resolvedAt: new Date(),
+          },
+        });
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "DamageCharge",
+          entityId: charge.id,
+          previousData: { status: charge.status, amount: amountNumber },
+          newData: {
+            bookingId,
+            status: "WAIVED",
+            preCapAmount: amountNumber,
+            charged: 0,
+            cappedBy: capResult.cappedBy,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            usedBefore: liabilityUsed,
+          },
+        });
+        writeBookingAuditAsync(ctx.prisma, bookingId, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          reqId: ctx.reqId,
+          newData: { damageChargeId: charge.id, preCapAmount: amountNumber, charged: 0 },
+        });
+        return { damageCharge: updated, paymentId: null };
+      }
+
       // Reference is unique — a single DamageCharge can only spawn one
       // Payment by construction (second confirm hits the idempotent branch
       // above before we get here).
@@ -1118,7 +1365,7 @@ export const returnRouter = createTRPCRouter({
               bookingId,
               type: "DAMAGE_CHARGE",
               method: "STRIPE",
-              amount: charge.amount,
+              amount: chargeableAmount,
               status: "PENDING",
               notes: `DamageCharge ${charge.id} on booking ${bookingReference}: ${charge.description.slice(0, 140)}`,
               processedById: ctx.user.id,
@@ -1131,12 +1378,15 @@ export const returnRouter = createTRPCRouter({
         if (!existing && bookingId) {
           await tx.booking.update({
             where: { id: bookingId },
-            data: { balanceDue: { increment: amountNumber } },
+            data: { balanceDue: { increment: chargeableAmount } },
           });
         }
         const damageCharge = await tx.damageCharge.update({
           where: { id: charge.id },
           data: {
+            // Post-cap figure — the row records what is actually billed so
+            // the per-hire "used" aggregate stays truthful.
+            amount: chargeableAmount,
             status: "CONFIRMED",
             capturedPaymentId: payment.id,
             resolvedById: ctx.user.id,
@@ -1145,6 +1395,24 @@ export const returnRouter = createTRPCRouter({
         });
         return { payment, damageCharge };
       });
+
+      if (capResult.cappedBy > 0) {
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "DamageCharge",
+          entityId: charge.id,
+          newData: {
+            bookingId,
+            preCapAmount: amountNumber,
+            charged: chargeableAmount,
+            cappedBy: capResult.cappedBy,
+            excess: bookingExcess.excess,
+            excessSource: bookingExcess.source,
+            usedBefore: liabilityUsed,
+          },
+        });
+      }
 
       await writeAudit(ctx.prisma, {
         userId: ctx.user.id,
@@ -1156,7 +1424,7 @@ export const returnRouter = createTRPCRouter({
           status: "CONFIRMED",
           capturedPaymentId: payment.id,
           paymentReference: payment.reference,
-          amount: amountNumber,
+          amount: chargeableAmount,
         },
       });
       const confirmedAudit = {
@@ -1169,7 +1437,7 @@ export const returnRouter = createTRPCRouter({
           bookingReference,
           paymentId: payment.id,
           paymentReference: payment.reference,
-          amount: amountNumber,
+          amount: chargeableAmount,
         },
       };
       writeCustomerAuditAsync(ctx.prisma, customerId, confirmedAudit);
@@ -1208,6 +1476,14 @@ export const returnRouter = createTRPCRouter({
           },
         },
       });
+      if (!charge.returnAssessment) {
+        // Unified damage surface: incident-parented charges never go through
+        // the quote close-out — they're billed by the incident-charge service.
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This charge belongs to an incident — it is billed via the incident charge flow.",
+        });
+      }
       captureBookingId(ctx, charge.returnAssessment.bookingId);
       if (charge.resolution !== "QUOTE_PENDING") {
         throw new TRPCError({
@@ -1235,10 +1511,23 @@ export const returnRouter = createTRPCRouter({
         });
       }
       const cap = Number(charge.quoteCapAmount ?? 0);
-      // The signed acknowledgement is the customer's liability ceiling.
-      const billAmount = Math.round(Math.min(input.finalAmount, cap > 0 ? cap : input.finalAmount) * 100) / 100;
       const bookingId = charge.returnAssessment.bookingId;
       const bookingReference = charge.returnAssessment.booking?.bookingReference ?? charge.id;
+      // Two ceilings apply: the signed acknowledgement (quoteCapAmount) and
+      // the hire's remaining insurance-excess headroom (per-hire aggregate —
+      // standard lines and incident charges already drew on it).
+      const ackCapped = Math.round(Math.min(input.finalAmount, cap > 0 ? cap : input.finalAmount) * 100) / 100;
+      const bookingExcess = await getBookingExcess(ctx.prisma, bookingId);
+      const liabilityUsed = await getDamageLiabilityUsed(ctx.prisma, bookingId);
+      const {
+        chargeable: billAmount,
+        cappedBy: excessCappedBy,
+        capRemaining,
+      } = applyExcessCap({
+        proposed: ackCapped,
+        used: liabilityUsed,
+        excess: bookingExcess.excess,
+      });
 
       const { payment, damageCharge } = await ctx.prisma.$transaction(async (tx) => {
         let payment: { id: string; reference: string } | null = null;
@@ -1287,6 +1576,10 @@ export const returnRouter = createTRPCRouter({
           billedAmount: billAmount,
           finalQuoteAmount: input.finalAmount,
           paymentId: payment?.id ?? null,
+          excess: bookingExcess.excess,
+          excessUsedBefore: liabilityUsed,
+          excessCapRemaining: capRemaining,
+          excessCappedBy,
         },
       });
       writeBookingAuditAsync(ctx.prisma, bookingId, {

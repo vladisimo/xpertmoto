@@ -286,6 +286,10 @@ enum SwapReason {
   MECHANICAL_FAULT
   ACCIDENT_DAMAGE
   OPERATIONAL
+  /// Replacement after the outgoing vehicle was lost (stolen / written off /
+  /// destroyed) — zero price delta, outgoing inspection waived, outgoing
+  /// vehicle keeps its disposition status.
+  LOSS_REPLACEMENT
 }
 
 /// Reporting channel through which the swap need was raised. Audit-only;
@@ -699,6 +703,8 @@ model User {
   inspections              Inspection[]
   reportedIncidents        Incident[]             @relation("IncidentReportedBy")
   assignedIncidents        Incident[]             @relation("IncidentAssignedTo")
+  incidentExcessVoids      Incident[]             @relation("IncidentExcessVoidedBy")
+  bookingTerminations      BookingTermination[]   @relation("BookingTerminationTerminatedBy")
   incidentNotes            IncidentNote[]
   reportedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderReportedBy")
   assignedWorkOrders       MaintenanceWorkOrder[] @relation("WorkOrderAssignedTo")
@@ -1668,6 +1674,8 @@ model Booking {
   // Mid-rental vehicle swap events. DRAFT rows created when staff enters
   // the swap wizard; COMMITTED on confirm; VOIDED on abandonment.
   swaps                          BookingSwap[]
+  // Set when the hire ended early because the vehicle was lost in service.
+  termination                    BookingTermination?
 
   @@index([status])
   @@index([customerId])
@@ -1739,6 +1747,10 @@ model BookingInsurance {
   insuranceOptionId String
   dailyRate         Decimal  @db.Decimal(10, 2)
   totalPrice        Decimal  @db.Decimal(10, 2)
+  /// Excess (customer damage-liability cap) frozen at attach time. The live
+  /// InsuranceOption.excessAmount can be re-priced by admins later — this
+  /// snapshot is what the customer actually agreed to for THIS hire.
+  excessAmountSnapshot Decimal? @db.Decimal(12, 2)
   // Lever 7: tracks where an insurance attach came from. WIZARD for
   // booking-flow selection; the others are mid-/pre-rental upsells.
   addedAt           DateTime @default(now())
@@ -1988,6 +2000,11 @@ enum AdjustmentReason {
   CANCELLATION
   REFUND
   MANUAL
+  /// Hire ended early because the vehicle was lost in service (write-off /
+  /// theft / destruction) — invoice written down to the consumed portion.
+  TERMINATION
+  /// Pre-pickup category amendment (upgrade/downgrade) repriced the hire.
+  AMENDMENT
   OTHER
 }
 
@@ -2144,6 +2161,64 @@ enum SwapPriceDirection {
   NONE
   CHARGE
   REFUND
+}
+
+/// Why a hire was terminated early on a loss event. WRITTEN_OFF/STOLEN echo
+/// the vehicle's disposition status; DESTROYED covers a total loss not yet
+/// formalised as a write-off (e.g. awaiting insurer confirmation).
+enum LossTerminationCause {
+  WRITTEN_OFF
+  STOLEN
+  DESTROYED
+  OTHER
+}
+
+/// Settlement of the unused prepaid days. REFUND back to the payment method
+/// (company-side loss default), CREDIT as a gift card (customer opt-in),
+/// FORFEIT retained (customer-caused loss, e.g. theft through negligence).
+enum TerminationRefundMode {
+  REFUND
+  CREDIT
+  FORFEIT
+}
+
+enum TerminationBondDisposition {
+  RELEASED
+  HELD_FOR_CLAIM
+  CAPTURED_VIA_INCIDENT
+}
+
+/// Terminal record for a hire ended early because the vehicle was lost.
+/// The booking itself lands COMPLETED (recordBookingCompletion runs with the
+/// post-write-down totals); this row carries the loss semantics, settlement
+/// and bond disposition for audit, reporting and the claims workflow.
+model BookingTermination {
+  id                  String                     @id @default(cuid())
+  bookingId           String                     @unique
+  incidentId          String?
+  cause               LossTerminationCause
+  lossAt              DateTime                   @db.Timestamptz
+  unusedDays          Int
+  refundMode          TerminationRefundMode
+  refundAmount        Decimal                    @default(0) @db.Decimal(12, 2)
+  /// Set when refundMode = CREDIT. Plain reference (GiftCard.purchasedById
+  /// precedent) — the gift-card service owns the card's lifecycle.
+  creditGiftCardId    String?
+  waivedLateFeeAmount Decimal                    @default(0) @db.Decimal(12, 2)
+  bondDisposition     TerminationBondDisposition
+  notes               String?
+  terminatedById      String
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+
+  booking      Booking   @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  incident     Incident? @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  terminatedBy User      @relation("BookingTerminationTerminatedBy", fields: [terminatedById], references: [id], onDelete: Restrict)
+
+  @@index([incidentId])
+  @@index([terminatedById])
+  @@index([cause])
+  @@index([creditGiftCardId])
 }
 
 // ============================================================================
@@ -2402,6 +2477,15 @@ model Incident {
   actualDamageCost     Decimal?         @db.Decimal(10, 2)
   customerLiable       Boolean          @default(false)
   customerChargeAmount Decimal?         @db.Decimal(10, 2)
+  /// Last known GPS fix for the vehicle at incident creation (theft flow):
+  /// { lat, lng, speedKph, ignitionOn, timestamp, deviceId }. Write-once.
+  gpsSnapshot          Json?
+  /// Manager-only: lifts the insurance excess cap for charges raised from
+  /// this incident (e.g. agreement §6 grounds — negligence, prohibited use).
+  excessVoided         Boolean          @default(false)
+  excessVoidReason     String?
+  excessVoidedById     String?
+  excessVoidedAt       DateTime?        @db.Timestamptz
   thirdPartyInvolved   Boolean          @default(false)
   thirdPartyDetails    Json?
   resolution           String?
@@ -2414,11 +2498,14 @@ model Incident {
   booking        Booking?           @relation(fields: [bookingId], references: [id], onDelete: SetNull)
   reportedBy     User?              @relation("IncidentReportedBy", fields: [reportedById], references: [id], onDelete: SetNull)
   assignedTo     User?              @relation("IncidentAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  excessVoidedBy User?              @relation("IncidentExcessVoidedBy", fields: [excessVoidedById], references: [id], onDelete: SetNull)
   photos         IncidentPhoto[]
   documents      IncidentDocument[]
   notes          IncidentNote[]
   supportTickets SupportTicket[]
   bookingSwap    BookingSwap?
+  terminations   BookingTermination[]
+  damageCharges  DamageCharge[]
 
   @@index([vehicleId, createdAt(sort: Desc)])
   @@index([bookingId, status])
@@ -2427,6 +2514,7 @@ model Incident {
   @@index([reportedById])
   @@index([assignedToId])
   @@index([customerId])
+  @@index([excessVoidedById])
   @@index([deletedAt])
 }
 
@@ -3108,8 +3196,11 @@ model DamageTariff {
 
 model DamageCharge {
   id                 String           @id @default(cuid())
-  returnAssessmentId String
-  inspectionId       String
+  /// Nullable since the damage surface unified: a charge is parented by a
+  /// return assessment OR an incident (DB CHECK enforces at least one).
+  returnAssessmentId String?
+  inspectionId       String?
+  incidentId         String?
   damageTariffId     String?
   inspectionIssueId  String?
   description        String
@@ -3132,8 +3223,9 @@ model DamageCharge {
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 
-  returnAssessment ReturnAssessment      @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
-  inspection       Inspection            @relation(fields: [inspectionId], references: [id])
+  returnAssessment ReturnAssessment?     @relation(fields: [returnAssessmentId], references: [id], onDelete: Cascade)
+  inspection       Inspection?           @relation(fields: [inspectionId], references: [id])
+  incident         Incident?             @relation(fields: [incidentId], references: [id], onDelete: SetNull)
   damageTariff     DamageTariff?         @relation(fields: [damageTariffId], references: [id])
   inspectionIssue  InspectionIssue?      @relation(fields: [inspectionIssueId], references: [id], onDelete: SetNull)
   workOrder        MaintenanceWorkOrder? @relation(fields: [workOrderId], references: [id])
@@ -3145,6 +3237,7 @@ model DamageCharge {
   @@index([workOrderId])
   @@index([inspectionId])
   @@index([inspectionIssueId])
+  @@index([incidentId])
   @@index([createdById])
   @@index([resolvedById])
 }

@@ -60,6 +60,16 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+const loggerWarn = vi.fn();
+vi.mock("@/lib/logger", () => ({
+  logger: {
+    info: vi.fn(),
+    warn: (...args: unknown[]) => loggerWarn(...args),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
 vi.mock("@/server/services/notification-sender", () => ({
   sendNotification: vi.fn().mockResolvedValue({ results: [], logIds: [], notificationIds: [] }),
 }));
@@ -121,6 +131,7 @@ beforeEach(() => {
   bondFindFirst.mockClear();
   bondFindFirst.mockResolvedValue(null);
   trackServerMock.mockClear();
+  loggerWarn.mockClear();
   confirmBookingPaymentMock.mockClear();
   confirmBookingPaymentMock.mockResolvedValue({
     booking: { id: "b1" },
@@ -436,6 +447,146 @@ describe("Stripe webhook", () => {
         distinctId: "cust_1",
         groups: { depot: "brisbane-cbd" },
       }),
+    );
+  });
+});
+
+describe("Stripe webhook — charge.refund.updated deferred settlement", () => {
+  function refundUpdatedEvent(object: Record<string, unknown>) {
+    return {
+      id: "evt_refund_upd",
+      type: "charge.refund.updated",
+      data: { object },
+    };
+  }
+
+  it("flips a cancellation-created PENDING refund WITHOUT a second amountPaid decrement", async () => {
+    // booking-cancellation.ts decrements amountPaid at creation even for
+    // PENDING rows (any Stripe-accepted card slice counts as settled), so
+    // the webhook must only flip the status for non-SWAP-REF rows.
+    paymentFindFirst.mockResolvedValueOnce({
+      id: "pay_cancel_ref",
+      bookingId: "b1",
+      amount: 110,
+      reference: "REF-1723",
+    });
+    constructMock.mockResolvedValue(
+      refundUpdatedEvent({ id: "re_1", status: "succeeded", payment_intent: "pi_1" }),
+    );
+
+    const res = await post({});
+
+    expect(res.status).toBe(200);
+    expect(paymentUpdateMany).toHaveBeenCalledWith({
+      where: { id: "pay_cancel_ref", status: "PENDING" },
+      data: expect.objectContaining({ status: "SUCCEEDED" }),
+    });
+    expect(bookingFindUnique).not.toHaveBeenCalled();
+    expect(bookingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("flips a SWAP-REF row and applies the single, clamped deferred decrement", async () => {
+    paymentFindFirst.mockResolvedValueOnce({
+      id: "pay_swap_ref",
+      bookingId: "b1",
+      amount: 110,
+      reference: "SWAP-REF-swapd-1",
+    });
+    // amountPaid 90 − 110 must clamp to 0, never go negative.
+    bookingFindUnique.mockResolvedValueOnce({ amountPaid: 90 });
+    constructMock.mockResolvedValue(
+      refundUpdatedEvent({ id: "re_2", status: "succeeded", payment_intent: null }),
+    );
+
+    const res = await post({});
+
+    expect(res.status).toBe(200);
+    expect(paymentUpdateMany).toHaveBeenCalledWith({
+      where: { id: "pay_swap_ref", status: "PENDING" },
+      data: expect.objectContaining({ status: "SUCCEEDED" }),
+    });
+    expect(bookingUpdate).toHaveBeenCalledTimes(1);
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 0 },
+    });
+  });
+
+  it("prefers the refund-id match over the PI when both would hit", async () => {
+    // Two PENDING refunds share pi_shared; the row carrying re_3 in
+    // stripeChargeId must win and the PI fallback must never run.
+    paymentFindFirst.mockResolvedValueOnce({
+      id: "pay_by_refund_id",
+      bookingId: "b1",
+      amount: 50,
+      reference: "SWAP-REF-swapd-2",
+    });
+    bookingFindUnique.mockResolvedValueOnce({ amountPaid: 200 });
+    constructMock.mockResolvedValue(
+      refundUpdatedEvent({ id: "re_3", status: "succeeded", payment_intent: "pi_shared" }),
+    );
+
+    await post({});
+
+    expect(paymentFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ stripeChargeId: "re_3", status: "PENDING" }),
+      }),
+    );
+    expect(paymentFindMany).not.toHaveBeenCalled();
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "pay_by_refund_id", status: "PENDING" } }),
+    );
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 150 },
+    });
+  });
+
+  it("falls back to an unambiguous PI-only match", async () => {
+    paymentFindFirst.mockResolvedValueOnce(null);
+    paymentFindMany.mockResolvedValueOnce([
+      { id: "pay_pi_only", bookingId: "b1", amount: 30, reference: "SWAP-REF-swapd-3" },
+    ]);
+    bookingFindUnique.mockResolvedValueOnce({ amountPaid: 100 });
+    constructMock.mockResolvedValue(
+      refundUpdatedEvent({ id: "re_5", status: "succeeded", payment_intent: "pi_solo" }),
+    );
+
+    await post({});
+
+    expect(paymentFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ stripePaymentIntentId: "pi_solo" }),
+      }),
+    );
+    expect(paymentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "pay_pi_only", status: "PENDING" } }),
+    );
+    expect(bookingUpdate).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 70 },
+    });
+  });
+
+  it("skips settlement with a log when only an ambiguous PI match exists", async () => {
+    paymentFindFirst.mockResolvedValueOnce(null);
+    paymentFindMany.mockResolvedValueOnce([
+      { id: "pay_a", bookingId: "b1", amount: 10, reference: "SWAP-REF-a" },
+      { id: "pay_b", bookingId: "b1", amount: 20, reference: "REF-b" },
+    ]);
+    constructMock.mockResolvedValue(
+      refundUpdatedEvent({ id: "re_4", status: "succeeded", payment_intent: "pi_shared" }),
+    );
+
+    const res = await post({});
+
+    expect(res.status).toBe(200);
+    expect(paymentUpdateMany).not.toHaveBeenCalled();
+    expect(bookingUpdate).not.toHaveBeenCalled();
+    expect(loggerWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ refundId: "re_4", paymentIntentId: "pi_shared" }),
+      expect.stringContaining("skipping settlement"),
     );
   });
 });

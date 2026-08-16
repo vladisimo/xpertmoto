@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { use, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
@@ -32,6 +32,9 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     { enabled: !!assessment },
   );
   const { data: inspections } = trpc.inspection.byBooking.useQuery({ bookingId: id });
+  // Per-hire insurance excess position — damage lines beyond the remaining
+  // headroom are clamped at finalise, so project the clamp here too.
+  const { data: excess } = trpc.staffBooking.excessSummary.useQuery({ bookingId: id });
 
   const upsertCharge = trpc.return.upsertDamageCharge.useMutation();
   const removeCharge = trpc.return.removeDamageCharge.useMutation();
@@ -67,8 +70,18 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     );
   }
 
-  const postHire = inspections?.find((i) => i.type === "POST_HIRE");
-  const issues = postHire?.issues ?? [];
+  // The return inspection is the one the assessment was opened against —
+  // SWAP_OUT inspections are also type POST_HIRE, so match by id first.
+  const returnInspection =
+    inspections?.find((i) => i.id === assessment.inspectionId) ??
+    inspections?.find((i) => i.type === "POST_HIRE" && i.purpose !== "SWAP_OUT");
+  const issues = returnInspection?.issues ?? [];
+  // Damage pinned when a vehicle was swapped off this booking mid-hire.
+  // Still this hire's damage — upsertDamageCharge accepts these issues, so
+  // staff can raise charges from them the same one-tap way.
+  const swapOutIssues = (inspections ?? [])
+    .filter((i) => i.purpose === "SWAP_OUT")
+    .flatMap((i) => i.issues);
   const linkedIssueIds = new Set(
     (assessment.damageCharges ?? []).map((c) => c.inspectionIssueId).filter((x): x is string => !!x),
   );
@@ -136,12 +149,68 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
     await utils.return.byBooking.invalidate({ bookingId: id });
   }
 
-  const standardTotal = (assessment.damageCharges ?? [])
+  const issueRows = (list: typeof issues) => (
+    <ul className="divide-y">
+      {list.map((iss) => {
+        const linked = linkedIssueIds.has(iss.id);
+        return (
+          <li key={iss.id} className="flex items-center gap-3 py-2">
+            {iss.inspectionPhoto?.url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={iss.inspectionPhoto.url} alt="" className="h-12 w-12 shrink-0 rounded object-cover" />
+            ) : (
+              <div className="h-12 w-12 shrink-0 rounded bg-muted" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{iss.label}</div>
+              <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                <StatusBadge status={iss.severity as StatusKey} />
+                {iss.side ? <span>· {sideLabel(iss.side)}</span> : null}
+                {iss.note ? <span className="truncate">· {iss.note}</span> : null}
+              </div>
+            </div>
+            {linked ? (
+              <span className="caption shrink-0">Charged ✓</span>
+            ) : (
+              <Button type="button" size="sm" variant="secondary" onClick={() => raiseFromIssue(iss)}>
+                Raise charge
+              </Button>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  // Mirror the server-side excess clamp (return.finalise): STANDARD lines
+  // consume the remaining headroom in creation order, then QUOTE_PENDING
+  // acknowledgements clamp to what's left. Late/fuel/cleaning are NOT capped.
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  const projectedById = new Map<string, number>();
+  const projectedQuoteCapById = new Map<string, number>();
+  let capLeft = excess ? excess.remaining : Infinity;
+  for (const c of assessment.damageCharges ?? []) {
+    if (c.resolution !== "STANDARD") continue;
+    const take = Math.min(Number(c.amount), Math.max(0, capLeft));
+    projectedById.set(c.id, r2(take));
+    capLeft = capLeft - take;
+  }
+  for (const c of assessment.damageCharges ?? []) {
+    if (c.resolution !== "QUOTE_PENDING") continue;
+    const take = Math.min(Number(c.quoteCapAmount ?? 0), Math.max(0, capLeft));
+    projectedQuoteCapById.set(c.id, r2(take));
+    capLeft = capLeft - take;
+  }
+
+  const preCapStandardTotal = (assessment.damageCharges ?? [])
     .filter((c) => c.resolution === "STANDARD")
     .reduce((acc, c) => acc + Number(c.amount), 0);
+  const standardTotal = (assessment.damageCharges ?? [])
+    .filter((c) => c.resolution === "STANDARD")
+    .reduce((acc, c) => acc + (projectedById.get(c.id) ?? Number(c.amount)), 0);
   const pendingCapTotal = (assessment.damageCharges ?? [])
     .filter((c) => c.resolution === "QUOTE_PENDING")
-    .reduce((acc, c) => acc + Number(c.quoteCapAmount ?? 0), 0);
+    .reduce((acc, c) => acc + (projectedQuoteCapById.get(c.id) ?? Number(c.quoteCapAmount ?? 0)), 0);
   const totalDueNow = Math.round((standardTotal + (fees.data?.lateFee ?? 0) + (fees.data?.fuelCharge ?? 0)) * 100) / 100;
 
   return (
@@ -160,6 +229,41 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
         mobileCompact
       />
 
+      {excess && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">
+              Insurance excess{excess.tierName ? ` — ${excess.tierName}` : ""}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 text-sm">
+            <Row label="Excess cap (per hire)" value={formatCurrency(excess.excess)} />
+            <Row label="Already recovered this hire" value={formatCurrency(excess.used)} />
+            <Row label="Remaining headroom" value={formatCurrency(excess.remaining)} bold />
+            {excess.remaining <= 0 && (
+              <p className="caption mt-2 text-destructive">
+                The excess is fully consumed — further damage lines will be reduced to $0 at finalise.
+              </p>
+            )}
+            {excess.source === "SETTING" && (
+              <p className="caption mt-2">
+                No insurance attached and no default product configured — using the system default excess.
+              </p>
+            )}
+            {excess.voidedIncidents.length > 0 && (
+              <p className="caption mt-2">
+                Excess voided on {excess.voidedIncidents.map((i) => i.incidentNumber).join(", ")} — charges
+                raised from those incidents are not capped.
+              </p>
+            )}
+            <p className="caption mt-2">
+              Damage charges beyond the remaining headroom are automatically reduced when the assessment is
+              finalised. Late, fuel and cleaning fees are not capped.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {issues.length > 0 && (
         <Card>
           <CardHeader>
@@ -170,36 +274,22 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
               Damage pinned during the return inspection. Tap “Raise charge” to bill it — a catalogue label pre-fills the
               price and attaches the photo.
             </p>
-            <ul className="divide-y">
-              {issues.map((iss) => {
-                const linked = linkedIssueIds.has(iss.id);
-                return (
-                  <li key={iss.id} className="flex items-center gap-3 py-2">
-                    {iss.inspectionPhoto?.url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={iss.inspectionPhoto.url} alt="" className="h-12 w-12 shrink-0 rounded object-cover" />
-                    ) : (
-                      <div className="h-12 w-12 shrink-0 rounded bg-muted" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium">{iss.label}</div>
-                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                        <StatusBadge status={iss.severity as StatusKey} />
-                        {iss.side ? <span>· {sideLabel(iss.side)}</span> : null}
-                        {iss.note ? <span className="truncate">· {iss.note}</span> : null}
-                      </div>
-                    </div>
-                    {linked ? (
-                      <span className="caption shrink-0">Charged ✓</span>
-                    ) : (
-                      <Button type="button" size="sm" variant="secondary" onClick={() => raiseFromIssue(iss)}>
-                        Raise charge
-                      </Button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+            {issueRows(issues)}
+          </CardContent>
+        </Card>
+      )}
+
+      {swapOutIssues.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="h3">Damage recorded at swap-out</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="caption mb-3">
+              Pinned when a vehicle was swapped off this booking mid-hire. It belongs to this hire — raise a charge the
+              same way.
+            </p>
+            {issueRows(swapOutIssues)}
           </CardContent>
         </Card>
       )}
@@ -351,9 +441,22 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
                     {c.staffNote && <div className="caption mt-1">{c.staffNote}</div>}
                   </div>
                   <div className="text-right text-sm font-medium">
-                    {c.resolution === "QUOTE_PENDING"
-                      ? `up to ${formatCurrency(Number(c.quoteCapAmount ?? 0))}`
-                      : formatCurrency(Number(c.amount))}
+                    {c.resolution === "QUOTE_PENDING" ? (
+                      <>
+                        up to{" "}
+                        <CappedAmount
+                          preCap={Number(c.quoteCapAmount ?? 0)}
+                          charged={projectedQuoteCapById.get(c.id) ?? Number(c.quoteCapAmount ?? 0)}
+                        />
+                      </>
+                    ) : c.resolution === "STANDARD" ? (
+                      <CappedAmount
+                        preCap={Number(c.amount)}
+                        charged={projectedById.get(c.id) ?? Number(c.amount)}
+                      />
+                    ) : (
+                      formatCurrency(Number(c.amount))
+                    )}
                   </div>
                   <Button type="button" variant="ghost" size="sm" onClick={() => remove(c.id)}>
                     Remove
@@ -386,10 +489,25 @@ export default function CheckInAssessPage(props: { params: Promise<{ id: string 
           <CardTitle className="h3">Totals</CardTitle>
         </CardHeader>
         <CardContent className="space-y-1 text-sm">
-          <Row label="Standard damage charges" value={formatCurrency(standardTotal)} />
+          <Row
+            label="Standard damage charges"
+            value={
+              standardTotal < preCapStandardTotal ? (
+                <CappedAmount preCap={preCapStandardTotal} charged={standardTotal} />
+              ) : (
+                formatCurrency(standardTotal)
+              )
+            }
+          />
           <Row label="Late + fuel" value={formatCurrency((fees.data?.lateFee ?? 0) + (fees.data?.fuelCharge ?? 0))} />
           <Row label="Total due now" value={formatCurrency(totalDueNow)} bold />
           <Row label="Pending quote cap (not yet charged)" value={formatCurrency(pendingCapTotal)} />
+          {standardTotal < preCapStandardTotal && (
+            <p className="caption mt-2">
+              Struck-through figures exceed the remaining insurance-excess headroom and will be reduced at
+              finalise.
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -415,7 +533,18 @@ function sideLabel(s: string): string {
   return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
-function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+/** Shows the pre-cap figure struck through when the excess cap reduces it. */
+function CappedAmount({ preCap, charged }: { preCap: number; charged: number }) {
+  if (charged >= preCap) return <>{formatCurrency(preCap)}</>;
+  return (
+    <>
+      <s className="mr-1 text-muted-foreground">{formatCurrency(preCap)}</s>
+      {formatCurrency(charged)}
+    </>
+  );
+}
+
+function Row({ label, value, bold }: { label: string; value: ReactNode; bold?: boolean }) {
   return (
     <div className={`flex justify-between ${bold ? "border-t pt-1 font-semibold" : ""}`}>
       <span className="text-muted-foreground">{label}</span>

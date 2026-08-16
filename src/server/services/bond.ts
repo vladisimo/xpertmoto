@@ -40,7 +40,10 @@ export function bondAuthHorizonDays(brand: string | null | undefined): number {
 }
 
 export type EnsureFreshBondHoldResult =
-  | { ok: true; action: "fresh" | "reauthorized" | "created" | "no_bond" }
+  | {
+      ok: true;
+      action: "fresh" | "reauthorized" | "created" | "no_bond" | "released_zero_bond";
+    }
   | { ok: false; action: "requires_action"; clientSecret: string; paymentIntentId: string }
   | { ok: false; action: "failed" | "no_pm"; errorCode?: string; errorMessage?: string };
 
@@ -61,7 +64,7 @@ export async function ensureFreshBondHold(
     bookingId: string;
     actorUserId?: string | null;
     minRemainingDays?: number;
-    reason: "check-out" | "rolling-reauth" | "walk-in";
+    reason: "check-out" | "rolling-reauth" | "walk-in" | "theft-suspected";
   },
 ): Promise<EnsureFreshBondHoldResult> {
   const minRemainingDays = args.minRemainingDays ?? 2;
@@ -109,7 +112,7 @@ export async function ensureFreshBondHold(
   const profile = booking.customer?.customerProfile;
   const stripeCustomerId = profile?.stripeCustomerId;
   const paymentMethodId = profile?.defaultStripePaymentMethodId;
-  const holdAmount = ledger
+  const remainingHeld = ledger
     ? Math.max(
         0,
         Number(ledger.heldAmount) -
@@ -117,9 +120,90 @@ export async function ensureFreshBondHold(
           Number(ledger.releasedAmount),
       )
     : bondAmount;
+  // A category amendment can also zero the bond entirely (a no-bond
+  // category). There is nothing to re-authorise "at the new amount" — the
+  // amendment note's promise resolves by CANCELLING the still-HELD hold and
+  // releasing the ledger, instead of the old full-size hold being reported
+  // fresh (or re-authorised at the stale amount) at check-out.
+  if (ledger && bondAmount < 0.005 && remainingHeld >= 0.005) {
+    if (ledger.stripePaymentIntentId) {
+      try {
+        await cancelPaymentIntent(ledger.stripePaymentIntentId);
+      } catch (err) {
+        // Mirror the re-auth path's cancel handling: log, don't fail — a
+        // manual-capture auth self-expires on the card network (7–30 days),
+        // and the RELEASED ledger below blocks every capture path, so the
+        // worst case is the auth riding to its natural expiry.
+        logger.warn(
+          {
+            err: err instanceof Error ? err.message : String(err),
+            bookingId: booking.id,
+            paymentIntentId: ledger.stripePaymentIntentId,
+          },
+          "bond: cancelling zero-bond hold failed (usually already expired) — releasing ledger anyway",
+        );
+      }
+    }
+    // Same terminal shape the release paths use (bond-auto-release):
+    // captured + released == held, plus a BOND_RELEASE ledger row.
+    const releasedAmount = Math.max(
+      0,
+      Number(ledger.heldAmount) - Number(ledger.capturedAmount),
+    );
+    await prisma.$transaction(async (tx) => {
+      await tx.bondLedger.update({
+        where: { id: ledger.id },
+        data: { status: "RELEASED", releasedAmount },
+      });
+      await tx.payment.create({
+        data: {
+          reference: `ZERO-BOND-REL-${booking.bookingReference}`,
+          customerId: booking.customerId,
+          bookingId: booking.id,
+          type: "BOND_RELEASE",
+          method: "STRIPE",
+          amount: remainingHeld,
+          status: "SUCCEEDED",
+          notes: "Bond released — booking amended to a no-bond category",
+        },
+      });
+    });
+    await writePaymentAudit(prisma, {
+      action: "bond.released",
+      entity: "Payment",
+      entityId: ledger.stripePaymentIntentId ?? ledger.id,
+      userId: args.actorUserId ?? booking.customerId,
+      status: "SUCCESS",
+      newData: {
+        bookingId: booking.id,
+        bookingReference: booking.bookingReference,
+        amountAud: remainingHeld,
+        reason: args.reason,
+        trigger: "zero_bond_amount",
+      },
+    });
+    return { ok: true, action: "released_zero_bond" };
+  }
+
+  // A pre-pickup category amendment can change booking.bondAmount after the
+  // initial hold was authorised. While the hold is still untouched (nothing
+  // captured or released), the booking's CURRENT bondAmount is authoritative:
+  // an undersized hold must not silently survive to check-out, and an
+  // oversized one should shrink. Such a hold is treated as stale below and
+  // re-authorised at the new amount.
+  const resizeTarget =
+    ledger &&
+    Number(ledger.capturedAmount) === 0 &&
+    Number(ledger.releasedAmount) === 0 &&
+    bondAmount > 0 &&
+    Math.abs(Number(ledger.heldAmount) - bondAmount) >= 0.005
+      ? bondAmount
+      : null;
+  const holdAmount = resizeTarget ?? remainingHeld;
   if (holdAmount <= 0) return { ok: true, action: "no_bond" };
 
-  // Freshness check for an existing hold.
+  // Freshness check for an existing hold. A live, young hold at a stale
+  // amount (resizeTarget set) is NOT fresh — it re-authorises below.
   if (ledger?.stripePaymentIntentId) {
     const pi = await retrievePaymentIntent(ledger.stripePaymentIntentId);
     if (pi === null) {
@@ -130,7 +214,7 @@ export async function ensureFreshBondHold(
     const authorizedAt = ledger.authorizedAt ?? ledger.createdAt;
     const ageDays = (Date.now() - authorizedAt.getTime()) / 86_400_000;
     const live = pi.status === "requires_capture";
-    if (live && horizon - ageDays > minRemainingDays) {
+    if (live && horizon - ageDays > minRemainingDays && resizeTarget === null) {
       return { ok: true, action: "fresh" };
     }
   }
@@ -213,6 +297,9 @@ export async function ensureFreshBondHold(
         authorizedAt: new Date(),
         reauthCount: { increment: 1 },
         authHistory: history as Prisma.InputJsonValue,
+        // Resize (category amendment changed booking.bondAmount): the new
+        // PI was authorised for the new amount, so the ledger follows it.
+        ...(resizeTarget !== null ? { heldAmount: holdAmount } : {}),
       },
     });
   } else {

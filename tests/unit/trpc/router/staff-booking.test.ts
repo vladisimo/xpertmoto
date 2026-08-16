@@ -23,11 +23,143 @@ vi.mock("@/server/services/referral", () => ({
   qualifyReferral: vi.fn().mockResolvedValue(undefined),
 }));
 
+// checkOut / createWalkIn collaborators. Controllable mocks keep the
+// remainder-charge, bond-hold, allocation, and pricing outcomes per-test;
+// everything else in each module stays real via the importOriginal spread.
+const chargePickupRemainderMock = vi.fn();
+vi.mock("@/server/services/pickup-remainder", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  chargePickupRemainder: (...a: unknown[]) => chargePickupRemainderMock(...a),
+}));
+const ensureFreshBondHoldMock = vi.fn();
+vi.mock("@/server/services/bond", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ensureFreshBondHold: (...a: unknown[]) => ensureFreshBondHoldMock(...a),
+}));
+const quotePricingMock = vi.fn();
+vi.mock("@/server/services/pricing", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  quote: (...a: unknown[]) => quotePricingMock(...a),
+}));
+const isVehicleFreeMock = vi.fn();
+const allocateVehicleMock = vi.fn();
+vi.mock("@/server/services/availability", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  acquireAllocationLock: vi.fn().mockResolvedValue(undefined),
+  allocateVehicle: (...a: unknown[]) => allocateVehicleMock(...a),
+  isVehicleFree: (...a: unknown[]) => isVehicleFreeMock(...a),
+}));
+vi.mock("@/server/services/eligibility", () => ({
+  checkEligibility: () => ({ failure: null, basis: "licence", warnings: [] }),
+}));
+vi.mock("@/server/services/booking-times-guard", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  enforceBookingTimesWithinHours: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/server/services/staff-tasks", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  autoCloseByTarget: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/server/services/notification-sender", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  sendNotification: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@/lib/analytics", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  trackServer: vi.fn().mockResolvedValue(undefined),
+}));
+// Loss-termination service (Area 2) — the router tests only cover the
+// gate/audit wrapper; the money mechanics live in
+// tests/unit/services/booking-termination.test.ts.
+const previewLossTerminationMock = vi.fn();
+const terminateBookingForLossMock = vi.fn();
+vi.mock("@/server/services/booking-termination", () => ({
+  previewLossTermination: (...a: unknown[]) => previewLossTerminationMock(...a),
+  terminateBookingForLoss: (...a: unknown[]) => terminateBookingForLossMock(...a),
+}));
+// Category-amendment service (Area 4) — the router tests only cover the
+// role gates + Zod combos; the money mechanics live in
+// tests/unit/services/booking-amend-category.test.ts.
+const previewCategoryAmendmentMock = vi.fn();
+const applyCategoryAmendmentMock = vi.fn();
+vi.mock("@/server/services/booking-amend-category", () => ({
+  previewCategoryAmendment: (...a: unknown[]) => previewCategoryAmendmentMock(...a),
+  applyCategoryAmendment: (...a: unknown[]) => applyCategoryAmendmentMock(...a),
+}));
+// Excess cap readers (checkIn damage clamp) — stubbed with generous
+// defaults so non-cap tests behave unchanged; cap tests override per test.
+// The pure applyExcessCap stays real via the importOriginal spread.
+const getBookingExcessMock = vi.fn();
+const getDamageLiabilityUsedMock = vi.fn();
+vi.mock("@/server/services/excess", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getBookingExcess: (...a: unknown[]) => getBookingExcessMock(...a),
+  getDamageLiabilityUsed: (...a: unknown[]) => getDamageLiabilityUsedMock(...a),
+}));
+// Adjustment notes are raised via a dynamic import inside checkIn — stub so
+// the unit never touches the real @/lib/prisma client.
+const tryIssueAdjustmentForBookingMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/invoice-lifecycle", () => ({
+  tryIssueAdjustmentForBooking: (...a: unknown[]) =>
+    tryIssueAdjustmentForBookingMock(...a),
+}));
+// Deterministic settings: defaults unless a test writes into the override
+// map (the real getSettings would read whatever the dev DB holds).
+const settingsOverride: Record<string, unknown> = {};
+vi.mock("@/lib/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/settings")>();
+  return {
+    ...actual,
+    getSettings: async (keys: readonly string[]) => {
+      const out: Record<string, unknown> = {};
+      for (const k of keys) {
+        out[k] =
+          settingsOverride[k] ??
+          actual.SETTING_DEFAULTS[k as keyof typeof actual.SETTING_DEFAULTS];
+      }
+      return out;
+    },
+    getSetting: async (_key: string, fallback: unknown) => fallback,
+  };
+});
+
 import { staffBookingRouter } from "../../../../src/server/trpc/router/staff-booking";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const k of Object.keys(settingsOverride)) delete settingsOverride[k];
+  chargePickupRemainderMock.mockResolvedValue({ outcome: "not_required" });
+  ensureFreshBondHoldMock.mockResolvedValue({ ok: true, action: "no_bond" });
+  isVehicleFreeMock.mockResolvedValue(true);
+  allocateVehicleMock.mockResolvedValue("veh-ok");
+  quotePricingMock.mockResolvedValue(makeQuote());
+  getBookingExcessMock.mockResolvedValue({ excess: 100000, source: "SETTING", tierName: null });
+  getDamageLiabilityUsedMock.mockResolvedValue(0);
 });
+
+/** Minimal PricingQuote shape for the fields createWalkIn persists. */
+function makeQuote(overrides: Record<string, number> = {}) {
+  return {
+    durationDays: 2,
+    baseRate: 90,
+    baseSubtotal: 180,
+    seasonMultiplier: 1,
+    yieldMultiplier: 1,
+    durationDiscountPct: 0,
+    pricingMethod: "FLAT",
+    discountAmount: 0,
+    addonTotal: 0,
+    insuranceTotal: 0,
+    deliveryFee: 0,
+    oneWayFee: 0,
+    subtotalExGst: 181.82,
+    gstAmount: 18.18,
+    totalAmount: 200,
+    bondAmount: 300,
+    lineItems: [],
+    ...overrides,
+  };
+}
 
 type BookingOverrides = {
   status?: string;
@@ -78,39 +210,39 @@ function makeCtx(booking: ReturnType<typeof makeBooking>) {
   };
 }
 
+const walkInInput = {
+  customerId: "target1",
+  categoryId: "cat1",
+  vehicleId: "veh1",
+  pickupDepotId: "d1",
+  returnDepotId: "d1",
+  pickupDateTime: new Date("2026-06-01T10:00:00Z"),
+  returnDateTime: new Date("2026-06-03T10:00:00Z"),
+  method: "CARD" as const,
+};
+
+function makeWalkInCtx(target: { customerProfile: { id: string } | null } | null) {
+  return {
+    prisma: {
+      user: { findUnique: vi.fn(async () => target) },
+      // Reached only if the guard passes (times-guard + pricing are mocked).
+      booking: {
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "bk1",
+          ...data,
+        })),
+      },
+    },
+    user: { id: "staff1", role: "STAFF" as const },
+    session: { user: { id: "staff1", role: "STAFF" as const } },
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    reqId: "r1",
+    _skipAudit: true,
+  };
+}
+
 describe("staffBooking.createWalkIn — profile-based target guard", () => {
   const GUARD_MESSAGE = "Walk-in bookings must be attached to a customer account.";
-  const walkInInput = {
-    customerId: "target1",
-    categoryId: "cat1",
-    pickupDepotId: "d1",
-    returnDepotId: "d1",
-    pickupDateTime: new Date("2026-06-01T10:00:00Z"),
-    returnDateTime: new Date("2026-06-03T10:00:00Z"),
-    totalAmount: 200,
-    subtotal: 180,
-    gstAmount: 18.18,
-    bondAmount: 300,
-    method: "CARD" as const,
-  };
-
-  function makeWalkInCtx(target: { customerProfile: { id: string } | null } | null) {
-    return {
-      prisma: {
-        user: { findUnique: vi.fn(async () => target) },
-        // Reached only if the guard passes. The depot lookup returns [] so the
-        // guard-pass path fails with a *different* (depot) BAD_REQUEST, letting
-        // us distinguish "cleared the guard" from "rejected by the guard".
-        depot: { findMany: vi.fn(async () => []) },
-        booking: { create: vi.fn() },
-      },
-      user: { id: "staff1", role: "STAFF" as const },
-      session: { user: { id: "staff1", role: "STAFF" as const } },
-      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      reqId: "r1",
-      _skipAudit: true,
-    };
-  }
 
   it("rejects when the selected target has no customer profile", async () => {
     const ctx = makeWalkInCtx({ customerProfile: null });
@@ -136,11 +268,59 @@ describe("staffBooking.createWalkIn — profile-based target guard", () => {
     // A back-office user who also carries a CustomerProfile is a valid target.
     const ctx = makeWalkInCtx({ customerProfile: { id: "cp1" } });
     const caller = staffBookingRouter.createCaller(ctx as never);
-    // Cleared the guard, then fails on the empty depot lookup — a different
-    // BAD_REQUEST, so the guard message must NOT be the one raised.
-    await expect(caller.createWalkIn(walkInInput)).rejects.not.toMatchObject({
-      message: GUARD_MESSAGE,
-    });
+    await expect(caller.createWalkIn(walkInInput)).resolves.toMatchObject({ id: "bk1" });
+  });
+});
+
+describe("staffBooking.createWalkIn — server-side pricing (PR5)", () => {
+  it("persists the server quote, not client-supplied figures", async () => {
+    const ctx = makeWalkInCtx({ customerProfile: { id: "cp1" } });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.createWalkIn(walkInInput);
+
+    // The quote ran against the selected vehicle (rate cascade context).
+    expect(quotePricingMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        categoryId: "cat1",
+        vehicleId: "veh1",
+        pickupDepotId: "d1",
+        returnDepotId: "d1",
+      }),
+    );
+    const data = (ctx.prisma.booking.create.mock.calls[0]![0] as {
+      data: Record<string, unknown> & {
+        payments: { create: Record<string, unknown> };
+      };
+    }).data;
+    expect(data.subtotal).toBe(180);
+    expect(data.gstAmount).toBe(18.18);
+    expect(data.totalAmount).toBe(200);
+    expect(data.bondAmount).toBe(300);
+    expect(data.discountAmount).toBe(0);
+    expect(data.amountPaid).toBe(200);
+    expect(data.balanceDue).toBe(0);
+    expect(data.pricingSnapshot).toMatchObject({ totalAmount: 200 });
+    expect(data.payments.create.amount).toBe(200);
+    expect(data.payments.create.gstAmount).toBe(18.18);
+    expect(res.bondRequired).toBe(true);
+  });
+
+  it("rejects CONFLICT when the sheet's expected total drifts more than a cent", async () => {
+    const ctx = makeWalkInCtx({ customerProfile: { id: "cp1" } });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.createWalkIn({ ...walkInInput, expectedTotalAmount: 150 }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(ctx.prisma.booking.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts an expected total within a cent of the server price", async () => {
+    const ctx = makeWalkInCtx({ customerProfile: { id: "cp1" } });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.createWalkIn({ ...walkInInput, expectedTotalAmount: 200.005 }),
+    ).resolves.toMatchObject({ id: "bk1" });
   });
 });
 
@@ -272,6 +452,363 @@ describe("staffBooking depot scoping (B1 IDOR fix)", () => {
   });
 });
 
+describe("staffBooking.recordPayment — pure balance decrement (PR3)", () => {
+  function makePayCtx(b: {
+    status: string;
+    totalAmount: number;
+    amountPaid: number;
+    balanceDue: number;
+  }) {
+    const booking = {
+      id: "b1",
+      status: b.status,
+      customerId: "cust1",
+      depotId: "depot1",
+      totalAmount: new Prisma.Decimal(b.totalAmount),
+      amountPaid: new Prisma.Decimal(b.amountPaid),
+      balanceDue: new Prisma.Decimal(b.balanceDue),
+      confirmedById: null,
+    };
+    const tx = {
+      payment: { create: vi.fn(async () => null) },
+      booking: { update: vi.fn(async () => ({ id: "b1" })) },
+    };
+    const ctx = {
+      prisma: {
+        booking: { findUniqueOrThrow: vi.fn(async () => booking) },
+        $transaction: vi.fn(async (cb: (t: unknown) => Promise<unknown>) => cb(tx)),
+      },
+      user: { id: "staff1", role: "STAFF" as const },
+      session: { user: { id: "staff1", role: "STAFF" as const } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    return { ctx, tx };
+  }
+
+  function updateData(tx: { booking: { update: ReturnType<typeof vi.fn> } }) {
+    return (tx.booking.update.mock.calls[0]![0] as {
+      data: { amountPaid: number; balanceDue: number; status?: string };
+    }).data;
+  }
+
+  it("pays down a PENDING raise instead of recomputing from totalAmount", async () => {
+    // Fully-paid CONFIRMED booking carrying a $120 MANUAL_CHARGE raise:
+    // balanceDue > totalAmount − amountPaid. The old recompute clobbered
+    // the raise to $0; the decrement must leave $70 outstanding.
+    const { ctx, tx } = makePayCtx({
+      status: "CONFIRMED",
+      totalAmount: 500,
+      amountPaid: 500,
+      balanceDue: 120,
+    });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.recordPayment({ bookingId: "b1", amount: 50, method: "CASH" });
+    const data = updateData(tx);
+    expect(data.amountPaid).toBe(550);
+    expect(data.balanceDue).toBe(70);
+    expect(data.status).toBeUndefined(); // already CONFIRMED — no flip
+  });
+
+  it("full payment still flips PENDING_PAYMENT → CONFIRMED", async () => {
+    const { ctx, tx } = makePayCtx({
+      status: "PENDING_PAYMENT",
+      totalAmount: 300,
+      amountPaid: 100,
+      balanceDue: 200,
+    });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.recordPayment({ bookingId: "b1", amount: 200, method: "BANK_TRANSFER" });
+    const data = updateData(tx);
+    expect(data.balanceDue).toBe(0);
+    expect(data.status).toBe("CONFIRMED");
+  });
+
+  it("overpayment clamps balanceDue at zero", async () => {
+    const { ctx, tx } = makePayCtx({
+      status: "CONFIRMED",
+      totalAmount: 300,
+      amountPaid: 250,
+      balanceDue: 50,
+    });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.recordPayment({ bookingId: "b1", amount: 80, method: "CASH" });
+    expect(updateData(tx).balanceDue).toBe(0);
+  });
+});
+
+// ————— checkOut (PR6) —————
+
+type CheckOutVehicle = {
+  id: string;
+  internalCode: string;
+  rego: string;
+  categoryId: string;
+  depotId: string;
+  regoExpiry: null;
+  ctpExpiry: null;
+  insuranceExpiry: null;
+};
+
+const CHECKOUT_VEHICLES: Record<string, CheckOutVehicle> = {
+  "veh-ok": { id: "veh-ok", internalCode: "SC-01", rego: "REG01", categoryId: "cat1", depotId: "depot1", regoExpiry: null, ctpExpiry: null, insuranceExpiry: null },
+  "veh-cat2": { id: "veh-cat2", internalCode: "SC-02", rego: "REG02", categoryId: "cat2", depotId: "depot1", regoExpiry: null, ctpExpiry: null, insuranceExpiry: null },
+  "veh-d2": { id: "veh-d2", internalCode: "SC-03", rego: "REG03", categoryId: "cat1", depotId: "depot2", regoExpiry: null, ctpExpiry: null, insuranceExpiry: null },
+};
+
+function makeCheckOutBooking(o: Partial<{
+  status: string;
+  source: string;
+  stripePaymentIntentId: string | null;
+  vehicleId: string | null;
+}> = {}) {
+  return {
+    id: "b1",
+    bookingReference: "SCT-TEST-0001",
+    status: o.status ?? "CONFIRMED",
+    source: o.source ?? "WEBSITE",
+    stripePaymentIntentId: o.stripePaymentIntentId ?? null,
+    customerId: "cust1",
+    depotId: "depot1",
+    pickupDepotId: "depot1",
+    returnDepotId: "depot1",
+    categoryId: "cat1",
+    vehicleId: o.vehicleId ?? null,
+    pickupDateTime: new Date("2026-06-01T00:00:00.000Z"),
+    returnDateTime: new Date("2026-06-03T00:00:00.000Z"),
+    totalAmount: new Prisma.Decimal(200),
+    amountPaid: new Prisma.Decimal(200),
+    balanceDue: new Prisma.Decimal(0),
+    bondAmount: new Prisma.Decimal(300),
+  };
+}
+
+function makeCheckOutCtx(
+  booking: ReturnType<typeof makeCheckOutBooking>,
+  opts: { role?: "STAFF" | "MANAGER" } = {},
+) {
+  const tx = {
+    vehicle: {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        CHECKOUT_VEHICLES[where.id] ?? null,
+      ),
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const v = CHECKOUT_VEHICLES[where.id];
+        if (!v) throw new Error(`no vehicle ${where.id}`);
+        return v;
+      }),
+      update: vi.fn(async () => null),
+    },
+    booking: {
+      update: vi.fn(async (_args: { data: Record<string, unknown> }) => ({
+        id: booking.id,
+        status: "ACTIVE",
+        actualPickupDateTime: new Date(),
+      })),
+    },
+    vehicleStatusLog: { create: vi.fn(async () => null) },
+  };
+  const prisma = {
+    booking: { findUniqueOrThrow: vi.fn(async () => booking) },
+    vehicleCategory: {
+      findUniqueOrThrow: vi.fn(async () => ({ name: "Scooter", licenceRequired: null, minAge: null })),
+    },
+    user: {
+      findUniqueOrThrow: vi.fn(async () => ({ dateOfBirth: null, customerProfile: null })),
+      findUnique: vi.fn(async () => null),
+    },
+    inspection: { findFirst: vi.fn(async () => ({ id: "insp1" })) },
+    rentalAgreement: {
+      findFirst: vi.fn(async () => ({ id: "ag1" })),
+      findUnique: vi.fn(async () => ({ id: "ag1", bookingId: booking.id, status: "SIGNED" })),
+    },
+    auditLog: { create: vi.fn(async () => null) },
+    $transaction: vi.fn(async (cb: (t: unknown) => Promise<unknown>) => cb(tx)),
+  };
+  const role = opts.role ?? "STAFF";
+  const ctx = {
+    prisma,
+    user: { id: "staff1", role },
+    session: { user: { id: "staff1", role } },
+    logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    reqId: "r1",
+    _skipAudit: true,
+  };
+  return { ctx, prisma, tx };
+}
+
+const checkOutInput = {
+  bookingId: "b1",
+  odometerKm: 1000,
+  fuelLevel: 100,
+  licenceVerified: true,
+  customerIdVerified: true,
+};
+
+function auditActions(prisma: { auditLog: { create: ReturnType<typeof vi.fn> } }) {
+  return prisma.auditLog.create.mock.calls.map(
+    (c) => (c[0] as { data: { action: string } }).data.action,
+  );
+}
+
+describe("staffBooking.checkOut — supplied-vehicle validation (PR6a)", () => {
+  it("rejects a cross-category vehicle", async () => {
+    const { ctx, tx } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.checkOut({ ...checkOutInput, vehicleId: "veh-cat2" }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Vehicle category does not match the booking.",
+    });
+    expect(tx.booking.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a vehicle at another depot", async () => {
+    const { ctx, tx } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.checkOut({ ...checkOutInput, vehicleId: "veh-d2" }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: "Vehicle is not at the booking's pickup depot.",
+    });
+    expect(tx.booking.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown vehicle id", async () => {
+    const { ctx } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.checkOut({ ...checkOutInput, vehicleId: "veh-nope" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("CONFLICT when the supplied vehicle is already committed elsewhere", async () => {
+    isVehicleFreeMock.mockResolvedValue(false);
+    const { ctx, tx } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.checkOut({ ...checkOutInput, vehicleId: "veh-ok" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(tx.booking.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts a free same-category same-depot vehicle", async () => {
+    const { ctx, tx } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut({ ...checkOutInput, vehicleId: "veh-ok" });
+    expect(result.ok).toBe(true);
+    const data = (tx.booking.update.mock.calls[0]![0] as {
+      data: { vehicleId: string };
+    }).data;
+    expect(data.vehicleId).toBe("veh-ok");
+  });
+});
+
+describe("staffBooking.checkOut — PENDING_PAYMENT gate (PR6b)", () => {
+  it("blocks PENDING_PAYMENT carrying an online payment intent", async () => {
+    const { ctx, prisma } = makeCheckOutCtx(
+      makeCheckOutBooking({ status: "PENDING_PAYMENT", source: "WALK_IN", stripePaymentIntentId: "pi_1" }),
+    );
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.checkOut(checkOutInput)).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("blocks a PENDING_PAYMENT website booking even without a PI", async () => {
+    const { ctx } = makeCheckOutCtx(
+      makeCheckOutBooking({ status: "PENDING_PAYMENT", source: "WEBSITE", stripePaymentIntentId: null }),
+    );
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.checkOut(checkOutInput)).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+    });
+  });
+
+  it("allows an offline PENDING_PAYMENT booking with no PI and audits the exception", async () => {
+    const { ctx, prisma } = makeCheckOutCtx(
+      makeCheckOutBooking({ status: "PENDING_PAYMENT", source: "WALK_IN", stripePaymentIntentId: null }),
+    );
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut(checkOutInput);
+    expect(result.ok).toBe(true);
+    expect(auditActions(prisma)).toContain("BOOKING_CHECKOUT_FROM_PENDING_PAYMENT");
+  });
+});
+
+describe("staffBooking.checkOut — typed remainder/bond failures (PR6c)", () => {
+  it("returns { ok:false, failedStep:'remainder' } when the auto-charge fails", async () => {
+    chargePickupRemainderMock.mockResolvedValue({
+      outcome: "no_pm",
+      amount: 42,
+    });
+    const { ctx, prisma } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut(checkOutInput);
+    expect(result).toMatchObject({
+      ok: false,
+      failedStep: "remainder",
+      amountAud: 42,
+    });
+    // No handover happened.
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("returns { ok:false, failedStep:'bond' } when the bond hold fails", async () => {
+    ensureFreshBondHoldMock.mockResolvedValue({
+      ok: false,
+      action: "failed",
+      errorCode: "card_declined",
+    });
+    const { ctx, prisma } = makeCheckOutCtx(makeCheckOutBooking());
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut(checkOutInput);
+    expect(result).toMatchObject({ ok: false, failedStep: "bond", amountAud: 300 });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking.checkOut — override manager gate (PR6d)", () => {
+  const remainderOverride = { skip: true as const, reason: "EFTPOS receipt 1234" };
+
+  it("FORBIDDEN for STAFF while booking.checkoutOverridesRequireManager is on (default)", async () => {
+    const { ctx } = makeCheckOutCtx(makeCheckOutBooking(), { role: "STAFF" });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.checkOut({ ...checkOutInput, remainderOverride }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(chargePickupRemainderMock).not.toHaveBeenCalled();
+  });
+
+  it("MANAGER may override a failed remainder charge (audited)", async () => {
+    chargePickupRemainderMock.mockResolvedValue({
+      outcome: "failed",
+      amount: 42,
+      errorCode: "card_declined",
+      errorMessage: "declined",
+    });
+    const { ctx, prisma } = makeCheckOutCtx(makeCheckOutBooking(), { role: "MANAGER" });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut({ ...checkOutInput, remainderOverride });
+    expect(result.ok).toBe(true);
+    expect(auditActions(prisma)).toContain("BOOKING_CHECKOUT_REMAINDER_OVERRIDDEN");
+  });
+
+  it("STAFF may override when the setting is off", async () => {
+    settingsOverride["booking.checkoutOverridesRequireManager"] = false;
+    chargePickupRemainderMock.mockResolvedValue({ outcome: "no_pm", amount: 42 });
+    const { ctx, prisma } = makeCheckOutCtx(makeCheckOutBooking(), { role: "STAFF" });
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const result = await caller.checkOut({ ...checkOutInput, remainderOverride });
+    expect(result.ok).toBe(true);
+    expect(auditActions(prisma)).toContain("BOOKING_CHECKOUT_REMAINDER_OVERRIDDEN");
+  });
+});
+
 describe("staffBooking.detail — bounded child collections", () => {
   it("caps every unbounded child relation so a long-running booking can't fetch hundreds of rows", async () => {
     const findUnique = vi.fn().mockResolvedValue({ id: "b1", depotId: "depot1" });
@@ -302,5 +839,459 @@ describe("staffBooking.detail — bounded child collections", () => {
       expect(relInclude, rel).not.toBe(true);
       expect((relInclude as { take?: number }).take, rel).toBe(50);
     }
+  });
+});
+
+describe("staffBooking loss termination (Area 2)", () => {
+  const TERMINATE_INPUT = {
+    bookingId: "b1",
+    cause: "WRITTEN_OFF" as const,
+    refundMode: "REFUND" as const,
+    bondDisposition: "RELEASED" as const,
+  };
+
+  const SERVICE_RESULT = {
+    bookingId: "b1",
+    bookingReference: "XPM-20260810-0001",
+    customerId: "cust1",
+    status: "COMPLETED" as const,
+    terminationId: "term1",
+    cause: "WRITTEN_OFF" as const,
+    refundMode: "REFUND" as const,
+    unusedDays: 3,
+    refundAmount: 360,
+    writedownAmount: 360,
+    waivedLateFeeAmount: 0,
+    cancelledLateFees: 80,
+    bondDisposition: "RELEASED" as const,
+    bondReleasedAmount: 500,
+    creditGiftCardId: null,
+    creditGiftCardCode: null,
+    cardRefundOutcome: "SUCCEEDED" as const,
+  };
+
+  function makeTerminationCtx(role: "STAFF" | "MANAGER") {
+    const prisma = {
+      auditLog: { create: vi.fn(async (_args: { data: Record<string, unknown> }) => null) },
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot1" })) },
+      $transaction: vi.fn(),
+    };
+    return {
+      ctx: {
+        prisma,
+        user: { id: "u1", role },
+        session: { user: { id: "u1", role } },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        reqId: "r1",
+        _skipAudit: true,
+      },
+      prisma,
+    };
+  }
+
+  it("terminateForLoss is manager-gated: STAFF gets FORBIDDEN and the service never runs", async () => {
+    const { ctx } = makeTerminationCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.terminateForLoss(TERMINATE_INPUT)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(terminateBookingForLossMock).not.toHaveBeenCalled();
+  });
+
+  it("manager terminate runs the service with the actor and writes the full-payload audit row", async () => {
+    terminateBookingForLossMock.mockResolvedValue(SERVICE_RESULT);
+    const { ctx, prisma } = makeTerminationCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.terminateForLoss({
+      ...TERMINATE_INPUT,
+      waiveAccruedLateFees: true,
+      notes: "insurer claim CLM-99",
+    });
+
+    expect(terminateBookingForLossMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        bookingId: "b1",
+        cause: "WRITTEN_OFF",
+        refundMode: "REFUND",
+        bondDisposition: "RELEASED",
+        waiveAccruedLateFees: true,
+        notes: "insurer claim CLM-99",
+        actorId: "u1",
+      }),
+    );
+    expect(res).toMatchObject({ status: "COMPLETED", terminationId: "term1" });
+
+    // Full-payload BOOKING_TERMINATED_FOR_LOSS audit row.
+    const auditRow = prisma.auditLog.create.mock.calls
+      .map((c) => (c[0] as { data: Record<string, unknown> }).data)
+      .find((d) => d.action === "BOOKING_TERMINATED_FOR_LOSS" && d.entity === "Booking");
+    expect(auditRow).toBeDefined();
+    expect(auditRow!.entityId).toBe("b1");
+    expect(auditRow!.newData).toMatchObject({
+      cause: "WRITTEN_OFF",
+      refundMode: "REFUND",
+      bondDisposition: "RELEASED",
+      waiveAccruedLateFees: true,
+      terminationId: "term1",
+      unusedDays: 3,
+      refundAmount: 360,
+      writedownAmount: 360,
+      cancelledLateFees: 80,
+      bondReleasedAmount: 500,
+      cardRefundOutcome: "SUCCEEDED",
+    });
+  });
+
+  it("previewLossTermination is staff-visible and quote-only — no mutation, no audit row", async () => {
+    const quote = { bookingId: "b1", unusedDays: 3, writedownAmount: 360 };
+    previewLossTerminationMock.mockResolvedValue(quote);
+    const { ctx, prisma } = makeTerminationCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.previewLossTermination({
+      bookingId: "b1",
+      refundMode: "REFUND",
+    });
+
+    expect(res).toEqual(quote);
+    expect(previewLossTerminationMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ bookingId: "b1", refundMode: "REFUND" }),
+    );
+    expect(terminateBookingForLossMock).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking category amendment (Area 4)", () => {
+  const AMEND_INPUT = {
+    bookingId: "b1",
+    newCategoryId: "cat-new",
+    mode: "CHARGE_DELTA" as const,
+  };
+
+  function makeAmendCtx(role: "STAFF" | "MANAGER") {
+    const prisma = {
+      booking: { findUnique: vi.fn(async () => ({ depotId: "depot1" })) },
+      $transaction: vi.fn(),
+    };
+    return {
+      ctx: {
+        prisma,
+        user: { id: "u1", role },
+        session: { user: { id: "u1", role } },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        reqId: "r1",
+        _skipAudit: true,
+      },
+      prisma,
+    };
+  }
+
+  beforeEach(() => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100 });
+    applyCategoryAmendmentMock.mockResolvedValue({
+      bookingId: "b1",
+      direction: "INCREASE",
+      delta: 100,
+    });
+  });
+
+  it("staff may execute a CHARGE_DELTA upgrade; the service gets allowNegativeDelta:false", async () => {
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategory(AMEND_INPUT);
+    expect(res).toMatchObject({ direction: "INCREASE" });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        bookingId: "b1",
+        newCategoryId: "cat-new",
+        mode: "CHARGE_DELTA",
+        actorId: "u1",
+        allowNegativeDelta: false,
+      }),
+    );
+  });
+
+  it("staff CANNOT execute a downgrade (preview delta < 0) — FORBIDDEN, service never runs", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: -80 });
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(caller.amendCategory(AMEND_INPUT)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a goodwill upgrade — FORBIDDEN before any service call", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "SERVICE_RECOVERY",
+        goodwillNote: "fleet swap",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("staff CANNOT run a price override — FORBIDDEN", async () => {
+    const { ctx } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        managerDelta: -20,
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("manager may run goodwill and downgrades; allowNegativeDelta:true, no gate preview", async () => {
+    const { ctx, prisma } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    await caller.amendCategory({
+      ...AMEND_INPUT,
+      mode: "GOODWILL_FREE_UPGRADE",
+      goodwillReason: "FLEET_REASSIGNMENT",
+      goodwillNote: "original bike written off",
+    });
+    expect(applyCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        mode: "GOODWILL_FREE_UPGRADE",
+        goodwillReason: "FLEET_REASSIGNMENT",
+        goodwillNote: "original bike written off",
+        allowNegativeDelta: true,
+      }),
+    );
+    // The manager path never needs the router-side gate preview.
+    expect(previewCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("Zod rejects bad mode combos before any service call", async () => {
+    const { ctx } = makeAmendCtx("MANAGER");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    // GOODWILL without reason/note.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, mode: "GOODWILL_FREE_UPGRADE" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // OVERRIDE without a delta.
+    await expect(
+      caller.amendCategory({
+        ...AMEND_INPUT,
+        mode: "MANAGER_PRICE_OVERRIDE",
+        overrideReason: "price match",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    // CHARGE_DELTA smuggling override/goodwill fields.
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, managerDelta: -50 }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      caller.amendCategory({ ...AMEND_INPUT, goodwillReason: "RETENTION" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+  });
+
+  it("amendCategoryPreview is staff-visible and quote-only", async () => {
+    previewCategoryAmendmentMock.mockResolvedValue({ delta: 100, direction: "INCREASE" });
+    const { ctx, prisma } = makeAmendCtx("STAFF");
+    const caller = staffBookingRouter.createCaller(ctx as never);
+    const res = await caller.amendCategoryPreview({
+      bookingId: "b1",
+      newCategoryId: "cat-new",
+    });
+    expect(res).toMatchObject({ delta: 100 });
+    // The mode defaults to CHARGE_DELTA when omitted.
+    expect(previewCategoryAmendmentMock).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ bookingId: "b1", mode: "CHARGE_DELTA" }),
+    );
+    expect(applyCategoryAmendmentMock).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("staffBooking.checkIn — excess cap on the legacy damage path", () => {
+  // The legacy (direct-API) settle flow used to raise the ad-hoc
+  // damageChargeAmount uncapped, bypassing the per-hire insurance excess
+  // that return.finalise enforces. It now clamps the damage slice through
+  // applyExcessCap; late/fuel/cleaning stay outside the cap.
+  function makeCheckInCtx(over: { bondLedger?: Record<string, unknown> | null } = {}) {
+    const booking = {
+      id: "b1",
+      bookingReference: "SCT-TEST-0001",
+      status: "ACTIVE",
+      customerId: "cust1",
+      depotId: "depot1",
+      vehicleId: null,
+      returnDepotId: null,
+      pickupOdometerKm: 100,
+      durationDays: 2,
+      // Scheduled return still an hour away — no late fee in play.
+      returnDateTime: new Date(Date.now() + 60 * 60 * 1000),
+      bondAmount: new Prisma.Decimal(0),
+      subtotal: new Prisma.Decimal(110),
+      addonTotal: new Prisma.Decimal(19),
+      gstAmount: new Prisma.Decimal(11.73),
+      totalAmount: new Prisma.Decimal(129),
+      category: { baseDailyRate: new Prisma.Decimal(80) },
+      vehicle: null,
+    };
+    const bondLedger = over.bondLedger === undefined ? null : over.bondLedger;
+    const bookingUpdate = vi.fn(
+      async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "b1",
+        status: (data.status as string) ?? "COMPLETED",
+      }),
+    );
+    const bondLedgerUpdate = vi.fn(async () => ({}));
+    const auditCreate = vi.fn(async () => ({}));
+    const prisma = {
+      booking: {
+        findUniqueOrThrow: vi.fn(async () => booking),
+        update: bookingUpdate,
+      },
+      inspection: {
+        // POST_HIRE gate first (clean COMPLETED inspection so the D4
+        // zero-damage gate stays out of the way), PRE_HIRE fuel read second.
+        findFirst: vi.fn(async ({ where }: { where: { type?: string } }) =>
+          where?.type === "POST_HIRE"
+            ? { status: "COMPLETED", items: [], overallCondition: "GOOD" }
+            : { fuelLevel: 100 },
+        ),
+      },
+      payment: {
+        aggregate: vi.fn(async () => ({ _sum: { amount: 0 } })),
+        findFirst: vi.fn(async () => null),
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+          id: "pay1",
+          ...data,
+        })),
+      },
+      bondLedger: {
+        findUnique: vi.fn(async () => bondLedger),
+        update: bondLedgerUpdate,
+      },
+      damageCharge: { updateMany: vi.fn(async () => ({ count: 0 })) },
+      auditLog: { create: auditCreate },
+      user: { findUnique: vi.fn(async () => ({ firstName: "Ada" })) },
+      returnAssessment: {
+        findUnique: vi.fn(async () => null),
+        findFirst: vi.fn(async () => null),
+      },
+      $transaction: vi.fn(async (cb: (t: unknown) => unknown) => cb(prisma)),
+    };
+    const ctx = {
+      prisma,
+      user: { id: "staff1", role: "STAFF" as const, depotId: null },
+      session: { user: { id: "staff1", role: "STAFF" as const } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    return { ctx, prisma, bookingUpdate, bondLedgerUpdate, auditCreate };
+  }
+
+  it("clamps the damage slice to the remaining excess headroom and audits EXCESS_CAP_APPLIED", async () => {
+    const { ctx, bookingUpdate, auditCreate } = makeCheckInCtx();
+    getBookingExcessMock.mockResolvedValue({
+      excess: 1000,
+      source: "BOOKING_INSURANCE",
+      tierName: "Basic",
+    });
+    getDamageLiabilityUsedMock.mockResolvedValue(800); // A$200 headroom left
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    await caller.checkIn({
+      bookingId: "b1",
+      odometerKm: 150,
+      fuelLevel: 100, // no fuel shortfall
+      damageChargeAmount: 500,
+      damageReason: "Cracked mirror",
+    });
+
+    const updateData = (
+      bookingUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }
+    ).data;
+    // Only the capped A$200 is raised (no bond → all card) and only that
+    // amount enters balanceDue.
+    expect(updateData.balanceDue).toBe(200);
+    const created = (
+      updateData.payments as { create: Array<Record<string, unknown>> }
+    ).create;
+    const dmg = created.find((p) => p.type === "DAMAGE_CHARGE");
+    expect(dmg).toMatchObject({ amount: 200, status: "PENDING", customerId: "cust1" });
+    // Same audit action return.finalise writes when it caps.
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: "EXCESS_CAP_APPLIED" }),
+      }),
+    );
+    // Revenue recognises the capped figure, not the requested one.
+    expect(recordAdditionalChargesMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ damageAmount: 200 }),
+    );
+  });
+
+  it("cap exhausted: zeroes the damage slice (bond released in full) while fuel stays billable", async () => {
+    const { ctx, bookingUpdate, bondLedgerUpdate } = makeCheckInCtx({
+      bondLedger: {
+        heldAmount: 500,
+        capturedAmount: 0,
+        releasedAmount: 0,
+        status: "HELD",
+        stripePaymentIntentId: "pi_bond_1",
+        deductions: [],
+      },
+    });
+    getBookingExcessMock.mockResolvedValue({
+      excess: 1000,
+      source: "BOOKING_INSURANCE",
+      tierName: "Basic",
+    });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000); // nothing left
+    const caller = staffBookingRouter.createCaller(ctx as never);
+
+    const res = await caller.checkIn({
+      bookingId: "b1",
+      odometerKm: 150,
+      fuelLevel: 50, // 4L short on an 8L tank
+      fuelChargePerLitre: 2,
+      damageChargeAmount: 300,
+      damageReason: "Scuffed panel",
+    });
+
+    const updateData = (
+      bookingUpdate.mock.calls[0]?.[0] as { data: Record<string, unknown> }
+    ).data;
+    const created = (
+      updateData.payments as { create: Array<Record<string, unknown>> }
+    ).create;
+    // Fuel sits OUTSIDE the excess cap — still raised in full.
+    expect(created.find((p) => p.type === "FUEL_CHARGE")).toMatchObject({ amount: 8 });
+    // The damage slice is capped to zero: no DAMAGE_CHARGE raise at all…
+    expect(created.find((p) => p.type === "DAMAGE_CHARGE")).toBeUndefined();
+    expect(updateData.balanceDue).toBe(8);
+    // …and the bond is NOT consumed for uncollectable damage — full release.
+    expect(bondLedgerUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ releasedAmount: 500, status: "RELEASED" }),
+      }),
+    );
+    expect(res.additionalCharges).toBe(8);
   });
 });

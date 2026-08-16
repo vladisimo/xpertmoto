@@ -15,6 +15,7 @@ function emptyDb(): PrismaLike {
     maintenanceWorkOrder: { findMany: async () => [] },
     rentalAgreement: { findMany: async () => [] },
     returnAssessment: { findMany: async () => [] },
+    incident: { findMany: async () => [] },
   } as unknown as PrismaLike;
 }
 
@@ -65,6 +66,7 @@ describe("collectAllTasks", () => {
       },
       rentalAgreement: { findMany: async () => [] },
       returnAssessment: { findMany: async () => [] },
+      incident: { findMany: async () => [] },
     } as unknown as PrismaLike;
 
     const { tasks } = await collectAllTasks(db, { now });
@@ -82,6 +84,7 @@ describe("collectAllTasks", () => {
       maintenanceWorkOrder: { findMany: async () => [] },
       rentalAgreement: { findMany: async () => [] },
       returnAssessment: { findMany: async () => [] },
+      incident: { findMany: async () => [] },
     } as unknown as PrismaLike;
     // Silence expected console.error from the aggregator
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -100,6 +103,7 @@ describe("collectAllTasks", () => {
       maintenanceWorkOrder: { findMany: async () => [] },
       rentalAgreement: { findMany: async () => [] },
       returnAssessment: { findMany: async () => [] },
+      incident: { findMany: async () => [] },
     } as unknown as PrismaLike;
     await collectAllTasks(db, { typeFilter: ["MAINTENANCE_WORK_ORDER"] });
     expect(bookingFindMany).not.toHaveBeenCalled();

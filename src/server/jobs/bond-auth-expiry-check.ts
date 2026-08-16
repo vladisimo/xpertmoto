@@ -52,6 +52,10 @@ export async function runBondAuthExpiryCheck(): Promise<{
           id: true,
           bookingReference: true,
           status: true,
+          // Loss-terminated hires land COMPLETED, but a HELD_FOR_CLAIM bond
+          // disposition means the hold is deliberately kept alive for the
+          // incident claim — the keep-alive predicate below includes them.
+          termination: { select: { bondDisposition: true } },
           customer: {
             select: {
               id: true,
@@ -78,7 +82,17 @@ export async function runBondAuthExpiryCheck(): Promise<{
     if (daysLeft > leadDays) continue;
 
     const bookingStatus = bond.booking.status;
-    if (["CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED"].includes(bookingStatus)) {
+    // Live hires, held-as-backstop returns, AND loss-terminated bookings
+    // whose bond is explicitly held for an incident claim (Area 2:
+    // termination.bondDisposition = HELD_FOR_CLAIM). Without the latter the
+    // hold would silently lapse before the claim settles — COMPLETED is not
+    // otherwise in the keep-alive set.
+    const heldForClaim =
+      bond.booking.termination?.bondDisposition === "HELD_FOR_CLAIM";
+    if (
+      ["CHECKED_OUT", "ACTIVE", "OVERDUE", "RETURNED"].includes(bookingStatus) ||
+      heldForClaim
+    ) {
       const outcome = await ensureFreshBondHold(prisma, {
         bookingId: bond.booking.id,
         minRemainingDays: leadDays,

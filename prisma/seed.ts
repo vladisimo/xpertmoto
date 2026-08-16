@@ -40,6 +40,10 @@ async function main() {
     prisma.incidentPhoto.deleteMany(),
     prisma.incidentDocument.deleteMany(),
     prisma.incidentNote.deleteMany(),
+    // Charges must go before incidents: DamageCharge_parent_chk requires an
+    // assessment OR incident parent, so the incident FK's SetNull would trip
+    // the CHECK for incident-parented charges.
+    prisma.damageCharge.deleteMany(),
     prisma.incident.deleteMany(),
     prisma.infringement.deleteMany(),
     prisma.vehicleImage.deleteMany(),

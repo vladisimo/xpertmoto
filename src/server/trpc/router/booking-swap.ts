@@ -1,12 +1,16 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { Prisma } from "@prisma/client";
-import type { PrismaClient } from "@prisma/client";
+import type { Inspection, PrismaClient, SwapOrigin, SwapReason } from "@prisma/client";
 
 import { createTRPCRouter, staffProcedure, managerProcedure } from "../trpc";
 import { assertBookingDepotAccess, assertDepotAccess } from "./_depot-scope";
-import { isVehicleFree } from "@/server/services/availability";
+import { isBookingOverlapViolation, isVehicleFree } from "@/server/services/availability";
+import { BALANCE_AFFECTING_CHARGE_TYPES } from "@/server/services/balance-due";
 import { quoteSwapDelta } from "@/server/services/pricing";
+import { BOOKING_RULES } from "@/lib/constants";
+import { TURNAROUND_WO_TITLE_PREFIX } from "@/server/jobs/swap-draft-cleanup";
+import { aud, gstFromInclusive, roundCents, toNumber } from "@/lib/money";
 import { refundCharge } from "@/lib/stripe";
 import { renderSwapAgreementPdf } from "@/lib/pdf/swap-agreement";
 import { uploadFile } from "@/lib/storage";
@@ -23,7 +27,11 @@ import {
   writeCustomerAuditAsync,
 } from "@/server/services/audit";
 import { generateWorkOrderNumber, generateIncidentNumber, withUniqueRetry } from "@/lib/id-gen";
-import { toStoredMarkers, type DamageMarkerInput } from "./inspection";
+import {
+  toStoredMarkers,
+  type DamageMarkerInput,
+  type StoredDamageMarker,
+} from "./inspection";
 
 /**
  * Mid-rental vehicle-swap router.
@@ -56,13 +64,28 @@ import { toStoredMarkers, type DamageMarkerInput } from "./inspection";
 const SWAP_ALLOWED_STATUSES = ["ACTIVE", "CHECKED_OUT", "OVERDUE"] as const;
 
 // Reason families — keyed off for pricing/workflow decisions.
-const NO_DELTA_REASONS = ["MECHANICAL_FAULT", "ACCIDENT_DAMAGE", "OPERATIONAL"] as const;
+// LOSS_REPLACEMENT (Area 2): the customer didn't choose to lose the vehicle,
+// so the replacement is forced zero-delta like the other involuntary reasons.
+const NO_DELTA_REASONS = [
+  "MECHANICAL_FAULT",
+  "ACCIDENT_DAMAGE",
+  "OPERATIONAL",
+  "LOSS_REPLACEMENT",
+] as const;
+// LOSS_REPLACEMENT deliberately absent: the outgoing vehicle is gone, not
+// repairable — no fault work order is lodged from the swap.
 const REQUIRES_WORK_ORDER = ["MECHANICAL_FAULT", "ACCIDENT_DAMAGE"] as const;
+// A loss event is significant — replacing a lost vehicle mid-hire is
+// manager-only, same gate family as fault/downgrade.
 const REQUIRES_MANAGER = [
   "DOWNGRADE",
   "MECHANICAL_FAULT",
   "ACCIDENT_DAMAGE",
+  "LOSS_REPLACEMENT",
 ] as const;
+
+/** Vehicle disposition statuses that mark the unit as lost to the fleet. */
+const LOST_VEHICLE_STATUSES = ["STOLEN", "WRITTEN_OFF", "END_OF_LIFE"] as const;
 
 const HIGH_DELTA_THRESHOLD = 200; // AUD — swaps above this require manager.
 
@@ -133,6 +156,30 @@ const swapDraftStateSchema = z.object({
   workOrderPriority: z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]),
 });
 
+/**
+ * Mirror swap damage markers into first-class `InspectionIssue` rows so
+ * swap-time damage feeds the same charge pipeline as return-time issues
+ * (`return.upsertDamageCharge` accepts same-booking SWAP_OUT issues). The
+ * deprecated `bodyDamageMap` blob is still written for UI back-compat.
+ */
+function markersToIssueRows(
+  inspectionId: string,
+  markers: StoredDamageMarker[],
+  isPreExisting: boolean,
+): Prisma.InspectionIssueCreateManyInput[] {
+  return markers.map((m) => ({
+    inspectionId,
+    side: m.view,
+    label: m.note?.trim() ? m.note.trim() : `Damage marker (${m.severity})`,
+    severity: m.severity,
+    note: m.note ?? null,
+    posX: m.x,
+    posY: m.y,
+    source: m.source,
+    isPreExisting,
+  }));
+}
+
 /** Odometer-rollback guard replicated from `inspectionRouter.create`. */
 async function assertNoOdometerRollback(
   tx: Prisma.TransactionClient | PrismaClient,
@@ -150,6 +197,75 @@ async function assertNoOdometerRollback(
       message: `Odometer rollback on vehicle — entered ${odometerKm}km, previous reading was ${latest.odometerKm}km on ${latest.dateTime.toISOString().slice(0, 10)}.`,
     });
   }
+}
+
+/**
+ * Shared tail of `startSwapDraft` / `startLossReplacementDraft`: enforces the
+ * one-DRAFT-per-booking soft lock, creates the DRAFT row, and writes the
+ * audit pair. Callers own the booking/status/role gates.
+ */
+async function openSwapDraft(
+  ctx: { prisma: PrismaClient; user: { id: string }; reqId: string },
+  args: {
+    bookingId: string;
+    outgoingVehicleId: string;
+    reason: SwapReason;
+    origin: SwapOrigin;
+    reasonNotes: string;
+    originDetails?: string;
+    incidentId?: string;
+  },
+) {
+  const existing = await ctx.prisma.bookingSwap.findFirst({
+    where: { bookingId: args.bookingId, status: "DRAFT" },
+    select: { id: true, swappedById: true },
+  });
+  if (existing) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message:
+        "A swap is already in progress for this booking. Void it first or have the original author complete it.",
+    });
+  }
+
+  const draft = await ctx.prisma.bookingSwap.create({
+    data: {
+      bookingId: args.bookingId,
+      outgoingVehicleId: args.outgoingVehicleId,
+      swappedById: ctx.user.id,
+      reason: args.reason,
+      origin: args.origin,
+      reasonNotes: args.reasonNotes,
+      originDetails: args.originDetails,
+      incidentId: args.incidentId,
+      status: "DRAFT",
+    },
+  });
+  await writeAudit(ctx.prisma, {
+    userId: ctx.user.id,
+    action: "BOOKING_SWAP_DRAFT_STARTED",
+    entity: "BookingSwap",
+    entityId: draft.id,
+    newData: {
+      bookingId: args.bookingId,
+      reason: args.reason,
+      origin: args.origin,
+      ...(args.incidentId ? { incidentId: args.incidentId } : {}),
+    },
+  });
+  // Companion row so the swap draft surfaces on the booking's Activity tab.
+  writeBookingAuditAsync(ctx.prisma, args.bookingId, {
+    userId: ctx.user.id,
+    action: "BOOKING_SWAP_DRAFT_STARTED",
+    reqId: ctx.reqId,
+    newData: {
+      swapId: draft.id,
+      reason: args.reason,
+      origin: args.origin,
+      ...(args.incidentId ? { incidentId: args.incidentId } : {}),
+    },
+  });
+  return draft;
 }
 
 export const bookingSwapRouter = createTRPCRouter({
@@ -265,6 +381,9 @@ export const bookingSwapRouter = createTRPCRouter({
       z.object({
         bookingId: z.string(),
         newCategoryId: z.string(),
+        // Vehicle-level pricing (baseRateOverride / model rates / vehicle
+        // tiers) only applies when the candidate is known.
+        incomingVehicleId: z.string().optional(),
         reason: z.enum([
           "UPGRADE",
           "DOWNGRADE",
@@ -279,23 +398,28 @@ export const bookingSwapRouter = createTRPCRouter({
       await assertBookingDepotAccess(ctx, input.bookingId);
       const b = await ctx.prisma.booking.findUniqueOrThrow({
         where: { id: input.bookingId },
-        select: { categoryId: true, returnDateTime: true, status: true },
+        select: { categoryId: true, vehicleId: true, returnDateTime: true, status: true },
       });
       const zeroDelta = (NO_DELTA_REASONS as readonly string[]).includes(input.reason);
       const sameCategory = b.categoryId === input.newCategoryId;
+      // UPGRADE/DOWNGRADE carry the vehicle-level rate difference even within
+      // one category; LATERAL keeps the same-category forced zero.
+      const specChange = input.reason === "UPGRADE" || input.reason === "DOWNGRADE";
       const raw = await quoteSwapDelta(ctx.prisma, {
         oldCategoryId: b.categoryId,
         newCategoryId: input.newCategoryId,
+        oldVehicleId: b.vehicleId ?? undefined,
+        newVehicleId: input.incomingVehicleId,
         swapAt: new Date(),
         returnDateTime: b.returnDateTime,
       });
-      if (zeroDelta || sameCategory) {
+      if (zeroDelta || (sameCategory && !specChange)) {
         return {
           ...raw,
           deltaAmount: 0,
           gstAmount: 0,
           direction: "NONE" as const,
-          forcedZero: zeroDelta ? "reason" : sameCategory ? "same-category" : null,
+          forcedZero: zeroDelta ? "reason" : ("same-category" as const),
         };
       }
       return { ...raw, forcedZero: null };
@@ -360,49 +484,136 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      const existing = await ctx.prisma.bookingSwap.findFirst({
-        where: { bookingId: b.id, status: "DRAFT" },
-        select: { id: true, swappedById: true },
+      return openSwapDraft(ctx, {
+        bookingId: b.id,
+        outgoingVehicleId: b.vehicleId,
+        reason: input.reason,
+        origin: input.origin,
+        reasonNotes: input.reasonNotes,
+        originDetails: input.originDetails,
       });
-      if (existing) {
+    }),
+
+  /**
+   * Open a DRAFT swap for a booking whose current vehicle has been lost
+   * (stolen / written off / destroyed) — the LOSS_REPLACEMENT variant of
+   * `startSwapDraft` (Area 2). Manager-only. Only valid while the loss is
+   * real: the outgoing vehicle must already carry a disposition status
+   * (STOLEN / WRITTEN_OFF / END_OF_LIFE), or an open TOTAL_LOSS incident
+   * must be on file for it. Zero price delta by reason; at commit the
+   * outgoing POST_HIRE inspection is waived and the lost vehicle's status
+   * is left untouched.
+   */
+  startLossReplacementDraft: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        reasonNotes: z.string().min(1),
+        /** Optional link to the loss incident (theft report, write-off). */
+        incidentId: z.string().optional(),
+        // Mirrors startSwapDraft's origin dimension; defaults to the staff
+        // member recording the loss.
+        origin: z
+          .enum([
+            "CUSTOMER_WALK_IN",
+            "CUSTOMER_PHONE_SUPPORT",
+            "CUSTOMER_SELF_SERVICE",
+            "ROADSIDE_ASSIST",
+            "STAFF_OBSERVED",
+            "TELEMATICS_ALERT",
+          ])
+          .default("STAFF_OBSERVED"),
+        originDetails: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const b = await ctx.prisma.booking.findUniqueOrThrow({
+        where: { id: input.bookingId },
+        select: { id: true, status: true, vehicleId: true },
+      });
+      if (!b.vehicleId) {
         throw new TRPCError({
-          code: "CONFLICT",
-          message:
-            "A swap is already in progress for this booking. Void it first or have the original author complete it.",
+          code: "BAD_REQUEST",
+          message: "Booking has no assigned vehicle to replace.",
+        });
+      }
+      if (!(SWAP_ALLOWED_STATUSES as readonly string[]).includes(b.status)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Cannot swap vehicle from status ${b.status}.`,
+        });
+      }
+      // LOSS_REPLACEMENT is in REQUIRES_MANAGER — a loss event is significant.
+      if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Reason "LOSS_REPLACEMENT" requires a manager-role user.`,
         });
       }
 
-      const draft = await ctx.prisma.bookingSwap.create({
-        data: {
-          bookingId: b.id,
-          outgoingVehicleId: b.vehicleId,
-          swappedById: ctx.user.id,
-          reason: input.reason,
-          origin: input.origin,
-          reasonNotes: input.reasonNotes,
-          originDetails: input.originDetails,
-          status: "DRAFT",
-        },
+      // The current vehicle must actually be lost: disposition status, or an
+      // open TOTAL_LOSS incident on file for it.
+      const vehicle = await ctx.prisma.vehicle.findUniqueOrThrow({
+        where: { id: b.vehicleId },
+        select: { id: true, internalCode: true, status: true },
       });
-      await writeAudit(ctx.prisma, {
-        userId: ctx.user.id,
-        action: "BOOKING_SWAP_DRAFT_STARTED",
-        entity: "BookingSwap",
-        entityId: draft.id,
-        newData: {
-          bookingId: b.id,
-          reason: input.reason,
-          origin: input.origin,
-        },
+      let lost = (LOST_VEHICLE_STATUSES as readonly string[]).includes(vehicle.status);
+      if (!lost) {
+        const openTotalLoss = await ctx.prisma.incident.findFirst({
+          where: {
+            vehicleId: vehicle.id,
+            severity: "TOTAL_LOSS",
+            status: { notIn: ["RESOLVED", "CLOSED"] },
+            deletedAt: null,
+          },
+          select: { id: true },
+        });
+        lost = openTotalLoss !== null;
+      }
+      if (!lost) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `Vehicle ${vehicle.internalCode} is not recorded as lost (status ${vehicle.status}, no open TOTAL_LOSS incident) — use a normal swap instead.`,
+        });
+      }
+
+      // Optional incident link must reference the outgoing vehicle, and the
+      // 1:1 BookingSwap.incidentId slot must be free.
+      if (input.incidentId) {
+        const incident = await ctx.prisma.incident.findUnique({
+          where: { id: input.incidentId },
+          select: {
+            id: true,
+            vehicleId: true,
+            deletedAt: true,
+            bookingSwap: { select: { id: true } },
+          },
+        });
+        if (!incident || incident.deletedAt || incident.vehicleId !== vehicle.id) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "incidentId does not reference an incident on the outgoing vehicle.",
+          });
+        }
+        if (incident.bookingSwap) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "That incident is already linked to another swap.",
+          });
+        }
+      }
+
+      return openSwapDraft(ctx, {
+        bookingId: b.id,
+        outgoingVehicleId: b.vehicleId,
+        reason: "LOSS_REPLACEMENT",
+        origin: input.origin,
+        reasonNotes: input.reasonNotes,
+        originDetails: input.originDetails,
+        incidentId: input.incidentId,
       });
-      // Companion row so the swap draft surfaces on the booking's Activity tab.
-      writeBookingAuditAsync(ctx.prisma, b.id, {
-        userId: ctx.user.id,
-        action: "BOOKING_SWAP_DRAFT_STARTED",
-        reqId: ctx.reqId,
-        newData: { swapId: draft.id, reason: input.reason, origin: input.origin },
-      });
-      return draft;
     }),
 
   /**
@@ -507,13 +718,21 @@ export const bookingSwapRouter = createTRPCRouter({
    * creates work order (fault), incident (accident), Payment delta
    * row (charge or refund), and generates the swap agreement PDF
    * outside the txn (non-critical).
+   *
+   * LOSS_REPLACEMENT (Area 2) waives the whole outgoing leg: no
+   * POST_HIRE inspection or odometer hand-off, and the lost vehicle's
+   * disposition status (STOLEN / WRITTEN_OFF / END_OF_LIFE) is left
+   * untouched. Incoming side is unchanged.
    */
   confirmSwap: staffProcedure
     .input(
       z.object({
         swapId: z.string(),
         incomingVehicleId: z.string(),
-        outgoingInspection: inspectionPayloadSchema,
+        // Required for every reason except LOSS_REPLACEMENT, where the
+        // outgoing vehicle is gone and the inspection is waived (enforced
+        // below once the draft's reason is known).
+        outgoingInspection: inspectionPayloadSchema.optional(),
         incomingInspection: inspectionPayloadSchema,
         // Accepts storage URL or a `data:image/...` data-URL; the inspection
         // row just stores whichever string the caller supplies.
@@ -584,6 +803,25 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
+      // LOSS_REPLACEMENT waives the outgoing leg entirely — the vehicle is
+      // not on hand to inspect, so no outgoing payload is accepted. Every
+      // other reason still requires it.
+      const isLossReplacement = draft.reason === "LOSS_REPLACEMENT";
+      const outgoingPayload = input.outgoingInspection ?? null;
+      if (!isLossReplacement && !outgoingPayload) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "outgoingInspection is required for this swap reason.",
+        });
+      }
+      if (isLossReplacement && outgoingPayload) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            "LOSS_REPLACEMENT waives the outgoing inspection — the vehicle is lost and cannot be inspected.",
+        });
+      }
+
       const incomingVehicle = await ctx.prisma.vehicle.findUniqueOrThrow({
         where: { id: input.incomingVehicleId },
         include: { category: true },
@@ -616,18 +854,6 @@ export const bookingSwapRouter = createTRPCRouter({
           message: "LATERAL swap must stay within the same category.",
         });
       }
-      if (draft.reason === "UPGRADE" && !categoryChanged) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "UPGRADE must change category; use LATERAL for same-category swaps.",
-        });
-      }
-      if (draft.reason === "DOWNGRADE" && !categoryChanged) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "DOWNGRADE must change category.",
-        });
-      }
       if (draft.reason === "ACCIDENT_DAMAGE" && !input.incidentSeverity) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -635,17 +861,24 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      // Re-quote pricing at commit time. Zero out if reason forces it or
-      // if same category. Override is allowed for managers only, within 5¢.
+      // Re-quote pricing at commit time, vehicle-aware: baseRateOverride /
+      // model rates / vehicle-scoped tiers can price two same-category
+      // vehicles differently, so UPGRADE/DOWNGRADE keep the computed delta
+      // even without a category change. LATERAL and the no-delta reasons
+      // stay forced to zero. Override is allowed for managers only, within 5¢.
       const zeroDelta = (NO_DELTA_REASONS as readonly string[]).includes(draft.reason);
+      const specChange = draft.reason === "UPGRADE" || draft.reason === "DOWNGRADE";
       const quote = await quoteSwapDelta(ctx.prisma, {
         oldCategoryId: booking.categoryId,
         newCategoryId: incomingVehicle.categoryId,
+        oldVehicleId: booking.vehicleId,
+        newVehicleId: incomingVehicle.id,
         swapAt: new Date(),
         returnDateTime: booking.returnDateTime,
       });
-      let deltaAmount = zeroDelta || !categoryChanged ? 0 : quote.deltaAmount;
-      let gstAmount = zeroDelta || !categoryChanged ? 0 : quote.gstAmount;
+      const useQuoted = !zeroDelta && (categoryChanged || specChange);
+      let deltaAmount = useQuoted ? quote.deltaAmount : 0;
+      let gstAmount = useQuoted ? quote.gstAmount : 0;
 
       if (input.priceAdjustmentOverride !== undefined) {
         if (!["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)) {
@@ -658,8 +891,21 @@ export const bookingSwapRouter = createTRPCRouter({
           // Manager is setting a different value — accept it explicitly.
           deltaAmount = input.priceAdjustmentOverride;
           // GST: still 1/11 of the absolute delta for display.
-          gstAmount = Math.round((Math.abs(deltaAmount) / 11) * 100) / 100;
+          gstAmount = toNumber(gstFromInclusive(Math.abs(deltaAmount)));
         }
+      }
+
+      // Same-category UPGRADE/DOWNGRADE with no price difference is a
+      // mislabelled LATERAL — but the guard runs on the EFFECTIVE delta,
+      // AFTER the manager override above: a manager forcing a non-zero
+      // delta on identically priced units is legitimate (goodwill charge or
+      // credit), so only staff-without-override (and a still-zero override)
+      // get steered to LATERAL.
+      if (specChange && !categoryChanged && Math.abs(deltaAmount) < 0.005) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `${draft.reason} within the same category needs a vehicle priced differently; use LATERAL for a no-charge same-category swap.`,
+        });
       }
 
       // High-delta gate: require manager for any non-zero delta above
@@ -676,12 +922,16 @@ export const bookingSwapRouter = createTRPCRouter({
         });
       }
 
-      // Odometer rollback guards before we open the transaction.
-      await assertNoOdometerRollback(
-        ctx.prisma,
-        booking.vehicleId,
-        input.outgoingInspection.odometerKm,
-      );
+      // Odometer rollback guards before we open the transaction. The
+      // outgoing guard is skipped for LOSS_REPLACEMENT — there is no
+      // outgoing reading to validate.
+      if (outgoingPayload) {
+        await assertNoOdometerRollback(
+          ctx.prisma,
+          booking.vehicleId,
+          outgoingPayload.odometerKm,
+        );
+      }
       await assertNoOdometerRollback(
         ctx.prisma,
         incomingVehicle.id,
@@ -696,9 +946,9 @@ export const bookingSwapRouter = createTRPCRouter({
             ? "CHARGE"
             : "REFUND";
       const absDelta = Math.abs(deltaAmount);
-      const outgoingMarkers = toStoredMarkers(
-        input.outgoingInspection.damageMarkers as DamageMarkerInput[],
-      );
+      const outgoingMarkers = outgoingPayload
+        ? toStoredMarkers(outgoingPayload.damageMarkers as DamageMarkerInput[])
+        : [];
       const incomingMarkers = toStoredMarkers(
         input.incomingInspection.damageMarkers as DamageMarkerInput[],
       );
@@ -712,6 +962,14 @@ export const bookingSwapRouter = createTRPCRouter({
       // Stripe refund happens BEFORE the DB transaction so a refund
       // failure doesn't leave DB state inconsistent. Charge rows are
       // created PENDING and captured by G5 off-session.
+      //
+      // A downgrade delta offsets the customer's outstanding balance before
+      // any cash moves: the unpaid base is balanceDue minus PENDING raises
+      // (those already belong to the capture sweep — same exclusion as
+      // pickup-remainder). Only the surplus over that debt is refunded via
+      // Stripe. A fully-offset delta is a pure balance write-down — no
+      // Stripe call and no Payment row; the DECREASE adjustment note below
+      // still documents the full delta.
       let refundPaymentData:
         | {
             stripeChargeId: string | null;
@@ -719,43 +977,72 @@ export const bookingSwapRouter = createTRPCRouter({
           }
         | null = null;
       let fallbackToCredit = false;
+      let refundOffset = 0;
+      let refundCash = 0;
       if (direction === "REFUND") {
-        const sourcePayment = booking.payments[0];
-        if (!sourcePayment) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message:
-              "No SUCCEEDED booking payment found to refund against. Contact finance.",
-          });
-        }
-        const chargeAt = sourcePayment.processedAt ?? sourcePayment.createdAt;
-        const daysSince = (Date.now() - chargeAt.getTime()) / (1000 * 60 * 60 * 24);
-        if (daysSince > 180) {
-          fallbackToCredit = true;
-        } else if (Number(sourcePayment.amount) < absDelta - 0.01) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: `Refund A$${absDelta.toFixed(2)} exceeds original charge A$${Number(sourcePayment.amount).toFixed(2)}.`,
-          });
-        } else {
-          try {
-            const res = await refundCharge({
-              paymentIntentId: sourcePayment.stripePaymentIntentId,
-              chargeId: sourcePayment.stripeChargeId,
-              amountCents: Math.round(absDelta * 100),
-              reason: "requested_by_customer",
-              idempotencyKey: `swap-refund-${draft.id}`,
-              metadata: { swapId: draft.id, paymentId: sourcePayment.id, staffId: ctx.user.id },
+        // Only PENDING *raises* (balance-affecting charge types) belong to
+        // the capture sweep and shrink the unpaid base. PENDING credits owed
+        // TO the customer — MANUAL_CREDIT / REFUND rows, which this very
+        // flow creates via the >180d fallback — must not, or a booking with
+        // real debt plus a pending credit would over-refund cash here while
+        // leaving zombie balanceDue to be dunned.
+        const pendingRaised = await ctx.prisma.payment.aggregate({
+          where: {
+            bookingId: booking.id,
+            status: "PENDING",
+            type: { in: [...BALANCE_AFFECTING_CHARGE_TYPES] },
+            deletedAt: null,
+          },
+          _sum: { amount: true },
+        });
+        const unpaidBase = Math.max(
+          0,
+          toNumber(
+            roundCents(
+              aud(booking.balanceDue).minus(aud(Number(pendingRaised._sum.amount ?? 0))),
+            ),
+          ),
+        );
+        refundOffset = Math.min(absDelta, unpaidBase);
+        refundCash = toNumber(roundCents(aud(absDelta).minus(refundOffset)));
+        if (refundCash > 0.005) {
+          const sourcePayment = booking.payments[0];
+          if (!sourcePayment) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message:
+                "No SUCCEEDED booking payment found to refund against. Contact finance.",
             });
-            refundPaymentData = {
-              stripeChargeId: res.id,
-              status: res.status === "succeeded" ? "SUCCEEDED" : "PENDING",
-            };
-          } catch {
-            refundPaymentData = {
-              stripeChargeId: null,
-              status: "FAILED",
-            };
+          }
+          const chargeAt = sourcePayment.processedAt ?? sourcePayment.createdAt;
+          const daysSince = (Date.now() - chargeAt.getTime()) / (1000 * 60 * 60 * 24);
+          if (daysSince > 180) {
+            fallbackToCredit = true;
+          } else if (Number(sourcePayment.amount) < refundCash - 0.01) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Refund A$${refundCash.toFixed(2)} exceeds original charge A$${Number(sourcePayment.amount).toFixed(2)}.`,
+            });
+          } else {
+            try {
+              const res = await refundCharge({
+                paymentIntentId: sourcePayment.stripePaymentIntentId,
+                chargeId: sourcePayment.stripeChargeId,
+                amountCents: Math.round(refundCash * 100),
+                reason: "requested_by_customer",
+                idempotencyKey: `swap-refund-${draft.id}`,
+                metadata: { swapId: draft.id, paymentId: sourcePayment.id, staffId: ctx.user.id },
+              });
+              refundPaymentData = {
+                stripeChargeId: res.id,
+                status: res.status === "succeeded" ? "SUCCEEDED" : "PENDING",
+              };
+            } catch {
+              refundPaymentData = {
+                stripeChargeId: null,
+                status: "FAILED",
+              };
+            }
           }
         }
       }
@@ -775,32 +1062,44 @@ export const bookingSwapRouter = createTRPCRouter({
           });
         }
 
-        // 1. Outgoing POST_HIRE inspection (purpose=SWAP_OUT).
-        const outgoingInspection = await tx.inspection.create({
-          data: {
-            vehicleId: outgoingVehicleId,
-            bookingId: booking.id,
-            type: "POST_HIRE",
-            purpose: "SWAP_OUT",
-            depotId: incomingVehicle.depotId,
-            inspectorId: ctx.user.id,
-            odometerKm: input.outgoingInspection.odometerKm,
-            fuelLevel: input.outgoingInspection.fuelLevel,
-            overallCondition: input.outgoingInspection.overallCondition,
-            tyreFrontDepth: input.outgoingInspection.tyreFrontDepth,
-            tyreRearDepth: input.outgoingInspection.tyreRearDepth,
-            lightsWorking: input.outgoingInspection.lightsWorking,
-            hornWorking: input.outgoingInspection.hornWorking,
-            indicatorsWorking: input.outgoingInspection.indicatorsWorking,
-            engineRunning: input.outgoingInspection.engineRunning,
-            lockProvided: input.outgoingInspection.lockProvided,
-            notes: input.outgoingInspection.notes,
-            customerSignatureUrl: input.customerSignatureUrl,
-            staffSignatureUrl: input.staffSignatureUrl,
-            bodyDamageMap: { markers: outgoingMarkers } as unknown as Prisma.InputJsonValue,
-            status: "COMPLETED",
-          },
-        });
+        // 1. Outgoing POST_HIRE inspection (purpose=SWAP_OUT). Waived for
+        // LOSS_REPLACEMENT — the vehicle is lost, there is nothing to inspect.
+        let outgoingInspection: Inspection | null = null;
+        if (outgoingPayload) {
+          outgoingInspection = await tx.inspection.create({
+            data: {
+              vehicleId: outgoingVehicleId,
+              bookingId: booking.id,
+              type: "POST_HIRE",
+              purpose: "SWAP_OUT",
+              depotId: incomingVehicle.depotId,
+              inspectorId: ctx.user.id,
+              odometerKm: outgoingPayload.odometerKm,
+              fuelLevel: outgoingPayload.fuelLevel,
+              overallCondition: outgoingPayload.overallCondition,
+              tyreFrontDepth: outgoingPayload.tyreFrontDepth,
+              tyreRearDepth: outgoingPayload.tyreRearDepth,
+              lightsWorking: outgoingPayload.lightsWorking,
+              hornWorking: outgoingPayload.hornWorking,
+              indicatorsWorking: outgoingPayload.indicatorsWorking,
+              engineRunning: outgoingPayload.engineRunning,
+              lockProvided: outgoingPayload.lockProvided,
+              notes: outgoingPayload.notes,
+              customerSignatureUrl: input.customerSignatureUrl,
+              staffSignatureUrl: input.staffSignatureUrl,
+              bodyDamageMap: { markers: outgoingMarkers } as unknown as Prisma.InputJsonValue,
+              status: "COMPLETED",
+            },
+          });
+          // Outgoing markers are end-of-leg damage on THIS hire — mirrored as
+          // labelled issues so the check-in assess page can raise a
+          // DamageCharge from them (isPreExisting=false → chargeable).
+          if (outgoingMarkers.length > 0) {
+            await tx.inspectionIssue.createMany({
+              data: markersToIssueRows(outgoingInspection.id, outgoingMarkers, false),
+            });
+          }
+        }
 
         // 2. Incoming PRE_HIRE inspection (purpose=SWAP_IN).
         const incomingInspection = await tx.inspection.create({
@@ -828,40 +1127,84 @@ export const bookingSwapRouter = createTRPCRouter({
             status: "COMPLETED",
           },
         });
+        // Incoming markers record the replacement vehicle's condition at
+        // hand-over — pre-existing by definition, so they baseline the
+        // eventual return diff and can never be charged to the customer.
+        if (incomingMarkers.length > 0) {
+          await tx.inspectionIssue.createMany({
+            data: markersToIssueRows(incomingInspection.id, incomingMarkers, true),
+          });
+        }
 
         // 3. Vehicle odometer hand-off: outgoing POST_HIRE km becomes
         // the outgoing vehicle's current, incoming PRE_HIRE km becomes
         // the incoming vehicle's current (may be a correction from a
-        // prior drift).
-        await tx.vehicle.update({
-          where: { id: outgoingVehicleId },
-          data: { currentOdometerKm: input.outgoingInspection.odometerKm },
-        });
+        // prior drift). LOSS_REPLACEMENT has no outgoing reading — the
+        // lost vehicle's odometer stays at its last known value.
+        if (outgoingPayload) {
+          await tx.vehicle.update({
+            where: { id: outgoingVehicleId },
+            data: { currentOdometerKm: outgoingPayload.odometerKm },
+          });
+        }
         await tx.vehicle.update({
           where: { id: incomingVehicle.id },
           data: { currentOdometerKm: input.incomingInspection.odometerKm },
         });
 
-        // 4. Vehicle status transitions + logs.
-        const outgoingNextStatus = (REQUIRES_WORK_ORDER as readonly string[]).includes(
-          draft.reason,
-        )
-          ? "IN_MAINTENANCE"
-          : "AVAILABLE";
-        await tx.vehicle.update({
-          where: { id: outgoingVehicleId },
-          data: {
-            status: outgoingNextStatus,
-            statusLog: {
-              create: {
-                previousStatus: "RENTED",
-                newStatus: outgoingNextStatus,
-                changedById: ctx.user.id,
-                reason: `Swapped off ${booking.bookingReference}: ${draft.reason}`,
+        // 4. Vehicle status transitions + logs. LOSS_REPLACEMENT leaves the
+        // outgoing vehicle completely untouched — it keeps its disposition
+        // status (STOLEN / WRITTEN_OFF / END_OF_LIFE) and never re-enters
+        // the available pool, so no turnaround buffer either.
+        const outgoingNextStatus = isLossReplacement
+          ? null
+          : (REQUIRES_WORK_ORDER as readonly string[]).includes(draft.reason)
+            ? "IN_MAINTENANCE"
+            : "AVAILABLE";
+        if (outgoingNextStatus) {
+          await tx.vehicle.update({
+            where: { id: outgoingVehicleId },
+            data: {
+              status: outgoingNextStatus,
+              statusLog: {
+                create: {
+                  previousStatus: "RENTED",
+                  newStatus: outgoingNextStatus,
+                  changedById: ctx.user.id,
+                  reason: `Swapped off ${booking.bookingReference}: ${draft.reason}`,
+                },
               },
             },
-          },
-        });
+          });
+        } else if (isLossReplacement) {
+          // The draft gate also admits vehicles with an open TOTAL_LOSS
+          // incident that haven't been decommissioned yet — those are still
+          // RENTED (or RESERVED) here, and once the booking re-points at the
+          // replacement nothing would ever move them again. Park them in
+          // IN_MAINTENANCE with a log directing staff to finish the
+          // write-off/theft confirmation. Vehicles already in a disposition
+          // status (STOLEN / WRITTEN_OFF / END_OF_LIFE) stay untouched.
+          const outgoingNow = await tx.vehicle.findUniqueOrThrow({
+            where: { id: outgoingVehicleId },
+            select: { status: true },
+          });
+          if (outgoingNow.status === "RENTED" || outgoingNow.status === "RESERVED") {
+            await tx.vehicle.update({
+              where: { id: outgoingVehicleId },
+              data: {
+                status: "IN_MAINTENANCE",
+                statusLog: {
+                  create: {
+                    previousStatus: outgoingNow.status,
+                    newStatus: "IN_MAINTENANCE",
+                    changedById: ctx.user.id,
+                    reason: `Loss replacement committed on ${booking.bookingReference} — awaiting write-off/theft confirmation; decommission this vehicle.`,
+                  },
+                },
+              },
+            });
+          }
+        }
         await tx.vehicle.update({
           where: { id: incomingVehicle.id },
           data: {
@@ -877,11 +1220,52 @@ export const bookingSwapRouter = createTRPCRouter({
           },
         });
 
-        // 5. Booking vehicle reassignment + booking log + note.
+        // 4b. Cleaning buffer (rule #6): a swapped-out vehicle going straight
+        // back to AVAILABLE would otherwise be bookable immediately — the
+        // usual 2h buffer keys off booking windows, and this hire's window is
+        // still open on the *incoming* vehicle. A scheduled turnaround work
+        // order over `bufferHoursBetweenBookings` blocks it in availability
+        // (`vehiclesBlockedByScheduledWorkOrders`); the nightly
+        // swap-draft-cleanup job auto-completes it once the window lapses.
+        // Fault/accident swaps skip this — the vehicle goes to maintenance.
+        if (outgoingNextStatus === "AVAILABLE") {
+          const turnaroundStart = new Date();
+          const turnaroundEnd = new Date(
+            turnaroundStart.getTime() +
+              BOOKING_RULES.bufferHoursBetweenBookings * 60 * 60 * 1000,
+          );
+          await withUniqueRetry(
+            () =>
+              tx.maintenanceWorkOrder.create({
+                data: {
+                  workOrderNumber: generateWorkOrderNumber(),
+                  vehicleId: outgoingVehicleId,
+                  depotId: incomingVehicle.depotId,
+                  type: "CUSTOM",
+                  priority: "LOW",
+                  status: "OPEN",
+                  title: `${TURNAROUND_WO_TITLE_PREFIX} swap ${booking.bookingReference}`,
+                  description: `Post-swap cleaning/turnaround buffer (${BOOKING_RULES.bufferHoursBetweenBookings}h) after mid-rental swap off ${booking.bookingReference}. Auto-completes once the scheduled window lapses; complete early if the vehicle is turned around sooner.`,
+                  scheduledStartAt: turnaroundStart,
+                  scheduledEndAt: turnaroundEnd,
+                  reportedById: ctx.user.id,
+                  relatedInspectionId: outgoingInspection?.id,
+                },
+              }),
+            { constraintFields: ["workOrderNumber"] },
+          );
+        }
+
+        // 5. Booking vehicle reassignment + booking log + note. categoryId
+        // follows the incoming vehicle so later consumers (late fees,
+        // extensions, a second swap's quote) price off the category the
+        // customer is actually riding; history stays on the BookingSwap
+        // chain + audit rows.
         await tx.booking.update({
           where: { id: booking.id },
           data: {
             vehicleId: incomingVehicle.id,
+            categoryId: incomingVehicle.categoryId,
             bookingNotes: {
               create: {
                 userId: ctx.user.id,
@@ -919,7 +1303,7 @@ export const bookingSwapRouter = createTRPCRouter({
                       : `Fault reported mid-rental — ${booking.bookingReference}`,
                   description: `${draft.reasonNotes}\n\nReported via: ${draft.origin}${draft.originDetails ? ` — ${draft.originDetails}` : ""}\nBooking: ${booking.bookingReference}`,
                   reportedById: ctx.user.id,
-                  relatedInspectionId: outgoingInspection.id,
+                  relatedInspectionId: outgoingInspection?.id,
                   logs: {
                     create: {
                       action: "OPEN",
@@ -991,11 +1375,20 @@ export const bookingSwapRouter = createTRPCRouter({
           // SWAP_ADJUSTMENT is balance-affecting, so its capture decrements
           // balanceDue — without this increment the capture would eat into
           // UNRELATED debt on the booking and silently stop it being dunned.
+          // Totals move with the raise (extend's arithmetic) so a later
+          // re-quote or swap-back prices off the upgraded consideration.
           await tx.booking.update({
             where: { id: booking.id },
-            data: { balanceDue: { increment: absDelta } },
+            data: {
+              balanceDue: { increment: absDelta },
+              totalAmount: { increment: absDelta },
+              gstAmount: { increment: gstAmount },
+            },
           });
         } else if (direction === "REFUND") {
+          // Payment rows only cover the cash slice; the offset slice is a
+          // debt reduction with no ledger row of its own.
+          const cashGst = toNumber(gstFromInclusive(refundCash));
           if (fallbackToCredit) {
             // >180d — record as MANUAL_CREDIT so the ledger reflects
             // intent; manager reconciles via bank transfer.
@@ -1006,8 +1399,8 @@ export const bookingSwapRouter = createTRPCRouter({
                 bookingId: booking.id,
                 type: "MANUAL_CREDIT",
                 method: "BANK_TRANSFER",
-                amount: absDelta,
-                gstAmount,
+                amount: refundCash,
+                gstAmount: cashGst,
                 status: "PENDING",
                 processedById: ctx.user.id,
                 notes: `Swap DOWNGRADE refund >180d: needs manual reconcile via credit note / bank transfer.`,
@@ -1022,8 +1415,8 @@ export const bookingSwapRouter = createTRPCRouter({
                 bookingId: booking.id,
                 type: "REFUND",
                 method: "STRIPE",
-                amount: absDelta,
-                gstAmount,
+                amount: refundCash,
+                gstAmount: cashGst,
                 status: refundPaymentData.status,
                 stripeChargeId: refundPaymentData.stripeChargeId,
                 processedAt: refundPaymentData.status === "SUCCEEDED" ? new Date() : null,
@@ -1037,7 +1430,7 @@ export const bookingSwapRouter = createTRPCRouter({
               const source = booking.payments[0];
               if (source) {
                 const newStatus =
-                  absDelta >= Number(source.amount) - 0.01
+                  refundCash >= Number(source.amount) - 0.01
                     ? "REFUNDED"
                     : "PARTIALLY_REFUNDED";
                 await tx.payment.update({
@@ -1046,6 +1439,64 @@ export const bookingSwapRouter = createTRPCRouter({
                 });
               }
             }
+          }
+          // Refund settlement policy (the §29-75 DECREASE note after the
+          // transaction is gated on exactly the same condition, so the note
+          // and this write-down can never diverge):
+          //   - FAILED Stripe refund → NOTHING is booked: no write-down, no
+          //     note. The manager notification after the transaction owns
+          //     the follow-up.
+          //   - SUCCEEDED / PENDING / no-cash (pure offset or the >180d
+          //     MANUAL_CREDIT fallback) → the consideration reduction is
+          //     booked now: totals drop by the full delta, balanceDue by the
+          //     offset slice, and the note issues. amountPaid, however, only
+          //     moves when cash has actually settled: at commit for a
+          //     SUCCEEDED refund, at the charge.refund.updated webhook for a
+          //     PENDING one (the row stays PENDING until Stripe confirms),
+          //     and at reconcileCreditTransfer for the MANUAL_CREDIT slice.
+          if (refundPaymentData?.status !== "FAILED") {
+            // refundOffset was computed from a PRE-Stripe read of balanceDue,
+            // and a concurrent capture during the Stripe round-trip may have
+            // shrunk the balance since — a blind decrement would overshoot
+            // (negative-clamp or eat unrelated fresh raises). Clamp against
+            // a fresh in-tx read. The Stripe cash amount is NOT adjustable
+            // here: that money already moved before the transaction opened,
+            // so only the offset half can react to the fresh read.
+            let offsetApplied = 0;
+            if (refundOffset > 0.005) {
+              const freshBooking = await tx.booking.findUniqueOrThrow({
+                where: { id: booking.id },
+                select: { balanceDue: true },
+              });
+              offsetApplied = Math.min(
+                refundOffset,
+                Math.max(0, toNumber(roundCents(aud(freshBooking.balanceDue)))),
+              );
+              if (offsetApplied < refundOffset - 0.005) {
+                logger.warn(
+                  {
+                    swapId: draft.id,
+                    bookingId: booking.id,
+                    refundOffset,
+                    offsetApplied,
+                  },
+                  "swap refund offset clamped — balanceDue shrank during the Stripe round-trip; reconcile the shortfall manually",
+                );
+              }
+            }
+            await tx.booking.update({
+              where: { id: booking.id },
+              data: {
+                totalAmount: { decrement: absDelta },
+                gstAmount: { decrement: gstAmount },
+                ...(offsetApplied > 0.005
+                  ? { balanceDue: { decrement: offsetApplied } }
+                  : {}),
+                ...(refundPaymentData?.status === "SUCCEEDED"
+                  ? { amountPaid: { decrement: refundCash } }
+                  : {}),
+              },
+            });
           }
         }
 
@@ -1084,10 +1535,12 @@ export const bookingSwapRouter = createTRPCRouter({
             priceAdjustmentGst: gstAmount,
             priceAdjustmentDirection: direction,
             paymentId,
-            outgoingInspectionId: outgoingInspection.id,
+            outgoingInspectionId: outgoingInspection?.id ?? null,
             incomingInspectionId: incomingInspection.id,
             workOrderId,
-            incidentId,
+            // Preserve a loss incident linked at draft time (LOSS_REPLACEMENT);
+            // ACCIDENT_DAMAGE swaps set the freshly created incident instead.
+            incidentId: incidentId ?? draft.incidentId,
             customerSignatureUrl: input.customerSignatureUrl,
             staffSignatureUrl: input.staffSignatureUrl,
             bondVarianceAmount: Math.abs(bondVariance) > 0.005 ? bondVariance : null,
@@ -1096,13 +1549,32 @@ export const bookingSwapRouter = createTRPCRouter({
         });
 
         return { committed, outgoingInspection, incomingInspection, paymentId, direction, absDelta, gstAmount };
+      }).catch((err: unknown) => {
+        // The Booking_no_overlap exclusion constraint can still fire inside
+        // the transaction after the pre-flight isVehicleFree checks — e.g.
+        // the replacement vehicle holds a CONFIRMED booking that starts
+        // before this hire ends. Surface it as an actionable CONFLICT
+        // instead of a raw 23P01 500 (same classification as checkOut).
+        if (isBookingOverlapViolation(err)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message:
+              "The replacement vehicle has a booking earlier in this hire's window — choose another vehicle.",
+          });
+        }
+        throw err;
       });
 
       // Issue an ATO §29-75 adjustment note for the swap pricing delta.
       // CHARGE → INCREASE adjustment; REFUND (via Stripe or credit) →
       // DECREASE adjustment. Zero-delta swaps (operational / fault) skip
-      // issuance — there's no consideration change.
-      if (result.direction !== "NONE" && result.absDelta > 0.005) {
+      // issuance — there's no consideration change. A REFUND whose Stripe
+      // call FAILED skips it too: the transaction booked no write-down for
+      // it (see the settlement-policy comment there), so issuing the note
+      // would document a consideration change the ledger never recorded.
+      const refundBooked =
+        result.direction !== "REFUND" || refundPaymentData?.status !== "FAILED";
+      if (result.direction !== "NONE" && result.absDelta > 0.005 && refundBooked) {
         try {
           const { tryIssueAdjustmentForBooking } = await import(
             "@/server/services/invoice-lifecycle"
@@ -1215,10 +1687,12 @@ export const bookingSwapRouter = createTRPCRouter({
           outgoing: {
             ...outgoingVehicleFull,
             categoryName: booking.category.name,
-            odometerKm: input.outgoingInspection.odometerKm,
-            fuelLevel: input.outgoingInspection.fuelLevel,
-            overallCondition: input.outgoingInspection.overallCondition,
-            notes: input.outgoingInspection.notes ?? null,
+            // Null inspection fields = waived outgoing inspection
+            // (LOSS_REPLACEMENT); the PDF renders an honest waiver line.
+            odometerKm: outgoingPayload?.odometerKm ?? null,
+            fuelLevel: outgoingPayload?.fuelLevel ?? null,
+            overallCondition: outgoingPayload?.overallCondition ?? null,
+            notes: outgoingPayload?.notes ?? null,
           },
           incoming: {
             internalCode: incomingVehicle.internalCode,
@@ -1257,7 +1731,13 @@ export const bookingSwapRouter = createTRPCRouter({
       // Notify depot managers when a fault/accident swap lodges a work order
       // or incident — mirrors fleet.createIncident's broadcast pattern so the
       // maintenance queue sees the same push they'd get from a direct report.
-      if (result.committed.workOrderId || result.committed.incidentId) {
+      // LOSS_REPLACEMENT is excluded: its incident link (if any) is the
+      // pre-existing loss incident, already broadcast when it was reported —
+      // this swap lodges nothing new.
+      if (
+        !isLossReplacement &&
+        (result.committed.workOrderId || result.committed.incidentId)
+      ) {
         const managers = await ctx.prisma.user.findMany({
           where: {
             role: { in: ["MANAGER", "ADMIN"] },
@@ -1291,6 +1771,41 @@ export const bookingSwapRouter = createTRPCRouter({
             },
             sentById: ctx.user.id,
             dedupKey: `swap-fault:${result.committed.id}:${m.id}`,
+          });
+        }
+      }
+
+      // A FAILED Stripe refund committed the swap but moved no money and
+      // wrote no ledger decrements — page depot managers so the downgrade
+      // refund is chased manually instead of silently going stale.
+      if (direction === "REFUND" && refundPaymentData?.status === "FAILED") {
+        const managers = await ctx.prisma.user.findMany({
+          where: {
+            role: { in: ["MANAGER", "ADMIN"] },
+            deletedAt: null,
+            OR: [{ depotId: incomingVehicle.depotId }, { depotId: null }],
+          },
+          select: { id: true },
+        });
+        const subject = `Swap refund FAILED on booking ${booking.bookingReference}`;
+        for (const m of managers) {
+          await sendNotification({
+            userId: m.id,
+            type: "BOOKING_MODIFIED",
+            category: "OPERATIONAL",
+            channels: ["IN_APP", "EMAIL"],
+            subject,
+            title: subject,
+            body: `The Stripe refund of A$${refundCash.toFixed(2)} for the ${draft.reason} swap on ${booking.bookingReference} failed. The swap is committed but the customer has NOT been refunded and the booking ledger was not written down — refund manually and reconcile.`,
+            data: {
+              swapId: result.committed.id,
+              bookingId: booking.id,
+              paymentId: result.paymentId,
+              refundCash,
+              reason: draft.reason,
+            },
+            sentById: ctx.user.id,
+            dedupKey: `swap-refund-failed:${result.committed.id}:${m.id}`,
           });
         }
       }
@@ -1397,6 +1912,9 @@ export const bookingSwapRouter = createTRPCRouter({
         where: { id: draft.id },
         data: {
           status: "VOIDED",
+          // Release the 1:1 incident slot (only LOSS_REPLACEMENT drafts link
+          // one pre-commit) so a retry draft can re-link the loss incident.
+          incidentId: null,
           reasonNotes:
             draft.reasonNotes +
             (input.reason ? `\n\n[VOIDED: ${input.reason}]` : "\n\n[VOIDED]"),
@@ -1439,14 +1957,55 @@ export const bookingSwapRouter = createTRPCRouter({
           message: "Only PENDING MANUAL_CREDIT payments can be reconciled here.",
         });
       }
-      return ctx.prisma.payment.update({
-        where: { id: p.id },
-        data: {
-          status: "SUCCEEDED",
-          processedAt: new Date(),
-          processedById: ctx.user.id,
-          notes: `${p.notes ?? ""}\nReconciled via bank transfer ref ${input.reference} by ${ctx.user.id}.`,
-        },
+      return ctx.prisma.$transaction(async (tx) => {
+        // Status-guarded flip: the PENDING pre-check above is a plain read,
+        // so two concurrent reconcile calls could both pass it and
+        // double-decrement amountPaid. Gate the transition on the row still
+        // being PENDING and apply the ledger decrement only when this call
+        // won the flip.
+        const flipped = await tx.payment.updateMany({
+          where: { id: p.id, status: "PENDING" },
+          data: {
+            status: "SUCCEEDED",
+            processedAt: new Date(),
+            processedById: ctx.user.id,
+            notes: `${p.notes ?? ""}\nReconciled via bank transfer ref ${input.reference} by ${ctx.user.id}.`,
+          },
+        });
+        if (flipped.count !== 1) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "This credit was already reconciled by another request.",
+          });
+        }
+        // The credited cash has now actually left via bank transfer — the
+        // booking's paid-to-date drops by it here, not at swap commit
+        // (totals/balance were already written down in confirmSwap). Clamp
+        // at zero: historical pre-fix SWAP-CREDIT rows were committed under
+        // older semantics where amountPaid can already sit below the credit
+        // amount, and a blind decrement would drive it negative.
+        //
+        // No double-heal with scripts/reconcile-swap-money.ts: that script
+        // reconstructs totals/gst and marker-backfills amountPaid ONLY for
+        // SUCCEEDED `SWAP-REF-*` cash refunds — it never moves amountPaid
+        // for `SWAP-CREDIT-*` rows (see reconstructSwapNet), so this
+        // reconcile is the sole amountPaid mover for credits.
+        if (p.bookingId) {
+          const fresh = await tx.booking.findUniqueOrThrow({
+            where: { id: p.bookingId },
+            select: { amountPaid: true },
+          });
+          await tx.booking.update({
+            where: { id: p.bookingId },
+            data: {
+              amountPaid: Math.max(
+                0,
+                toNumber(roundCents(aud(fresh.amountPaid).minus(aud(p.amount)))),
+              ),
+            },
+          });
+        }
+        return tx.payment.findUniqueOrThrow({ where: { id: p.id } });
       });
     }),
 

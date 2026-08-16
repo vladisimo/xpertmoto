@@ -281,6 +281,12 @@ async function wipeDemoData(prisma: PrismaClient): Promise<WipeResult> {
 
   await prisma.$transaction([
     // --- Booking lifecycle ---
+    // DamageCharge must go BEFORE Incident (below): the
+    // DamageCharge_parent_chk DB CHECK requires a returnAssessment OR
+    // incident parent, and the incident FK is onDelete: SetNull — deleting
+    // an incident whose charge has no return-assessment parent would orphan
+    // the row and violate the CHECK mid-transaction.
+    prisma.damageCharge.deleteMany(),
     prisma.bookingAddon.deleteMany(),
     prisma.bookingInsurance.deleteMany(),
     prisma.bookingNote.deleteMany(),

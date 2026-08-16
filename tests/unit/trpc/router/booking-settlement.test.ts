@@ -37,11 +37,32 @@ const chargeOffSessionForUserMock = vi.fn();
 vi.mock("@/server/services/stripe-customer", () => ({
   chargeOffSessionForUser: (...args: unknown[]) => chargeOffSessionForUserMock(...args),
 }));
+// captureBond clamps to the insurance excess cap. Pin the excess figures
+// (the real applyExcessCap math still runs); defaults are generous so the
+// pre-existing capture tests are unaffected by the cap.
+const getBookingExcessMock = vi.fn();
+const getDamageLiabilityUsedMock = vi.fn();
+vi.mock("@/server/services/excess", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../../src/server/services/excess")>();
+  return {
+    ...actual,
+    getBookingExcess: (...a: unknown[]) => getBookingExcessMock(...a),
+    getDamageLiabilityUsed: (...a: unknown[]) => getDamageLiabilityUsedMock(...a),
+  };
+});
 
 import { bookingSettlementRouter } from "../../../../src/server/trpc/router/booking-settlement";
+import { writeAuditAsync } from "../../../../src/server/services/audit";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getBookingExcessMock.mockResolvedValue({
+    excess: 10000,
+    source: "BOOKING_INSURANCE",
+    tierName: "Basic",
+  });
+  getDamageLiabilityUsedMock.mockResolvedValue(0);
 });
 
 type TestCtx = {
@@ -423,6 +444,100 @@ describe("bookingSettlement.captureBond", () => {
       c.captureBond({ bookingId: "b1", amount: 10, deductionLabel: "x" }),
     ).rejects.toBeInstanceOf(TRPCError);
     expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+  });
+
+  // ---- Round-2: manual bond captures are damage recoveries and draw on
+  // the per-hire insurance excess cap, with a manager-only override. ----
+
+  it("clamps a damage-motivated capture to the remaining excess headroom and audits EXCESS_CAP_APPLIED", async () => {
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(900);
+    capturePaymentIntentMock.mockResolvedValueOnce({
+      id: "pi_bond_1",
+      status: "succeeded",
+      amountReceivedCents: 10000,
+      latestChargeId: "ch_bond_3",
+      captured: true,
+    });
+    const ctx = makeCtx({ bondLedger: heldBond, paymentCreated: { id: "bondpay3" } });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+
+    // Request 200 with only 100 of headroom left → capture 100 from the bond.
+    const res = await c.captureBond({ bookingId: "b1", amount: 200, deductionLabel: "Panel damage" });
+
+    expect(capturePaymentIntentMock).toHaveBeenCalledWith(
+      "pi_bond_1",
+      expect.objectContaining({ amountToCaptureCents: 10000 }),
+    );
+    expect(res).toEqual({ capturedAmount: 100, overflowToCard: 0, status: "FULLY_CAPTURED" });
+    expect(writeAuditAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "EXCESS_CAP_APPLIED",
+        newData: expect.objectContaining({ preCapAmount: 200, captured: 100, cappedBy: 100 }),
+      }),
+    );
+  });
+
+  it("rejects outright when the excess cap is exhausted — no Stripe call", async () => {
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+    const ctx = makeCtx({ bondLedger: heldBond });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.captureBond({ bookingId: "b1", amount: 50, deductionLabel: "More damage" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+    expect(ctx.prisma.bondLedger.update).not.toHaveBeenCalled();
+  });
+
+  it("STAFF cannot use the excess-cap override", async () => {
+    const ctx = makeCtx({ bondLedger: heldBond });
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+    await expect(
+      c.captureBond({
+        bookingId: "b1",
+        amount: 50,
+        deductionLabel: "x",
+        overrideExcessCap: { reason: "customer agreed in writing" },
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(capturePaymentIntentMock).not.toHaveBeenCalled();
+  });
+
+  it("manager override lifts the cap for the one capture and audits EXCESS_CAP_OVERRIDDEN", async () => {
+    getBookingExcessMock.mockResolvedValue({ excess: 1000, source: "BOOKING_INSURANCE", tierName: "Basic" });
+    getDamageLiabilityUsedMock.mockResolvedValue(1000);
+    capturePaymentIntentMock.mockResolvedValueOnce({
+      id: "pi_bond_1",
+      status: "succeeded",
+      amountReceivedCents: 15000,
+      latestChargeId: "ch_bond_4",
+      captured: true,
+    });
+    const ctx = makeCtx({ bondLedger: heldBond, paymentCreated: { id: "bondpay4" } });
+    ctx.session = { user: { id: "mgr1", role: "MANAGER" as never } } as never;
+    const c = bookingSettlementRouter.createCaller(ctx as never);
+
+    const res = await c.captureBond({
+      bookingId: "b1",
+      amount: 150,
+      deductionLabel: "Excess voided per §6 grounds",
+      overrideExcessCap: { reason: "DUI incident — excess void clause applies" },
+    });
+
+    expect(res.capturedAmount).toBe(150);
+    expect(writeAuditAsync).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "EXCESS_CAP_OVERRIDDEN",
+        newData: expect.objectContaining({
+          uncappedAmount: 150,
+          captured: 150,
+          reason: "DUI incident — excess void clause applies",
+        }),
+      }),
+    );
   });
 });
 

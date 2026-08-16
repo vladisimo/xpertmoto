@@ -1,10 +1,55 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
+
+// Heavy side-effect deps are stubbed so confirmSwap's money core can run as a
+// pure unit test (mock pattern: staff-booking.refund.test.ts). Pricing stays
+// real — the delta math is the thing under test.
+const refundChargeMock = vi.fn();
+vi.mock("@/lib/stripe", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refundCharge: (...args: unknown[]) => refundChargeMock(...args),
+}));
+
+const sendNotificationMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/notification-sender", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  sendNotification: (...args: unknown[]) => sendNotificationMock(...args),
+}));
+
+vi.mock("@/lib/analytics", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  trackServer: vi.fn(async () => {}),
+}));
+
+vi.mock("@/lib/storage", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  uploadFile: vi.fn(async () => ({ url: "https://storage.local/swap.pdf" })),
+}));
+
+vi.mock("@/lib/pdf/swap-agreement", () => ({
+  renderSwapAgreementPdf: vi.fn(async () => Buffer.from("pdf")),
+}));
+
+const tryIssueAdjustmentForBookingMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/server/services/invoice-lifecycle", () => ({
+  tryIssueAdjustmentForBooking: (...args: unknown[]) =>
+    tryIssueAdjustmentForBookingMock(...args),
+}));
+
+vi.mock("@react-email/render", () => ({
+  render: vi.fn(async () => "<html></html>"),
+}));
+
+vi.mock("../../../../emails/vehicle-swap", () => ({
+  default: () => null,
+}));
+
 import { bookingSwapRouter } from "../../../../src/server/trpc/router/booking-swap";
 
-// Focus: the guard logic of the bookingSwap router. The full transactional
-// happy-path (Stripe + PDF + notification) is covered by the Playwright spec;
-// here we verify the procedural checks that keep state consistent.
+// Focus: the guard logic of the bookingSwap router plus confirmSwap's money
+// core (categoryId hand-off, ledger increments/decrements, refund offset).
+// The full transactional happy-path (Stripe + PDF + notification) is covered
+// by the Playwright spec.
 
 function makeCtx(
   opts: {
@@ -20,6 +65,16 @@ function makeCtx(
     } | null;
     existingDraft?: unknown;
     candidateVehicles?: Array<Record<string, unknown>>;
+    /** loadVehicleCtx rows for quoteSwapDelta's vehicle-level pricing, keyed
+     *  by vehicle id. Absent/undefined id → null (no override). */
+    vehicleRates?: Record<string, Record<string, unknown> | null>;
+    /** startLossReplacementDraft: the booking's current (outgoing) vehicle. */
+    outgoingVehicle?: { id: string; internalCode: string; status: string };
+    /** startLossReplacementDraft: open TOTAL_LOSS incident lookup result. */
+    openTotalLossIncident?: { id: string } | null;
+    /** startLossReplacementDraft: incident.findUnique result for the
+     *  optional incidentId validation. */
+    incidentById?: Record<string, unknown> | null;
   } = {},
 ) {
   const booking = opts.booking ?? {
@@ -39,6 +94,20 @@ function makeCtx(
     },
     vehicle: {
       findMany: vi.fn(async () => opts.candidateVehicles ?? []),
+      // quoteSwapDelta's loadVehicleCtx — vehicle-level pricing lookup.
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
+        opts.vehicleRates?.[where.id] ?? null,
+      ),
+      // startLossReplacementDraft's lost-vehicle gate.
+      findUniqueOrThrow: vi.fn(async () =>
+        opts.outgoingVehicle ?? { id: "v-old", internalCode: "SCT-1", status: "AVAILABLE" },
+      ),
+    },
+    incident: {
+      // startLossReplacementDraft's open TOTAL_LOSS lookup.
+      findFirst: vi.fn(async () => opts.openTotalLossIncident ?? null),
+      // startLossReplacementDraft's incidentId validation.
+      findUnique: vi.fn(async () => opts.incidentById ?? null),
     },
     // isVehicleFree scheduled-work-order block — none → vehicle is free.
     maintenanceWorkOrder: {
@@ -195,6 +264,130 @@ describe("bookingSwap.startSwapDraft", () => {
         origin: "CUSTOMER_WALK_IN",
         reasonNotes: "second attempt",
       }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+describe("bookingSwap.startLossReplacementDraft (Area 2)", () => {
+  const stolenVehicle = { id: "v-old", internalCode: "SCT-1", status: "STOLEN" };
+
+  it("FORBIDDEN for STAFF — loss replacement is manager-gated", async () => {
+    const ctx = makeCtx({ role: "STAFF", outgoingVehicle: stolenVehicle });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "bike stolen overnight" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("rejects when the current vehicle is not lost (AVAILABLE, no open TOTAL_LOSS incident)", async () => {
+    const ctx = makeCtx({ role: "MANAGER" }); // default outgoing vehicle: AVAILABLE
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "swap it" }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("not recorded as lost"),
+    });
+    expect(ctx.prisma.bookingSwap.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts a STOLEN vehicle and opens a LOSS_REPLACEMENT draft (origin defaults to STAFF_OBSERVED)", async () => {
+    const ctx = makeCtx({ role: "MANAGER", outgoingVehicle: stolenVehicle });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "stolen from cust address" }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.bookingSwap.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reason: "LOSS_REPLACEMENT",
+          origin: "STAFF_OBSERVED",
+          outgoingVehicleId: "v-old",
+          status: "DRAFT",
+        }),
+      }),
+    );
+    // Disposition status alone proves the loss — no incident lookup needed.
+    expect(ctx.prisma.incident.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("accepts a not-yet-transitioned vehicle with an open TOTAL_LOSS incident on file", async () => {
+    const ctx = makeCtx({ role: "MANAGER", openTotalLossIncident: { id: "inc-9" } });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "written off in crash" }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.incident.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ vehicleId: "v-old", severity: "TOTAL_LOSS" }),
+      }),
+    );
+  });
+
+  it("links a valid incidentId onto the draft", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      incidentById: { id: "inc-9", vehicleId: "v-old", deletedAt: null, bookingSwap: null },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({
+        bookingId: "b1",
+        reasonNotes: "stolen — see incident",
+        incidentId: "inc-9",
+      }),
+    ).resolves.toMatchObject({ id: "swap-1" });
+    expect(ctx.prisma.bookingSwap.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ incidentId: "inc-9" }),
+      }),
+    );
+  });
+
+  it("rejects an incidentId that belongs to another vehicle", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      incidentById: { id: "inc-9", vehicleId: "v-other", deletedAt: null, bookingSwap: null },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({
+        bookingId: "b1",
+        reasonNotes: "stolen",
+        incidentId: "inc-9",
+      }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("rejects non-swappable booking statuses", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      booking: {
+        id: "b1",
+        status: "COMPLETED",
+        vehicleId: "v-old",
+        categoryId: "cat-A",
+        customerId: "cust1",
+      },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "too late" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("CONFLICT when a draft is already open on the booking", async () => {
+    const ctx = makeCtx({
+      role: "MANAGER",
+      outgoingVehicle: stolenVehicle,
+      existingDraft: { id: "old-draft", swappedById: "other-staff" },
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.startLossReplacementDraft({ bookingId: "b1", reasonNotes: "second attempt" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });
@@ -510,5 +703,1263 @@ describe("bookingSwap depot scoping (B1 follow-up)", () => {
       caller.listCandidates({ bookingId: "b-other", includeCrossCategory: false }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(prisma.booking.findUniqueOrThrow).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmSwap money core (PR2). Full-fat ctx: the transaction callback runs
+// against the same mock models, and booking.update persists categoryId /
+// vehicleId onto the shared booking object so follow-up quoteDelta calls see
+// post-swap state (the double-charge regression).
+// ---------------------------------------------------------------------------
+
+const A_DAY = 86_400_000;
+
+function makeConfirmCtx(
+  opts: {
+    role?: "STAFF" | "MANAGER";
+    reason?:
+      | "UPGRADE"
+      | "DOWNGRADE"
+      | "LATERAL"
+      | "MECHANICAL_FAULT"
+      | "ACCIDENT_DAMAGE"
+      | "LOSS_REPLACEMENT";
+    bookingCategoryId?: string;
+    incomingCategoryId?: string;
+    balanceDue?: number;
+    pendingSum?: number | null;
+    /** When set, payment.aggregate applies the real where-clause semantics
+     *  (status/type/deletedAt) to these rows instead of returning pendingSum
+     *  blindly — exercises the offset aggregate's type filter. */
+    pendingPayments?: Array<{ type: string; amount: number; deletedAt?: Date | null }>;
+    /** Fresh in-tx balanceDue read (settlement clamp); defaults to the
+     *  pre-Stripe balanceDue when absent. */
+    freshBalanceDue?: number;
+    payments?: Array<Record<string, unknown>>;
+    /** LOSS_REPLACEMENT: loss incident linked at draft time. */
+    draftIncidentId?: string | null;
+    /** Outgoing vehicle's status at commit time (LOSS_REPLACEMENT strand guard). */
+    outgoingVehicleStatus?: string;
+  } = {},
+) {
+  // cat-A $50/day, cat-B $80/day over 5 remaining days (below the 7-day
+  // duration-discount rung, no seasons/tiers) → delta is exactly ±$150.
+  const daily: Record<string, number> = { "cat-A": 50, "cat-B": 80 };
+  const bookingCategoryId = opts.bookingCategoryId ?? "cat-A";
+  const incomingCategoryId = opts.incomingCategoryId ?? "cat-B";
+  const booking = {
+    id: "b1",
+    status: "ACTIVE",
+    vehicleId: "v-old" as string,
+    categoryId: bookingCategoryId,
+    customerId: "cust1",
+    bookingReference: "XPM-1001",
+    pickupDateTime: new Date(Date.now() - 2 * A_DAY),
+    returnDateTime: new Date(Date.now() + 5 * A_DAY),
+    balanceDue: opts.balanceDue ?? 0,
+    category: {
+      id: bookingCategoryId,
+      name: "Cat Old",
+      bondAmount: new Prisma.Decimal(500),
+    },
+    customer: { id: "cust1", firstName: "Ava", lastName: "Nguyen", email: "ava@example.com" },
+    bondLedger: null,
+    payments: opts.payments ?? [],
+    billingPlan: null,
+    pickupDepot: { slug: "bne" },
+  };
+  const draft = {
+    id: "swapd-1",
+    bookingId: "b1",
+    status: "DRAFT",
+    outgoingVehicleId: "v-old",
+    swappedById: "staff1",
+    reason: opts.reason ?? "UPGRADE",
+    origin: "CUSTOMER_WALK_IN",
+    reasonNotes: "customer request",
+    originDetails: null,
+    incidentId: opts.draftIncidentId ?? null,
+  };
+  const incomingVehicle = {
+    id: "v-new",
+    internalCode: "MTB-2",
+    rego: "XYZ12",
+    make: "Yamaha",
+    model: "MT-07",
+    isActive: true,
+    status: "AVAILABLE",
+    categoryId: incomingCategoryId,
+    depotId: "depot-1",
+    category: {
+      id: incomingCategoryId,
+      name: "Cat New",
+      bondAmount: new Prisma.Decimal(500),
+    },
+  };
+  const models = {
+    booking: {
+      findUnique: vi.fn(async () => booking),
+      // The in-tx settlement clamp re-reads balanceDue with a narrow select;
+      // every other caller (the pre-flight include-fetch) gets the booking.
+      findUniqueOrThrow: vi.fn(
+        async (args?: { select?: { balanceDue?: boolean } }) =>
+          args?.select?.balanceDue
+            ? { balanceDue: opts.freshBalanceDue ?? booking.balanceDue }
+            : booking,
+      ),
+      // isVehicleFree clash search — no clashing booking.
+      findFirst: vi.fn(async () => null),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        if (typeof data.categoryId === "string") booking.categoryId = data.categoryId;
+        if (typeof data.vehicleId === "string") booking.vehicleId = data.vehicleId;
+        return booking;
+      }),
+    },
+    vehicle: {
+      // Keyed by id: the outgoing vehicle only gets looked up by the
+      // LOSS_REPLACEMENT strand guard (status-only select).
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) =>
+        where.id === "v-old"
+          ? { id: "v-old", status: opts.outgoingVehicleStatus ?? "RENTED" }
+          : incomingVehicle,
+      ),
+      // loadVehicleCtx — no vehicle-level rate overrides in these tests.
+      findUnique: vi.fn(async () => null),
+      update: vi.fn(async () => ({})),
+    },
+    // isVehicleFree scheduled-work-order block — none. `create` covers both
+    // the fault work order and the PR7 turnaround-buffer work order.
+    maintenanceWorkOrder: {
+      findMany: vi.fn(async () => []),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "wo-1",
+        ...data,
+      })),
+      // Swap-agreement PDF lookup after commit.
+      findUnique: vi.fn(async () => ({ workOrderNumber: "WO-TEST-1" })),
+    },
+    incident: {
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "inc-1",
+        ...data,
+      })),
+      findUnique: vi.fn(async () => ({ incidentNumber: "INC-TEST-1" })),
+    },
+    inspection: {
+      // Odometer-rollback guard — no prior reading.
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: `insp-${data.type as string}`,
+        ...data,
+      })),
+    },
+    // PR7: swap markers mirrored into labelled InspectionIssue rows.
+    inspectionIssue: {
+      createMany: vi.fn(async ({ data }: { data: unknown[] }) => ({ count: data.length })),
+    },
+    bookingSwap: {
+      findUnique: vi.fn(async () => draft),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: draft.id,
+        ...data,
+      })),
+    },
+    payment: {
+      aggregate: vi.fn(
+        async (args?: {
+          where?: {
+            status?: string;
+            type?: { in?: string[] };
+            deletedAt?: Date | null;
+          };
+        }) => {
+          if (!opts.pendingPayments) {
+            return { _sum: { amount: opts.pendingSum ?? null } };
+          }
+          // Apply the real filter semantics so an untyped aggregate would
+          // wrongly sweep credits in and the test catches it.
+          const typeFilter = args?.where?.type?.in;
+          const sum = opts.pendingPayments
+            .filter((p) => (typeFilter ? typeFilter.includes(p.type) : true))
+            .filter((p) =>
+              args?.where?.deletedAt === null ? !p.deletedAt : true,
+            )
+            .reduce((acc, p) => acc + p.amount, 0);
+          return { _sum: { amount: sum === 0 ? null : sum } };
+        },
+      ),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "pay-new",
+        ...data,
+      })),
+      update: vi.fn(async () => ({})),
+    },
+    vehicleCategory: {
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        baseDailyRate: new Prisma.Decimal(daily[where.id] ?? 50),
+        baseWeeklyRate: new Prisma.Decimal((daily[where.id] ?? 50) * 6),
+        baseMonthlyRate: new Prisma.Decimal((daily[where.id] ?? 50) * 22),
+        bondAmount: new Prisma.Decimal(500),
+      })),
+    },
+    season: { findMany: vi.fn(async () => []) },
+    pricingTier: { findMany: vi.fn(async () => []) },
+    user: {
+      findUnique: vi.fn(async () => ({ firstName: "Staff", lastName: "Member" })),
+      findMany: vi.fn(async () => [{ id: "mgr-1" }]),
+    },
+    auditLog: { create: vi.fn(async () => null) },
+  };
+  const prisma = {
+    ...models,
+    $transaction: vi.fn(async (fn: (tx: typeof models) => unknown) => fn(models)),
+  };
+  const role = opts.role ?? "STAFF";
+  return {
+    ctx: {
+      prisma,
+      user: { id: "staff1", role },
+      session: { user: { id: "staff1", role } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    },
+    prisma,
+    booking,
+    draft,
+  };
+}
+
+const inspectionInput = (odometerKm: number) => ({
+  odometerKm,
+  fuelLevel: 90,
+  overallCondition: "GOOD" as const,
+});
+
+describe("bookingSwap.confirmSwap money core", () => {
+  beforeEach(() => {
+    refundChargeMock.mockReset();
+    sendNotificationMock.mockClear();
+    tryIssueAdjustmentForBookingMock.mockClear();
+  });
+
+  it("UPGRADE commit updates booking.categoryId, raises balanceDue AND totals, and kills the double-charge/free-swap-back pair", async () => {
+    const { ctx, prisma, booking } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+    expect(res.direction).toBe("CHARGE");
+    expect(res.deltaAmount).toBeCloseTo(150, 2);
+
+    // Step-5 reassignment payload carries the incoming vehicle's category.
+    const reassign = prisma.booking.update.mock.calls.find(
+      (c) => typeof c[0].data.vehicleId === "string",
+    );
+    expect(reassign).toBeDefined();
+    expect(reassign![0].data).toMatchObject({
+      vehicleId: "v-new",
+      categoryId: "cat-B",
+    });
+    expect(booking.categoryId).toBe("cat-B");
+
+    // CHARGE raise moves totals with balanceDue (extend's arithmetic).
+    const raise = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.balanceDue !== undefined,
+    );
+    expect(raise![0].data).toEqual({
+      balanceDue: { increment: 150 },
+      totalAmount: { increment: 150 },
+      gstAmount: { increment: 13.64 },
+    });
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reference: "SWAP-swapd-1",
+          type: "SWAP_ADJUSTMENT",
+          amount: 150,
+          gstAmount: 13.64,
+          status: "PENDING",
+        }),
+      }),
+    );
+
+    // Double-charge regression: a second quote now prices cat-B → cat-B.
+    const requote = await caller.quoteDelta({
+      bookingId: "b1",
+      newCategoryId: "cat-B",
+      reason: "UPGRADE",
+    });
+    expect(requote.deltaAmount).toBe(0);
+    expect(requote.direction).toBe("NONE");
+
+    // Swap-back is no longer free: quoting back to the original category
+    // reads the updated categoryId and yields a REFUND, not zero.
+    const swapBack = await caller.quoteDelta({
+      bookingId: "b1",
+      newCategoryId: "cat-A",
+      reason: "DOWNGRADE",
+    });
+    expect(swapBack.direction).toBe("REFUND");
+    expect(swapBack.deltaAmount).toBeCloseTo(-150, 2);
+  });
+
+  it("REFUND offsets outstanding balanceDue first and only refunds the cash surplus via Stripe", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      balanceDue: 40,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+    expect(res.direction).toBe("REFUND");
+    expect(res.deltaAmount).toBeCloseTo(150, 2);
+
+    // $40 of the $150 delta clears debt; only $110 moves as cash.
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 11000, idempotencyKey: "swap-refund-swapd-1" }),
+    );
+    // REFUND Payment row covers the cash slice only.
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reference: "SWAP-REF-swapd-1",
+          type: "REFUND",
+          amount: 110,
+          gstAmount: 10,
+          status: "SUCCEEDED",
+        }),
+      }),
+    );
+    // Source rollup keyed on the cash refunded, not the full delta.
+    expect(prisma.payment.update).toHaveBeenCalledWith({
+      where: { id: "src-1" },
+      data: { status: "PARTIALLY_REFUNDED" },
+    });
+    // Ledger: totals drop by the full delta, balanceDue by the offset,
+    // amountPaid by the cash that actually left.
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 40 },
+      amountPaid: { decrement: 110 },
+    });
+  });
+
+  it("fully-offset REFUND is a pure balance write-down: no Stripe call, no Payment row, no source payment required", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      balanceDue: 500,
+      payments: [], // would throw "No SUCCEEDED booking payment" if cash were needed
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+    expect(res.direction).toBe("REFUND");
+    expect(refundChargeMock).not.toHaveBeenCalled();
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+    expect(res.swap.paymentId).toBeNull();
+
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 150 },
+    });
+    // The DECREASE adjustment note still covers the full delta.
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ bookingId: "b1", type: "DECREASE", reason: "SWAP" }),
+    );
+  });
+
+  it("FAILED Stripe refund records the FAILED row, leaves the ledger untouched, and pages managers", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockRejectedValueOnce(new Error("card_declined"));
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      balanceDue: 0,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: "REFUND", amount: 150, status: "FAILED" }),
+      }),
+    );
+    // No ledger decrements on a failed refund…
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle).toBeUndefined();
+    // …and, since the write-down was skipped, no §29-75 DECREASE note either
+    // — note issuance and ledger write-down share the same gate.
+    expect(tryIssueAdjustmentForBookingMock).not.toHaveBeenCalled();
+    // Manager notification flags the unrefunded downgrade.
+    const flagged = sendNotificationMock.mock.calls.find((c) =>
+      String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-refund-failed:"),
+    );
+    expect(flagged).toBeDefined();
+    expect(flagged![0]).toMatchObject({
+      userId: "mgr-1",
+      dedupKey: "swap-refund-failed:swapd-1:mgr-1",
+    });
+  });
+
+  it("PENDING Stripe refund books the consideration reduction + note at commit but defers amountPaid to the webhook", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "pending" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      balanceDue: 40,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // The REFUND row stays PENDING (unsettled cash) with no processedAt —
+    // charge.refund.updated flips it and applies the amountPaid decrement.
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "REFUND",
+          amount: 110,
+          status: "PENDING",
+          processedAt: null,
+        }),
+      }),
+    );
+    // No source-payment rollup flip until the refund actually settles.
+    expect(prisma.payment.update).not.toHaveBeenCalled();
+    // Consideration reduction is booked at commit: totals + offset move,
+    // but amountPaid must NOT — the cash hasn't settled yet.
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 40 },
+    });
+    // The DECREASE note issues at the same moment as the write-down.
+    expect(tryIssueAdjustmentForBookingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ bookingId: "b1", type: "DECREASE", reason: "SWAP" }),
+    );
+  });
+
+  it("offset aggregate counts only balance-affecting PENDING raises — a PENDING MANUAL_CREDIT does not shrink the unpaid base", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      // $100 of real debt on the booking…
+      balanceDue: 100,
+      // …an $80 credit owed TO the customer must not shrink the unpaid base
+      // (untyped aggregate: unpaidBase 20 → $130 over-refund + zombie
+      // dunning); a real $30 raise still does.
+      pendingPayments: [
+        { type: "MANUAL_CREDIT", amount: 80 },
+        { type: "LATE_FEE", amount: 30 },
+      ],
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // The aggregate is scoped to balance-affecting charge types and live rows.
+    expect(prisma.payment.aggregate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          bookingId: "b1",
+          status: "PENDING",
+          type: { in: expect.arrayContaining(["LATE_FEE", "SWAP_ADJUSTMENT"]) },
+          deletedAt: null,
+        }),
+      }),
+    );
+    const typeFilter = (
+      prisma.payment.aggregate.mock.calls[0]![0] as {
+        where: { type: { in: string[] } };
+      }
+    ).where.type.in;
+    expect(typeFilter).not.toContain("MANUAL_CREDIT");
+    expect(typeFilter).not.toContain("REFUND");
+    // unpaidBase = 100 − 30 = 70 → offset 70, cash 80 (not 130).
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 8000 }),
+    );
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 70 },
+      amountPaid: { decrement: 80 },
+    });
+  });
+
+  it("clamps the in-tx balanceDue offset when a concurrent capture shrank the balance during the Stripe round-trip", async () => {
+    const source = {
+      id: "src-1",
+      amount: new Prisma.Decimal(500),
+      processedAt: new Date(Date.now() - 10 * A_DAY),
+      createdAt: new Date(Date.now() - 10 * A_DAY),
+      stripePaymentIntentId: "pi_1",
+      stripeChargeId: "ch_1",
+    };
+    refundChargeMock.mockResolvedValueOnce({ id: "re_1", status: "succeeded" });
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "DOWNGRADE",
+      bookingCategoryId: "cat-B",
+      incomingCategoryId: "cat-A",
+      // Pre-Stripe read said $40 outstanding → offset 40, cash 110…
+      balanceDue: 40,
+      // …but a concurrent capture collected $30 of it mid-round-trip.
+      freshBalanceDue: 10,
+      payments: [source],
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    // Cash already moved for $110 — untouchable. Only the offset half
+    // reacts: clamped to the fresh balance, not the stale $40.
+    expect(refundChargeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 11000 }),
+    );
+    const settle = prisma.booking.update.mock.calls.find(
+      (c) => c[0].data.totalAmount !== undefined,
+    );
+    expect(settle![0].data).toEqual({
+      totalAmount: { decrement: 150 },
+      gstAmount: { decrement: 13.64 },
+      balanceDue: { decrement: 10 },
+      amountPaid: { decrement: 110 },
+    });
+  });
+
+  it("manager price override computes GST via gstFromInclusive", async () => {
+    const { ctx, prisma } = makeConfirmCtx({ role: "MANAGER" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+      priceAdjustmentOverride: 123.45,
+    });
+    expect(res.deltaAmount).toBeCloseTo(123.45, 2);
+    // 123.45 / 11 = 11.2227… → 11.22 (roundCents half-up).
+    expect(res.gstAmount).toBe(11.22);
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ amount: 123.45, gstAmount: 11.22 }),
+      }),
+    );
+  });
+
+  it("manager override survives the same-category zero-delta guard (override becomes the delta)", async () => {
+    // Same category, identically priced units → computed delta is 0. The
+    // zero-delta LATERAL-steer must not fire when a manager forces a
+    // non-zero delta — the override IS the effective delta.
+    const { ctx, prisma } = makeConfirmCtx({
+      role: "MANAGER",
+      reason: "UPGRADE",
+      bookingCategoryId: "cat-A",
+      incomingCategoryId: "cat-A",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+      priceAdjustmentOverride: 60,
+    });
+    expect(res.direction).toBe("CHARGE");
+    expect(res.deltaAmount).toBeCloseTo(60, 2);
+    expect(prisma.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ amount: 60 }),
+      }),
+    );
+  });
+
+  it("staff without an override are still steered to LATERAL on a same-category zero-delta UPGRADE", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      role: "STAFF",
+      reason: "UPGRADE",
+      bookingCategoryId: "cat-A",
+      incomingCategoryId: "cat-A",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("use LATERAL"),
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmSwap operational correctness (PR7): overlap → CONFLICT, cleaning
+// buffer via turnaround work order, swap markers → InspectionIssue rows.
+// ---------------------------------------------------------------------------
+
+describe("bookingSwap.confirmSwap operational correctness", () => {
+  beforeEach(() => {
+    refundChargeMock.mockReset();
+    sendNotificationMock.mockClear();
+    tryIssueAdjustmentForBookingMock.mockClear();
+  });
+
+  it("surfaces a Booking_no_overlap violation from the tx as an actionable CONFLICT", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(
+        new Error('conflicting key value violates exclusion constraint "Booking_no_overlap"'),
+        { meta: { code: "23P01" } },
+      ),
+    );
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("choose another vehicle"),
+    });
+  });
+
+  it("rethrows non-overlap transaction errors untouched", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    (prisma.$transaction as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("connection refused"),
+    );
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toThrow("connection refused");
+  });
+
+  it("UPGRADE swap flips the outgoing vehicle AVAILABLE and schedules a cleaning-buffer turnaround work order", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ data: { status?: string } }]
+    >;
+    const outgoingFlip = vehicleUpdates.find((c) => c[0].data.status === "AVAILABLE");
+    expect(outgoingFlip).toBeDefined();
+
+    const turnaround = prisma.maintenanceWorkOrder.create.mock.calls.find((c) =>
+      String((c[0] as { data: { title: string } }).data.title).startsWith(
+        "Post-hire turnaround —",
+      ),
+    );
+    expect(turnaround).toBeDefined();
+    const data = (turnaround![0] as { data: Record<string, unknown> }).data;
+    expect(data).toMatchObject({
+      vehicleId: "v-old",
+      type: "CUSTOM",
+      status: "OPEN",
+      title: "Post-hire turnaround — swap XPM-1001",
+    });
+    // Window spans exactly BOOKING_RULES.bufferHoursBetweenBookings (2h).
+    const start = data.scheduledStartAt as Date;
+    const end = data.scheduledEndAt as Date;
+    expect(end.getTime() - start.getTime()).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it("MECHANICAL_FAULT swap sends the vehicle to maintenance — fault work order, no turnaround", async () => {
+    const { ctx, prisma } = makeConfirmCtx({ reason: "MECHANICAL_FAULT" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ data: { status?: string } }]
+    >;
+    const toMaintenance = vehicleUpdates.find((c) => c[0].data.status === "IN_MAINTENANCE");
+    expect(toMaintenance).toBeDefined();
+    const titles = prisma.maintenanceWorkOrder.create.mock.calls.map((c) =>
+      String((c[0] as { data: { title: string } }).data.title),
+    );
+    expect(titles.some((t) => t.startsWith("Fault reported mid-rental"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("Post-hire turnaround —"))).toBe(false);
+  });
+
+  it("ACCIDENT_DAMAGE swap creates no turnaround work order either", async () => {
+    const { ctx, prisma } = makeConfirmCtx({ reason: "ACCIDENT_DAMAGE" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+      incidentSeverity: "MODERATE",
+    });
+    const titles = prisma.maintenanceWorkOrder.create.mock.calls.map((c) =>
+      String((c[0] as { data: { title: string } }).data.title),
+    );
+    expect(titles.some((t) => t.startsWith("Post-hire turnaround —"))).toBe(false);
+  });
+
+  it("swap markers become InspectionIssue rows — outgoing chargeable, incoming pre-existing", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: {
+        ...inspectionInput(1200),
+        damageMarkers: [
+          {
+            x: 0.4,
+            y: 0.6,
+            severity: "MODERATE" as const,
+            view: "RIGHT" as const,
+            note: "Scrape on fairing",
+            source: "staff" as const,
+          },
+        ],
+      },
+      incomingInspection: {
+        ...inspectionInput(300),
+        damageMarkers: [
+          { x: 0.1, y: 0.2, severity: "MINOR" as const, view: "LEFT" as const, source: "staff" as const },
+        ],
+      },
+    });
+
+    expect(prisma.inspectionIssue.createMany).toHaveBeenCalledTimes(2);
+    const [outCall, inCall] = prisma.inspectionIssue.createMany.mock.calls;
+    // Outgoing (SWAP_OUT): this hire's damage — chargeable at check-in.
+    expect((outCall![0] as { data: unknown[] }).data).toEqual([
+      {
+        inspectionId: "insp-POST_HIRE",
+        side: "RIGHT",
+        label: "Scrape on fairing",
+        severity: "MODERATE",
+        note: "Scrape on fairing",
+        posX: 0.4,
+        posY: 0.6,
+        source: "staff",
+        isPreExisting: false,
+      },
+    ]);
+    // Incoming (SWAP_IN): replacement's baseline — pre-existing, note-less
+    // markers get the fallback label.
+    expect((inCall![0] as { data: unknown[] }).data).toEqual([
+      {
+        inspectionId: "insp-PRE_HIRE",
+        side: "LEFT",
+        label: "Damage marker (MINOR)",
+        severity: "MINOR",
+        note: null,
+        posX: 0.1,
+        posY: 0.2,
+        source: "staff",
+        isPreExisting: true,
+      },
+    ]);
+  });
+
+  it("no markers → no InspectionIssue writes", async () => {
+    const { ctx, prisma } = makeConfirmCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      outgoingInspection: inspectionInput(1200),
+      incomingInspection: inspectionInput(300),
+    });
+    expect(prisma.inspectionIssue.createMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// confirmSwap LOSS_REPLACEMENT (Area 2): outgoing leg waived — no POST_HIRE
+// inspection, no odometer hand-off, no status change on the lost vehicle, no
+// turnaround work order; incoming side and booking re-pointing unchanged.
+// ---------------------------------------------------------------------------
+
+describe("bookingSwap.confirmSwap LOSS_REPLACEMENT", () => {
+  beforeEach(() => {
+    refundChargeMock.mockReset();
+    sendNotificationMock.mockClear();
+    tryIssueAdjustmentForBookingMock.mockClear();
+  });
+
+  it("waives the outgoing leg, leaves the lost vehicle untouched, and commits at zero delta with the incoming side intact", async () => {
+    const { ctx, prisma, booking } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      draftIncidentId: "inc-9",
+      outgoingVehicleStatus: "STOLEN",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+    expect(res.direction).toBe("NONE");
+    expect(res.deltaAmount).toBe(0);
+
+    // Only the incoming PRE_HIRE / SWAP_IN inspection is created.
+    expect(prisma.inspection.create).toHaveBeenCalledTimes(1);
+    expect(
+      (prisma.inspection.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data,
+    ).toMatchObject({ type: "PRE_HIRE", purpose: "SWAP_IN", vehicleId: "v-new" });
+
+    // The lost vehicle is never touched — no status flip, no odometer
+    // hand-off; it keeps STOLEN/WRITTEN_OFF.
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string }; data: { status?: string } }]
+    >;
+    const outgoingTouches = vehicleUpdates.filter((c) => c[0].where.id === "v-old");
+    expect(outgoingTouches).toEqual([]);
+    // Incoming still flips to RENTED.
+    const rented = vehicleUpdates.find((c) => c[0].data.status === "RENTED");
+    expect(rented![0].where).toEqual({ id: "v-new" });
+
+    // No turnaround buffer, no fault work order, no new incident.
+    expect(prisma.maintenanceWorkOrder.create).not.toHaveBeenCalled();
+    expect(prisma.incident.create).not.toHaveBeenCalled();
+
+    // Zero delta by reason: no Payment row, no ledger movement, no
+    // adjustment note.
+    expect(prisma.payment.create).not.toHaveBeenCalled();
+    const ledger = prisma.booking.update.mock.calls.find((c) => {
+      const data = (c[0] as { data: Record<string, unknown> }).data;
+      return data.balanceDue !== undefined || data.totalAmount !== undefined;
+    });
+    expect(ledger).toBeUndefined();
+    expect(tryIssueAdjustmentForBookingMock).not.toHaveBeenCalled();
+
+    // Booking re-pointed at the incoming vehicle + its category (PR2 semantics).
+    const reassign = prisma.booking.update.mock.calls.find(
+      (c) => typeof (c[0] as { data: Record<string, unknown> }).data.vehicleId === "string",
+    );
+    expect((reassign![0] as { data: Record<string, unknown> }).data).toMatchObject({
+      vehicleId: "v-new",
+      categoryId: "cat-B",
+    });
+    expect(booking.categoryId).toBe("cat-B");
+
+    // Commit row: outgoing inspection null, draft's loss incident preserved.
+    const commit = prisma.bookingSwap.update.mock.calls.find(
+      (c) => (c[0] as { data: Record<string, unknown> }).data.status === "COMMITTED",
+    );
+    expect((commit![0] as { data: Record<string, unknown> }).data).toMatchObject({
+      outgoingInspectionId: null,
+      incomingInspectionId: "insp-PRE_HIRE",
+      incidentId: "inc-9",
+      priceAdjustmentDirection: "NONE",
+      priceAdjustmentAmount: 0,
+    });
+
+    // No fault/accident manager broadcast — the loss incident pre-exists.
+    const faultPing = sendNotificationMock.mock.calls.find((c) =>
+      String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-fault:"),
+    );
+    expect(faultPing).toBeUndefined();
+    // Customer notification still goes out.
+    const customerPing = sendNotificationMock.mock.calls.find((c) =>
+      String((c[0] as { dedupKey?: string }).dedupKey).startsWith("swap-confirmed:"),
+    );
+    expect(customerPing).toBeDefined();
+  });
+
+  it("parks a still-RENTED outgoing vehicle in IN_MAINTENANCE so it isn't stranded (open TOTAL_LOSS incident, not yet decommissioned)", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      outgoingVehicleStatus: "RENTED",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string }; data: Record<string, unknown> }]
+    >;
+    const parked = vehicleUpdates.find((c) => c[0].where.id === "v-old");
+    expect(parked).toBeDefined();
+    expect(parked![0].data).toMatchObject({
+      status: "IN_MAINTENANCE",
+      statusLog: {
+        create: expect.objectContaining({
+          previousStatus: "RENTED",
+          newStatus: "IN_MAINTENANCE",
+          reason: expect.stringContaining("awaiting write-off/theft confirmation"),
+        }),
+      },
+    });
+  });
+
+  it("leaves a WRITTEN_OFF outgoing vehicle untouched — disposition statuses are final", async () => {
+    const { ctx, prisma } = makeConfirmCtx({
+      reason: "LOSS_REPLACEMENT",
+      outgoingVehicleStatus: "WRITTEN_OFF",
+    });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await caller.confirmSwap({
+      swapId: "swapd-1",
+      incomingVehicleId: "v-new",
+      incomingInspection: inspectionInput(300),
+    });
+
+    const vehicleUpdates = prisma.vehicle.update.mock.calls as unknown as Array<
+      [{ where: { id: string } }]
+    >;
+    expect(vehicleUpdates.filter((c) => c[0].where.id === "v-old")).toEqual([]);
+  });
+
+  it("rejects an outgoing inspection payload on a LOSS_REPLACEMENT draft", async () => {
+    const { ctx } = makeConfirmCtx({ reason: "LOSS_REPLACEMENT" });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        outgoingInspection: inspectionInput(1200),
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("waives the outgoing inspection"),
+    });
+  });
+
+  it("regression: normal reasons still require the outgoing inspection", async () => {
+    const { ctx, prisma } = makeConfirmCtx(); // UPGRADE
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.confirmSwap({
+        swapId: "swapd-1",
+        incomingVehicleId: "v-new",
+        incomingInspection: inspectionInput(300),
+      }),
+    ).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("outgoingInspection is required"),
+    });
+    expect(prisma.inspection.create).not.toHaveBeenCalled();
+    expect(prisma.bookingSwap.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("bookingSwap.quoteDelta vehicle-level rates", () => {
+  const overrideRates = (rate: number) => ({
+    "v-new": {
+      baseRateOverride: new Prisma.Decimal(rate),
+      basePeriodHoursOverride: null,
+      modelId: null,
+      catalogueModel: null,
+    },
+    "v-old": null,
+  });
+
+  it("UPGRADE within the same category quotes the baseRateOverride delta once vehicle ids are passed", async () => {
+    const ctx = makeCtx({ vehicleRates: overrideRates(80) });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const q = await caller.quoteDelta({
+      bookingId: "b1",
+      newCategoryId: "cat-A",
+      incomingVehicleId: "v-new",
+      reason: "UPGRADE",
+    });
+    expect(q.forcedZero).toBe(null);
+    expect(q.direction).toBe("CHARGE");
+    expect(q.deltaAmount).toBeGreaterThan(0);
+  });
+
+  it("DOWNGRADE within the same category quotes a REFUND for a cheaper-priced unit", async () => {
+    const ctx = makeCtx({ vehicleRates: overrideRates(30) });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const q = await caller.quoteDelta({
+      bookingId: "b1",
+      newCategoryId: "cat-A",
+      incomingVehicleId: "v-new",
+      reason: "DOWNGRADE",
+    });
+    expect(q.forcedZero).toBe(null);
+    expect(q.direction).toBe("REFUND");
+    expect(q.deltaAmount).toBeLessThan(0);
+  });
+
+  it("LATERAL stays forced-zero even when the incoming unit has a baseRateOverride", async () => {
+    const ctx = makeCtx({ vehicleRates: overrideRates(80) });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const q = await caller.quoteDelta({
+      bookingId: "b1",
+      newCategoryId: "cat-A",
+      incomingVehicleId: "v-new",
+      reason: "LATERAL",
+    });
+    expect(q.forcedZero).toBe("same-category");
+    expect(q.deltaAmount).toBe(0);
+    expect(q.direction).toBe("NONE");
+  });
+});
+
+describe("bookingSwap.reconcileCreditTransfer", () => {
+  /** Simulates the row's actual state: the status-guarded updateMany only
+   *  matches while the row is still PENDING, so a second call loses the
+   *  race (count 0) instead of double-decrementing. */
+  function makeReconcileCtx(opts: { amountPaid?: number } = {}) {
+    const credit = {
+      id: "p-credit",
+      type: "MANUAL_CREDIT",
+      status: "PENDING",
+      bookingId: "b1",
+      amount: new Prisma.Decimal(110),
+      notes: "swap credit",
+    };
+    const models = {
+      payment: {
+        findUniqueOrThrow: vi.fn(async () => ({ ...credit })),
+        updateMany: vi.fn(
+          async ({
+            where,
+            data,
+          }: {
+            where: { status?: string };
+            data: Record<string, unknown>;
+          }) => {
+            if (where.status === "PENDING" && credit.status !== "PENDING") {
+              return { count: 0 };
+            }
+            Object.assign(credit, data);
+            return { count: 1 };
+          },
+        ),
+      },
+      booking: {
+        // The clamp re-reads amountPaid inside the tx before writing the
+        // floored absolute value.
+        findUniqueOrThrow: vi.fn(async () => ({
+          amountPaid: new Prisma.Decimal(opts.amountPaid ?? 500),
+        })),
+        update: vi.fn(async () => ({})),
+      },
+      auditLog: { create: vi.fn(async () => null) },
+    };
+    const prisma = {
+      ...models,
+      $transaction: vi.fn(async (fn: (tx: typeof models) => unknown) => fn(models)),
+    };
+    const ctx = {
+      prisma,
+      user: { id: "mgr-1", role: "MANAGER" },
+      session: { user: { id: "mgr-1", role: "MANAGER" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    return { ctx, models, credit };
+  }
+
+  it("decrements booking.amountPaid by the credited amount when the transfer is marked SUCCEEDED", async () => {
+    const { ctx, models } = makeReconcileCtx({ amountPaid: 500 });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    const res = await caller.reconcileCreditTransfer({
+      paymentId: "p-credit",
+      reference: "BT-2026-08-13",
+    });
+    expect(res).toMatchObject({ status: "SUCCEEDED" });
+    // The flip is status-guarded so it cannot re-match a reconciled row.
+    expect(models.payment.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "p-credit", status: "PENDING" } }),
+    );
+    // 500 − 110 = 390, written as a clamped absolute value.
+    expect(models.booking.update).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 390 },
+    });
+  });
+
+  it("clamps the amountPaid write-down at zero for pre-fix rows whose amountPaid sits below the credit", async () => {
+    // Historical SWAP-CREDIT rows committed under older semantics can leave
+    // amountPaid below the credit amount — the reconcile must land at 0,
+    // never negative. (reconcile-swap-money.ts never moves amountPaid for
+    // SWAP-CREDIT rows, so there is no double-heal to worry about.)
+    const { ctx, models } = makeReconcileCtx({ amountPaid: 50 });
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-CLAMP" }),
+    ).resolves.toMatchObject({ status: "SUCCEEDED" });
+    expect(models.booking.update).toHaveBeenCalledWith({
+      where: { id: "b1" },
+      data: { amountPaid: 0 },
+    });
+  });
+
+  it("a second (racing) reconcile call loses the status-guarded flip and decrements amountPaid exactly once", async () => {
+    const { ctx, models } = makeReconcileCtx();
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-1" }),
+    ).resolves.toMatchObject({ status: "SUCCEEDED" });
+    // Simulate the check-then-act race: the second call's pre-check read the
+    // row while it was still PENDING (before the first call's flip landed);
+    // only the status-guarded updateMany sees the committed SUCCEEDED state.
+    models.payment.findUniqueOrThrow.mockResolvedValueOnce({
+      id: "p-credit",
+      type: "MANUAL_CREDIT",
+      status: "PENDING",
+      bookingId: "b1",
+      amount: new Prisma.Decimal(110),
+      notes: "swap credit",
+    });
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p-credit", reference: "BT-2" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(models.booking.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects non-PENDING or non-MANUAL_CREDIT payments", async () => {
+    const models = {
+      payment: {
+        findUniqueOrThrow: vi.fn(async () => ({
+          id: "p1",
+          type: "REFUND",
+          status: "PENDING",
+          bookingId: "b1",
+          amount: new Prisma.Decimal(10),
+          notes: null,
+        })),
+        update: vi.fn(),
+      },
+      booking: { update: vi.fn() },
+      auditLog: { create: vi.fn(async () => null) },
+    };
+    const prisma = {
+      ...models,
+      $transaction: vi.fn(async (fn: (tx: typeof models) => unknown) => fn(models)),
+    };
+    const ctx = {
+      prisma,
+      user: { id: "mgr-1", role: "MANAGER" },
+      session: { user: { id: "mgr-1", role: "MANAGER" } },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      reqId: "r1",
+      _skipAudit: true,
+    };
+    const caller = bookingSwapRouter.createCaller(ctx as never);
+    await expect(
+      caller.reconcileCreditTransfer({ paymentId: "p1", reference: "BT-X" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(models.booking.update).not.toHaveBeenCalled();
   });
 });

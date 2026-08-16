@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
-import { createTRPCRouter, staffProcedure } from "../trpc";
+import { createTRPCRouter, managerProcedure, staffProcedure } from "../trpc";
 import {
   assertBookingDepotAccess,
   assertDepotAccess,
@@ -14,7 +14,12 @@ import {
   isBookingOverlapViolation,
   isVehicleFree,
 } from "@/server/services/availability";
-import { quoteExtension } from "@/server/services/pricing";
+import {
+  quote as quotePricing,
+  quoteExtension,
+  MinimumRentalPeriodError,
+  OneWayDisallowedError,
+} from "@/server/services/pricing";
 import { calcEarlyReturnRefund } from "@/server/services/fees";
 import { checkEligibility } from "@/server/services/eligibility";
 import {
@@ -41,7 +46,7 @@ import {
 import { trackServer } from "@/lib/analytics";
 import { BOOKING_RULES, CANCELLATION_POLICY } from "@/lib/constants";
 import { getSettings, SETTING_DEFAULTS } from "@/lib/settings";
-import { gstFromInclusive } from "@/lib/money";
+import { aud, gstFromInclusive, roundCents } from "@/lib/money";
 import {
   recordBookingCompletion,
   recordAdditionalCharges,
@@ -50,6 +55,19 @@ import {
 import { markPartnerTransactionsPayable } from "@/server/services/partner";
 import { qualifyReferral } from "@/server/services/referral";
 import { autoCloseByTarget } from "@/server/services/staff-tasks";
+import {
+  applyExcessCap,
+  getBookingExcess,
+  getDamageLiabilityUsed,
+} from "@/server/services/excess";
+import {
+  previewLossTermination,
+  terminateBookingForLoss,
+} from "@/server/services/booking-termination";
+import {
+  previewCategoryAmendment,
+  applyCategoryAmendment,
+} from "@/server/services/booking-amend-category";
 
 // In-memory rate limiters for the staff resend actions. Module-scope Map —
 // survives across requests in a single Node process. For multi-instance
@@ -64,13 +82,73 @@ const resendConfirmationLastSent = new Map<string, number>();
 const DETAIL_CHILD_TAKE = 50;
 const resendInvoiceLastSent = new Map<string, number>();
 
+// Area 4 — counter / pre-pickup category change.
+const amendCategoryModeSchema = z.enum([
+  "CHARGE_DELTA",
+  "GOODWILL_FREE_UPGRADE",
+  "MANAGER_PRICE_OVERRIDE",
+]);
+const goodwillReasonSchema = z.enum([
+  "SERVICE_RECOVERY",
+  "FLEET_REASSIGNMENT",
+  "RETENTION",
+  "OTHER",
+]);
+export const amendCategoryInputSchema = z
+  .object({
+    bookingId: z.string(),
+    newCategoryId: z.string(),
+    mode: amendCategoryModeSchema,
+    /** MANAGER_PRICE_OVERRIDE only: custom delta (negative = refund). */
+    managerDelta: z.number().finite().optional(),
+    overrideReason: z.string().trim().min(3).max(500).optional(),
+    goodwillReason: goodwillReasonSchema.optional(),
+    goodwillNote: z.string().trim().min(3).max(500).optional(),
+  })
+  .superRefine((v, ctx) => {
+    const reject = (path: string, message: string) =>
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+    if (v.mode === "GOODWILL_FREE_UPGRADE") {
+      if (!v.goodwillReason) reject("goodwillReason", "A goodwill upgrade needs a reason.");
+      if (!v.goodwillNote) reject("goodwillNote", "A goodwill upgrade needs a short note.");
+      if (v.managerDelta !== undefined)
+        reject("managerDelta", "A goodwill upgrade is always free — no delta allowed.");
+      if (v.overrideReason !== undefined)
+        reject("overrideReason", "overrideReason only applies to MANAGER_PRICE_OVERRIDE.");
+    } else if (v.mode === "MANAGER_PRICE_OVERRIDE") {
+      if (v.managerDelta === undefined)
+        reject("managerDelta", "A price override needs the delta to charge (0 for no charge).");
+      if (!v.overrideReason) reject("overrideReason", "A price override needs a reason.");
+      if (v.goodwillReason !== undefined || v.goodwillNote !== undefined)
+        reject("goodwillReason", "Goodwill fields only apply to GOODWILL_FREE_UPGRADE.");
+    } else {
+      if (v.managerDelta !== undefined)
+        reject("managerDelta", "managerDelta only applies to MANAGER_PRICE_OVERRIDE.");
+      if (v.goodwillReason !== undefined || v.goodwillNote !== undefined)
+        reject("goodwillReason", "Goodwill fields only apply to GOODWILL_FREE_UPGRADE.");
+      if (v.overrideReason !== undefined)
+        reject("overrideReason", "overrideReason only applies to MANAGER_PRICE_OVERRIDE.");
+    }
+  });
+
 export const staffBookingRouter = createTRPCRouter({
-  checkoutPrereqs: staffProcedure.query(async () => {
-    const s = await getSettings(["booking.requireLicenceVerification"] as const);
+  checkoutPrereqs: staffProcedure.query(async ({ ctx }) => {
+    const s = await getSettings([
+      "booking.requireLicenceVerification",
+      "booking.checkoutOverridesRequireManager",
+    ] as const);
+    const overridesRequireManager =
+      s["booking.checkoutOverridesRequireManager"] ??
+      SETTING_DEFAULTS["booking.checkoutOverridesRequireManager"];
     return {
       requireLicenceVerification:
         s["booking.requireLicenceVerification"] ??
         SETTING_DEFAULTS["booking.requireLicenceVerification"],
+      overridesRequireManager,
+      // Whether THIS user may take the remainder/bond overrides at check-out.
+      canOverride:
+        !overridesRequireManager ||
+        ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role),
     };
   }),
 
@@ -216,6 +294,35 @@ export const staffBookingRouter = createTRPCRouter({
       if (!b) throw new TRPCError({ code: "NOT_FOUND" });
       assertDepotAccess(ctx.user, b.depotId);
       return b;
+    }),
+
+  /**
+   * Area 1 — the hire's insurance-excess position: the per-hire aggregate
+   * damage-liability cap, how much of it has been consumed (return damage
+   * lines, quote close-outs, incident charges — refunds net out), and any
+   * incidents whose excess a manager has voided. Powers the cap banners on
+   * the check-in assess page and the incident detail page.
+   */
+  excessSummary: staffProcedure
+    .input(z.object({ bookingId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const [bookingExcess, used, voidedIncidents] = await Promise.all([
+        getBookingExcess(ctx.prisma, input.bookingId),
+        getDamageLiabilityUsed(ctx.prisma, input.bookingId),
+        ctx.prisma.incident.findMany({
+          where: { bookingId: input.bookingId, excessVoided: true, deletedAt: null },
+          select: { id: true, incidentNumber: true, excessVoidReason: true },
+        }),
+      ]);
+      return {
+        excess: bookingExcess.excess,
+        used,
+        remaining: Math.max(0, Math.round((bookingExcess.excess - used) * 100) / 100),
+        tierName: bookingExcess.tierName,
+        source: bookingExcess.source,
+        voidedIncidents,
+      };
     }),
 
   /**
@@ -605,8 +712,15 @@ export const staffBookingRouter = createTRPCRouter({
         });
       }
       const newPaid = Number(b.amountPaid) + input.amount;
-      const newBalance = Math.max(0, Number(b.totalAmount) - newPaid);
-      const fullyPaid = newBalance <= 0.009;
+      // Pure decrement (balance-due contract): PENDING raises (late fees,
+      // damage, manual charges) increment balanceDue without touching
+      // totalAmount, so recomputing from totalAmount − paid silently erased
+      // them. The status flip still keys on the original rental total.
+      const newBalance = Math.max(
+        0,
+        roundCents(aud(b.balanceDue).minus(input.amount)).toNumber(),
+      );
+      const fullyPaid = Number(b.totalAmount) - newPaid <= 0.009;
       const nextStatus = fullyPaid
         ? "CONFIRMED"
         : b.status === "QUOTE"
@@ -1178,6 +1292,155 @@ export const staffBookingRouter = createTRPCRouter({
       };
     }),
 
+  // Mid-hire loss termination (Area 2). Preview is staff-visible (quote
+  // only — never mutates); the terminate mutation is manager-gated. The UI
+  // pre-selects refundMode by cause (REFUND for company-side loss, FORFEIT
+  // for STOLEN) but the manager's explicit choice is what's honoured.
+  previewLossTermination: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        lossAt: z.coerce.date().optional(),
+        refundMode: z.enum(["REFUND", "CREDIT", "FORFEIT"]),
+        waiveAccruedLateFees: z.boolean().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return previewLossTermination(ctx.prisma, input);
+    }),
+
+  terminateForLoss: managerProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        cause: z.enum(["WRITTEN_OFF", "STOLEN", "DESTROYED", "OTHER"]),
+        lossAt: z.coerce.date().optional(),
+        refundMode: z.enum(["REFUND", "CREDIT", "FORFEIT"]),
+        waiveAccruedLateFees: z.boolean().optional(),
+        incidentId: z.string().optional(),
+        bondDisposition: z.enum(["RELEASED", "HELD_FOR_CLAIM", "CAPTURED_VIA_INCIDENT"]),
+        notes: z.string().max(2000).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      // The service returns a narrow serialisable summary (not the raw
+      // $transaction result) — the known tRPC $transaction return-type
+      // gotcha never gets a chance to bite.
+      const result = await terminateBookingForLoss(ctx.prisma, {
+        bookingId: input.bookingId,
+        cause: input.cause,
+        lossAt: input.lossAt,
+        refundMode: input.refundMode,
+        waiveAccruedLateFees: input.waiveAccruedLateFees,
+        incidentId: input.incidentId ?? null,
+        bondDisposition: input.bondDisposition,
+        notes: input.notes ?? null,
+        actorId: ctx.user.id,
+      });
+      await writeAudit(ctx.prisma, {
+        userId: ctx.user.id,
+        action: "BOOKING_TERMINATED_FOR_LOSS",
+        entity: "Booking",
+        entityId: input.bookingId,
+        newData: {
+          cause: input.cause,
+          lossAt: (input.lossAt ?? new Date()).toISOString(),
+          refundMode: input.refundMode,
+          waiveAccruedLateFees: input.waiveAccruedLateFees ?? false,
+          incidentId: input.incidentId ?? null,
+          bondDisposition: input.bondDisposition,
+          notes: input.notes ?? null,
+          terminationId: result.terminationId,
+          unusedDays: result.unusedDays,
+          refundAmount: result.refundAmount,
+          writedownAmount: result.writedownAmount,
+          waivedLateFeeAmount: result.waivedLateFeeAmount,
+          cancelledLateFees: result.cancelledLateFees,
+          bondReleasedAmount: result.bondReleasedAmount,
+          creditGiftCardId: result.creditGiftCardId,
+          cardRefundOutcome: result.cardRefundOutcome,
+        },
+      });
+      writeCustomerAuditAsync(ctx.prisma, result.customerId, {
+        userId: ctx.user.id,
+        action: "BOOKING_TERMINATED_FOR_LOSS",
+        reqId: ctx.reqId,
+        newData: {
+          bookingId: input.bookingId,
+          reference: result.bookingReference,
+          cause: input.cause,
+          refundMode: input.refundMode,
+          refundAmount: result.refundAmount,
+        },
+      });
+      return result;
+    }),
+
+  /**
+   * Area 4: read-only preview of a counter / pre-pickup category change.
+   * Returns the quoted delta, eligibility verdict against the new category
+   * and an advisory availability count — the dialog renders these before
+   * Confirm. Quote-only: never mutates, never audits.
+   */
+  amendCategoryPreview: staffProcedure
+    .input(
+      z.object({
+        bookingId: z.string(),
+        newCategoryId: z.string(),
+        mode: amendCategoryModeSchema.default("CHARGE_DELTA"),
+        managerDelta: z.number().finite().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      return previewCategoryAmendment(ctx.prisma, input);
+    }),
+
+  /**
+   * Area 4: commit a counter / pre-pickup category change. Role gates mirror
+   * booking-swap's: staff may execute CHARGE_DELTA upgrades (delta >= 0);
+   * a downgrade refund, a goodwill free upgrade and a manager price override
+   * all require MANAGER+. The service re-enforces the downgrade gate via
+   * `allowNegativeDelta` so a delta sign-flip between the gate preview and
+   * the commit can never let staff execute a refund.
+   */
+  amendCategory: staffProcedure
+    .input(amendCategoryInputSchema)
+    .mutation(async ({ ctx, input }) => {
+      skipAutoAudit(ctx);
+      await assertBookingDepotAccess(ctx, input.bookingId);
+      const isManager = ["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role);
+      if (input.mode !== "CHARGE_DELTA" && !isManager) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message:
+            input.mode === "GOODWILL_FREE_UPGRADE"
+              ? "A goodwill free upgrade requires a manager."
+              : "A price override requires a manager.",
+        });
+      }
+      if (input.mode === "CHARGE_DELTA" && !isManager) {
+        const gate = await previewCategoryAmendment(ctx.prisma, input);
+        if (gate.delta < 0) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "A category downgrade refund requires a manager.",
+          });
+        }
+      }
+      // The service returns a narrow serialisable summary and writes its own
+      // audit rows (BOOKING_CATEGORY_AMENDED / BOOKING_GOODWILL_UPGRADE).
+      return applyCategoryAmendment(ctx.prisma, {
+        ...input,
+        actorId: ctx.user.id,
+        allowNegativeDelta: isManager,
+        reqId: ctx.reqId,
+      });
+    }),
+
   // Live quote for the staff extend-booking flow. Runs the same
   // availability + pricing branches as the `booking.extend` mutation but
   // stops before any write — so the UI can show the exact extra cost and
@@ -1703,6 +1966,47 @@ export const staffBookingRouter = createTRPCRouter({
           message: `Cannot check out from status ${b.status}`,
         });
       }
+      // Remainder/bond overrides hand a vehicle over with money outstanding —
+      // manager territory unless ops relax the setting.
+      if (input.remainderOverride || input.bondOverride) {
+        const s = await getSettings([
+          "booking.checkoutOverridesRequireManager",
+        ] as const);
+        const requireManager =
+          s["booking.checkoutOverridesRequireManager"] ??
+          SETTING_DEFAULTS["booking.checkoutOverridesRequireManager"];
+        if (
+          requireManager &&
+          !["MANAGER", "ADMIN", "SUPER_ADMIN"].includes(ctx.user.role)
+        ) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message:
+              "Overriding a failed pickup payment or bond hold requires a manager. Ask a manager to complete this handover.",
+          });
+        }
+      }
+      // An unpaid online booking must go through confirmBookingPayment —
+      // checking out against an uncaptured deposit PI risks a double charge
+      // when the webhook / TTL rescue later confirms it. Offline bookings
+      // (walk-in / phone) with no PI legitimately pay at the counter, and
+      // that exception path is audited.
+      if (b.status === "PENDING_PAYMENT") {
+        if (b.stripePaymentIntentId != null || b.source === "WEBSITE") {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message:
+              "This booking has an unpaid online payment. Complete the payment (or wait for it to confirm) before check-out.",
+          });
+        }
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "BOOKING_CHECKOUT_FROM_PENDING_PAYMENT",
+          entity: "Booking",
+          entityId: b.id,
+          newData: { source: b.source, balanceDueAud: Number(b.balanceDue) },
+        });
+      }
       const requireLicence = await (async () => {
         const s = await getSettings(["booking.requireLicenceVerification"] as const);
         return (
@@ -1843,12 +2147,16 @@ export const staffBookingRouter = createTRPCRouter({
               : remainderResult.outcome === "requires_action"
                 ? "The card requires authentication"
                 : `Card declined (${remainderResult.errorCode ?? "error"})`;
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message:
+          // Typed failure instead of a thrown string: the confirm page
+          // branches on failedStep to target its override panel.
+          return {
+            ok: false as const,
+            failedStep: "remainder" as const,
+            detail:
               `${detail} — A$${remainderResult.amount.toFixed(2)} balance is still due. ` +
               "Take payment at the terminal (Record payment) and retry, or override with a reason to collect later.",
-          });
+            amountAud: remainderResult.amount,
+          };
         }
         await writeAudit(ctx.prisma, {
           userId: ctx.user.id,
@@ -1880,10 +2188,12 @@ export const staffBookingRouter = createTRPCRouter({
               : bondResult.action === "requires_action"
                 ? "The bond hold needs the customer to authenticate the card"
                 : `Bond hold failed (${("errorCode" in bondResult && bondResult.errorCode) || "card declined"})`;
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message: `${detail}. Resolve the card with the customer and retry, or override with a reason to hand over without bond security.`,
-          });
+          return {
+            ok: false as const,
+            failedStep: "bond" as const,
+            detail: `${detail}. Resolve the card with the customer and retry, or override with a reason to hand over without bond security.`,
+            amountAud: Number(b.bondAmount),
+          };
         }
         await writeAudit(ctx.prisma, {
           userId: ctx.user.id,
@@ -1907,6 +2217,43 @@ export const staffBookingRouter = createTRPCRouter({
       let updated, assignedVehicleId: string;
       try {
         const result = await ctx.prisma.$transaction(async (tx) => {
+          // Staff-supplied vehicle switch: mirror assignVehicle's guards so a
+          // stale UI pick (or raw API call) can't hand over a cross-category /
+          // cross-depot / already-committed vehicle.
+          if (input.vehicleId && input.vehicleId !== b.vehicleId) {
+            const v = await tx.vehicle.findUnique({
+              where: { id: input.vehicleId },
+            });
+            if (!v) {
+              throw new TRPCError({
+                code: "NOT_FOUND",
+                message: "Vehicle not found.",
+              });
+            }
+            if (v.categoryId !== b.categoryId) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Vehicle category does not match the booking.",
+              });
+            }
+            if (v.depotId !== b.pickupDepotId) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Vehicle is not at the booking's pickup depot.",
+              });
+            }
+            const free = await isVehicleFree(tx, {
+              vehicleId: v.id,
+              pickup: new Date(Math.max(b.pickupDateTime.getTime(), Date.now())),
+              ret: b.returnDateTime,
+            });
+            if (!free) {
+              throw new TRPCError({
+                code: "CONFLICT",
+                message: `Vehicle ${v.internalCode} has a conflicting booking or maintenance window.`,
+              });
+            }
+          }
           let vehicleId = input.vehicleId ?? b.vehicleId;
           if (!vehicleId) {
             await acquireAllocationLock(tx, b.pickupDepotId, b.categoryId);
@@ -2139,6 +2486,7 @@ export const staffBookingRouter = createTRPCRouter({
       }
 
       return {
+        ok: true as const,
         ...updated,
         eligibilityBasis,
         eligibilityWarnings,
@@ -2349,7 +2697,43 @@ export const staffBookingRouter = createTRPCRouter({
         ? 0
         : Math.round(missingL * (input.fuelChargePerLitre ?? fuelPerLitre) * 100) / 100;
 
-      const damageChargeAmount = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
+      // Excess cap (per-hire aggregate) — mirror of return.finalise: the
+      // customer's insurance excess is the ceiling on TOTAL damage recovery
+      // for the hire (return-assessment lines, quote close-outs and incident
+      // charges all draw on it). This legacy settle path used to raise the
+      // raw figure uncapped. Late / fuel / cleaning fees sit OUTSIDE the cap.
+      const preCapDamage = input.returnAssessmentId ? assessmentDamageTotal : input.damageChargeAmount;
+      let damageChargeAmount = preCapDamage;
+      let damageExcessCapAudit: {
+        excess: number;
+        excessSource: string;
+        tierName: string | null;
+        usedBefore: number;
+        preCapAmount: number;
+        charged: number;
+        cappedBy: number;
+      } | null = null;
+      if (preCapDamage > 0) {
+        const hireExcess = await getBookingExcess(ctx.prisma, b.id);
+        const excessUsed = await getDamageLiabilityUsed(ctx.prisma, b.id);
+        const capped = applyExcessCap({
+          proposed: preCapDamage,
+          used: excessUsed,
+          excess: hireExcess.excess,
+        });
+        damageChargeAmount = capped.chargeable;
+        if (capped.cappedBy > 0) {
+          damageExcessCapAudit = {
+            excess: hireExcess.excess,
+            excessSource: hireExcess.source,
+            tierName: hireExcess.tierName,
+            usedBefore: excessUsed,
+            preCapAmount: preCapDamage,
+            charged: capped.chargeable,
+            cappedBy: capped.cappedBy,
+          };
+        }
+      }
 
       // Split damage funding between the bond hold and the card on file. A
       // Stripe manual-capture hold is single-capture: capture up to the held
@@ -2607,6 +2991,21 @@ export const staffBookingRouter = createTRPCRouter({
         await invalidateRevenueCaches(b.depotId);
       }
 
+      // Cap audit trail — same EXCESS_CAP_APPLIED action return.finalise
+      // writes, so capped recoveries are auditable regardless of which
+      // settle path raised them.
+      if (damageExcessCapAudit) {
+        await writeAudit(ctx.prisma, {
+          userId: ctx.user.id,
+          action: "EXCESS_CAP_APPLIED",
+          entity: "Booking",
+          entityId: b.id,
+          newData: {
+            bookingId: b.id,
+            ...damageExcessCapAudit,
+          },
+        });
+      }
       await writeAudit(ctx.prisma, {
         userId: ctx.user.id,
         action: "BOOKING_CHECKED_IN",
@@ -2884,10 +3283,11 @@ export const staffBookingRouter = createTRPCRouter({
         returnDepotId: z.string(),
         pickupDateTime: z.coerce.date(),
         returnDateTime: z.coerce.date(),
-        totalAmount: z.number(),
-        subtotal: z.number(),
-        gstAmount: z.number(),
-        bondAmount: z.number(),
+        /** The total the sheet displayed (an echo of the server quote it
+         *  fetched). More than 1c of drift against the fresh server price
+         *  rejects CONFLICT so a stale sheet can't silently charge a
+         *  different amount. Money itself is always server-priced. */
+        expectedTotalAmount: z.number().optional(),
         method: z.enum(["CARD", "CASH"]),
       }),
     )
@@ -2920,13 +3320,38 @@ export const staffBookingRouter = createTRPCRouter({
         pickupDateTime: input.pickupDateTime,
         returnDateTime: input.returnDateTime,
       });
-      const durationDays = Math.max(
-        1,
-        Math.ceil(
-          (input.returnDateTime.getTime() - input.pickupDateTime.getTime()) /
-            86400000,
-        ),
-      );
+      // Server-side price: the sheet used to send its own subtotal/GST/total
+      // which were persisted verbatim. The counter price now runs through the
+      // same cascade as every other booking (tiers, seasons, vehicle
+      // overrides, one-way fees) and is snapshotted like booking.create.
+      let pricing;
+      try {
+        pricing = await quotePricing(ctx.prisma, {
+          categoryId: input.categoryId,
+          vehicleId: input.vehicleId,
+          pickupDateTime: input.pickupDateTime,
+          returnDateTime: input.returnDateTime,
+          pickupDepotId: input.pickupDepotId,
+          returnDepotId: input.returnDepotId,
+        });
+      } catch (err) {
+        if (
+          err instanceof OneWayDisallowedError ||
+          err instanceof MinimumRentalPeriodError
+        ) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+        }
+        throw err;
+      }
+      if (
+        input.expectedTotalAmount !== undefined &&
+        Math.abs(pricing.totalAmount - input.expectedTotalAmount) > 0.01
+      ) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `The price has changed: the current total is A$${pricing.totalAmount.toFixed(2)} (the sheet showed A$${input.expectedTotalAmount.toFixed(2)}). Review the new total with the customer and retry.`,
+        });
+      }
       const reference = `SCT-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, "0")}${String(new Date().getDate()).padStart(2, "0")}-${Math.floor(1000 + Math.random() * 9000)}`;
       const booking = await ctx.prisma.booking.create({
         data: {
@@ -2939,13 +3364,15 @@ export const staffBookingRouter = createTRPCRouter({
           returnDepotId: input.returnDepotId,
           pickupDateTime: input.pickupDateTime,
           returnDateTime: input.returnDateTime,
-          durationDays,
-          subtotal: input.subtotal,
-          totalAmount: input.totalAmount,
-          gstAmount: input.gstAmount,
-          bondAmount: input.bondAmount,
-          amountPaid: input.totalAmount,
+          durationDays: pricing.durationDays,
+          subtotal: pricing.baseSubtotal,
+          discountAmount: pricing.discountAmount,
+          totalAmount: pricing.totalAmount,
+          gstAmount: pricing.gstAmount,
+          bondAmount: pricing.bondAmount,
+          amountPaid: pricing.totalAmount,
           balanceDue: 0,
+          pricingSnapshot: JSON.parse(JSON.stringify(pricing)),
           status: "CONFIRMED",
           source: "WALK_IN",
           agreedToTerms: true,
@@ -2960,8 +3387,8 @@ export const staffBookingRouter = createTRPCRouter({
               customerId: input.customerId,
               type: "BOOKING_PAYMENT",
               method: input.method,
-              amount: input.totalAmount,
-              gstAmount: input.gstAmount,
+              amount: pricing.totalAmount,
+              gstAmount: pricing.gstAmount,
               status: "SUCCEEDED",
               processedById: ctx.user.id,
               processedAt: new Date(),
@@ -2985,7 +3412,7 @@ export const staffBookingRouter = createTRPCRouter({
       return {
         ...booking,
         // The sheet chains into the card + bond-hold step when true.
-        bondRequired: walkInBondEnabled && Number(input.bondAmount) > 0,
+        bondRequired: walkInBondEnabled && pricing.bondAmount > 0,
       };
     }),
 
